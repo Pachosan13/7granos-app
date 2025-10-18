@@ -1,5 +1,5 @@
-import { useState, useRef } from 'react';
-import { Upload, FileText, AlertCircle, CheckCircle, Calendar, Clock, Users } from 'lucide-react';
+import { useState, useRef, useMemo } from 'react';
+import { Upload, FileText, AlertCircle, CheckCircle, Clock, Users, CloudDownload, Loader2 } from 'lucide-react';
 import { useAuthOrg } from '../../context/AuthOrgContext';
 import { parseCSV } from '../../lib/csv/parse';
 import { saveUpload, logSync } from '../../lib/storage/saveUpload';
@@ -11,6 +11,9 @@ import {
 } from '../../lib/csv/marcacionesProcessor';
 import { InlineSucursalSelector } from '../../components/InlineSucursalSelector';
 import { Layout } from '../../components/Layout';
+import { MonthYearPicker } from '../../lib/ui/MonthYearPicker';
+import { fetchInvuMovementsViaProxy, flattenInvuMovements, FlattenedInvuMovement, InvuMovementType } from '../../services/invu';
+import { debugLog } from '../../utils/diagnostics';
 
 interface PeriodSelection {
   mes: number;
@@ -22,19 +25,187 @@ const MESES = [
   'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre'
 ];
 
+interface RemoteRange {
+  desde: string;
+  hasta: string;
+}
+
+type InvuBranch = 'sf' | 'cangrejo' | 'costa' | 'museo' | 'central';
+
+const BRANCH_OPTIONS: Array<{ value: InvuBranch; label: string }> = [
+  { value: 'sf', label: 'San Francisco' },
+  { value: 'cangrejo', label: 'El Cangrejo' },
+  { value: 'costa', label: 'Costa del Este' },
+  { value: 'museo', label: 'Museo del Canal' },
+  { value: 'central', label: 'Central' },
+];
+
+const getDefaultPeriod = (baseDate: Date = new Date()): PeriodSelection => ({
+  mes: baseDate.getMonth() + 1,
+  año: baseDate.getFullYear(),
+});
+
+const formatDateInput = (date: Date): string => {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+};
+
+const buildRangeForPeriod = (period: PeriodSelection): RemoteRange => {
+  const firstDay = new Date(period.año, period.mes - 1, 1);
+  const lastDay = new Date(period.año, period.mes, 0);
+  return {
+    desde: formatDateInput(firstDay),
+    hasta: formatDateInput(lastDay),
+  };
+};
+
+const getDefaultRemoteDate = (): Date => {
+  const date = new Date();
+  date.setUTCDate(date.getUTCDate() - 1);
+  return date;
+};
+
+const getDefaultRemoteRange = (): RemoteRange => {
+  const date = getDefaultRemoteDate();
+  const iso = `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, '0')}-${String(
+    date.getUTCDate()
+  ).padStart(2, '0')}`;
+  return { desde: iso, hasta: iso };
+};
+
+const parseDateParts = (value: string): { año: number; mes: number; dia: number } | null => {
+  if (!value) {
+    return null;
+  }
+  const [yearStr, monthStr, dayStr] = value.split('-');
+  const año = Number.parseInt(yearStr ?? '', 10);
+  const mes = Number.parseInt(monthStr ?? '', 10);
+  const dia = Number.parseInt(dayStr ?? '', 10);
+
+  if (!Number.isFinite(año) || !Number.isFinite(mes) || !Number.isFinite(dia)) {
+    return null;
+  }
+
+  return { año, mes, dia };
+};
+
+// Helpers de rango (usar "ayer" por defecto para probar data real sin inputs adicionales)
+const startOfDayLocal = (y: number, m: number, d: number) =>
+  Math.floor(new Date(`${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}T00:00:00-05:00`).getTime() / 1000);
+
+const endOfDayLocal = (y: number, m: number, d: number) => startOfDayLocal(y, m, d) + 86399;
+
 export const PlanillaPage = () => {
   const { sucursalSeleccionada } = useAuthOrg();
   const [file, setFile] = useState<File | null>(null);
   const [parseResult, setParseResult] = useState<any>(null);
   const [marcacionesResult, setMarcacionesResult] = useState<any>(null);
   const [csvType, setCsvType] = useState<'planilla' | 'marcaciones' | null>(null);
-  const [period, setPeriod] = useState<PeriodSelection>({
-    mes: new Date().getMonth() + 1,
-    año: new Date().getFullYear()
-  });
+  const [period, setPeriod] = useState<PeriodSelection>(getDefaultPeriod);
   const [isUploading, setIsUploading] = useState(false);
   const [dragActive, setDragActive] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const [remotePeriod, setRemotePeriod] = useState<PeriodSelection>(() => getDefaultPeriod(getDefaultRemoteDate()));
+  const [remoteRange, setRemoteRange] = useState<RemoteRange>(() => getDefaultRemoteRange());
+  const [remoteBranch, setRemoteBranch] = useState<InvuBranch>('sf');
+  const [remoteMovements, setRemoteMovements] = useState<FlattenedInvuMovement[]>([]);
+  const [remoteLoading, setRemoteLoading] = useState(false);
+  const [remoteError, setRemoteError] = useState<string | null>(null);
+  const [remoteFetchedRange, setRemoteFetchedRange] = useState<RemoteRange | null>(null);
+  const [remoteLastUpdated, setRemoteLastUpdated] = useState<string | null>(null);
+  const [remoteNotice, setRemoteNotice] = useState<string | null>(null);
+  const remoteTypeTotals = useMemo(
+    () =>
+      remoteMovements.reduce(
+        (acc, movement) => {
+          acc[movement.tipo] = (acc[movement.tipo] ?? 0) + 1;
+          return acc;
+        },
+        { clock_in: 0, clock_out: 0 } as Record<InvuMovementType, number>
+      ),
+    [remoteMovements]
+  );
+  const movementTypeLabels: Record<InvuMovementType, string> = {
+    clock_in: 'Entrada',
+    clock_out: 'Salida',
+  };
+  const remoteHasResults = remoteMovements.length > 0;
+  const formatMovementDate = (value: string) => {
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) {
+      return value;
+    }
+    return date.toLocaleString();
+  };
+
+  const handleRemotePeriodChange = (value: PeriodSelection) => {
+    setRemotePeriod(value);
+    setRemoteRange(buildRangeForPeriod(value));
+    setRemoteError(null);
+  };
+
+  const handleRemoteRangeChange = (field: keyof RemoteRange) => (value: string) => {
+    setRemoteRange(prev => ({ ...prev, [field]: value }));
+    setRemoteError(null);
+  };
+
+  const handleBranchChange = (value: InvuBranch) => {
+    setRemoteBranch(value);
+    setRemoteError(null);
+  };
+
+  async function handleLoadInvu() {
+    const fallbackRange = getDefaultRemoteRange();
+    const desde = remoteRange.desde || fallbackRange.desde;
+    const hasta = remoteRange.hasta || fallbackRange.hasta;
+
+    const inicio = parseDateParts(desde);
+    const fin = parseDateParts(hasta);
+
+    if (!inicio || !fin) {
+      setRemoteError('Rango de fechas inválido.');
+      return;
+    }
+
+    const fini = startOfDayLocal(inicio.año, inicio.mes, inicio.dia);
+    const ffin = endOfDayLocal(fin.año, fin.mes, fin.dia);
+
+    if (ffin < fini) {
+      setRemoteError('La fecha final debe ser posterior o igual a la inicial.');
+      return;
+    }
+
+    setRemoteLoading(true);
+    setRemoteError(null);
+    setRemoteNotice(null);
+
+    try {
+      const raw = await fetchInvuMovementsViaProxy({
+        branch: remoteBranch,
+        fini,
+        ffin,
+      });
+
+      const flattened = flattenInvuMovements(raw).sort(
+        (a, b) => new Date(a.fecha).getTime() - new Date(b.fecha).getTime()
+      );
+
+      setRemoteMovements(flattened);
+      setRemoteFetchedRange({ desde, hasta });
+      setRemoteLastUpdated(new Date().toISOString());
+      setRemoteNotice(flattened.length === 0 ? 'Sin marcaciones en el rango solicitado.' : null);
+    } catch (error) {
+      debugLog('Error obteniendo marcaciones INVU:', error);
+      setRemoteError(error instanceof Error ? error.message : 'Error desconocido al consultar INVU');
+      setRemoteMovements([]);
+      setRemoteFetchedRange(null);
+      setRemoteNotice(null);
+    } finally {
+      setRemoteLoading(false);
+    }
+  }
 
   // Drag & Drop handlers
   const handleDrag = (e: React.DragEvent) => {
@@ -103,7 +274,7 @@ export const PlanillaPage = () => {
         setParseResult(planillaResult);
       }
     } catch (error) {
-      console.error('Error parseando CSV:', error);
+      debugLog('Error parseando CSV:', error);
       alert(`Error parseando CSV: ${error instanceof Error ? error.message : 'Error desconocido'}`);
     }
   };
@@ -200,7 +371,7 @@ export const PlanillaPage = () => {
       }
 
     } catch (error) {
-      console.error('Error subiendo archivo:', error);
+      debugLog('Error subiendo archivo:', error);
       alert(`Error guardando archivo: ${error instanceof Error ? error.message : 'Error desconocido'}`);
     } finally {
       setIsUploading(false);
@@ -233,6 +404,193 @@ export const PlanillaPage = () => {
       {/* Sucursal Selector */}
       <div className="mb-8">
         <InlineSucursalSelector showLabel={true} />
+      </div>
+
+      {/* Consulta remota */}
+      <div className="bg-white rounded-2xl shadow-lg border border-sand p-8 mb-8 transition-all duration-200 hover:shadow-xl">
+        <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between mb-6">
+          <div>
+            <h2 className="text-2xl font-bold text-bean mb-1">Consulta remota (INVU)</h2>
+            <p className="text-slate7g">
+              Obtén marcaciones directamente desde INVU sin reemplazar la importación CSV existente.
+            </p>
+          </div>
+          {remoteLastUpdated && (
+            <div className="text-sm text-slate7g bg-off px-4 py-2 rounded-xl border border-sand/60">
+              Última consulta: {new Date(remoteLastUpdated).toLocaleString()}
+            </div>
+          )}
+        </div>
+
+        <div className="grid gap-6 lg:grid-cols-[1.1fr,0.9fr]">
+          <div className="space-y-6">
+            <div>
+              <label className="block text-sm font-semibold text-bean mb-3">Período de consulta</label>
+              <MonthYearPicker
+                value={remotePeriod}
+                onChange={handleRemotePeriodChange}
+                className="mb-4"
+              />
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-xs font-medium text-slate7g mb-2 uppercase">Desde</label>
+                  <input
+                    type="date"
+                    value={remoteRange.desde}
+                    onChange={(e) => handleRemoteRangeChange('desde')(e.target.value)}
+                    className="w-full px-4 py-3 border border-sand rounded-xl focus:ring-2 focus:ring-accent focus:border-transparent transition-all duration-200"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-slate7g mb-2 uppercase">Hasta</label>
+                  <input
+                    type="date"
+                    value={remoteRange.hasta}
+                    onChange={(e) => handleRemoteRangeChange('hasta')(e.target.value)}
+                    className="w-full px-4 py-3 border border-sand rounded-xl focus:ring-2 focus:ring-accent focus:border-transparent transition-all duration-200"
+                  />
+                </div>
+              </div>
+            </div>
+
+            <div>
+              <label className="block text-sm font-semibold text-bean mb-3">Sucursal INVU (proxy)</label>
+              <select
+                value={remoteBranch}
+                onChange={(e) => handleBranchChange(e.target.value as InvuBranch)}
+                className="w-full px-4 py-3 border border-sand rounded-xl focus:ring-2 focus:ring-accent focus:border-transparent transition-all duration-200"
+              >
+                {BRANCH_OPTIONS.map(option => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+              <p className="text-xs text-slate7g mt-2">
+                Las consultas viajan por la Edge Function <code>invu-attendance-proxy</code>, sin exponer tokens en el navegador.
+              </p>
+            </div>
+          </div>
+
+          <div className="flex flex-col">
+            <div className="flex-1 rounded-2xl border border-dashed border-sand p-6 bg-off/40">
+              <div className="flex items-center justify-between mb-4">
+                <span className="text-sm font-semibold text-bean uppercase tracking-wide">Resumen rápido</span>
+                <Clock className="h-5 w-5 text-slate7g" />
+              </div>
+              <div className="grid grid-cols-2 gap-4 text-center">
+                <div className="p-3 bg-white rounded-xl border border-sand">
+                  <div className="text-2xl font-bold text-bean">{remoteHasResults ? remoteMovements.length : '-'}</div>
+                  <div className="text-xs uppercase tracking-wide text-slate7g">Movimientos</div>
+                </div>
+                <div className="p-3 bg-white rounded-xl border border-sand">
+                  <div className="text-2xl font-bold text-bean">
+                    {remoteHasResults ? remoteTypeTotals.clock_in : '-'}
+                  </div>
+                  <div className="text-xs uppercase tracking-wide text-slate7g">Entradas</div>
+                </div>
+                <div className="p-3 bg-white rounded-xl border border-sand">
+                  <div className="text-2xl font-bold text-bean">
+                    {remoteHasResults ? remoteTypeTotals.clock_out : '-'}
+                  </div>
+                  <div className="text-xs uppercase tracking-wide text-slate7g">Salidas</div>
+                </div>
+                <div className="p-3 bg-white rounded-xl border border-sand">
+                  <div className="text-sm font-semibold text-bean">
+                    {(remoteFetchedRange ?? remoteRange).desde} → {(remoteFetchedRange ?? remoteRange).hasta}
+                  </div>
+                  <div className="text-xs uppercase tracking-wide text-slate7g">Rango</div>
+                </div>
+              </div>
+              <div className="mt-4 text-xs text-slate7g text-center">
+                <span className="font-semibold text-bean">Sucursal</span>{' '}
+                {BRANCH_OPTIONS.find(option => option.value === remoteBranch)?.label || remoteBranch.toUpperCase()}
+              </div>
+            </div>
+
+            <div className="mt-6 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+              {remoteError && (
+                <div className="flex items-start space-x-2 text-sm text-red-600 bg-red-50 border border-red-200 rounded-xl px-4 py-3">
+                  <AlertCircle className="h-5 w-5 flex-shrink-0 mt-0.5" />
+                  <span>{remoteError}</span>
+                </div>
+              )}
+              <div className="flex-1 sm:flex sm:justify-end">
+                <button
+                  onClick={handleLoadInvu}
+                  disabled={remoteLoading}
+                  className={`w-full sm:w-auto inline-flex items-center justify-center space-x-2 px-6 py-3 font-semibold rounded-2xl transition-all duration-200 focus:outline-none focus:ring-4 focus:ring-offset-2 ${
+                    remoteLoading
+                      ? 'bg-gray-300 text-gray-500 cursor-not-allowed'
+                      : 'bg-purple-600 text-white hover:bg-purple-700 hover:scale-105 focus:ring-purple-500'
+                  }`}
+                >
+                  {remoteLoading ? (
+                    <Loader2 className="h-5 w-5 animate-spin" />
+                  ) : (
+                    <CloudDownload className="h-5 w-5" />
+                  )}
+                  <span>{remoteLoading ? 'Consultando...' : 'Cargar marcaciones INVU'}</span>
+                </button>
+              </div>
+            </div>
+
+            {remoteHasResults ? (
+              <div className="mt-6">
+                <div className="overflow-x-auto rounded-2xl border border-sand">
+                  <table className="min-w-full text-sm">
+                    <thead>
+                      <tr className="bg-slate7g text-white">
+                        <th className="px-4 py-3 text-left font-semibold">Fecha y hora</th>
+                        <th className="px-4 py-3 text-left font-semibold">Empleado</th>
+                        <th className="px-4 py-3 text-left font-semibold">Tipo</th>
+                        <th className="px-4 py-3 text-left font-semibold">Movimiento</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {remoteMovements.map((movement) => (
+                        <tr key={`${movement.id_movimiento}-${movement.fecha}-${movement.id_empleado}`}>
+                          <td className="px-4 py-3 border-t border-sand">
+                            {formatMovementDate(movement.fecha)}
+                          </td>
+                          <td className="px-4 py-3 border-t border-sand font-medium text-bean">
+                            {movement.id_empleado}
+                          </td>
+                          <td className="px-4 py-3 border-t border-sand">
+                            <span
+                              className={`inline-flex items-center rounded-full px-3 py-1 text-xs font-semibold ${
+                                movement.tipo === 'clock_in'
+                                  ? 'bg-green-100 text-green-700'
+                                  : 'bg-orange-100 text-orange-700'
+                              }`}
+                            >
+                              {movementTypeLabels[movement.tipo]}
+                            </span>
+                          </td>
+                          <td className="px-4 py-3 border-t border-sand text-slate7g">
+                            {movement.id_movimiento}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                <p className="text-xs text-slate7g mt-3">
+                  Vista previa de movimientos remotos. Aún no se guardan en Supabase.
+                </p>
+                {/* TODO(Attendance): Guardar movimientos en Supabase reutilizando saveUpload o un servicio dedicado.
+                    Shape esperado: { id_movimiento, id_empleado, fecha, tipo } */}
+              </div>
+            ) : (
+              !remoteLoading &&
+              !remoteError && (
+                <p className="mt-6 text-sm text-slate7g">
+                  {remoteNotice ?? 'No hay movimientos consultados todavía. Define un rango y ejecuta la consulta para ver resultados.'}
+                </p>
+              )
+            )}
+          </div>
+        </div>
       </div>
 
       {/* Card principal */}

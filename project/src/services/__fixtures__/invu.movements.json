@@ -1,0 +1,34 @@
+{
+  "empleados": [
+    {
+      "id_empleado": "123",
+      "nombre": "Juan Perez",
+      "movimientos": [
+        {
+          "id_movimiento": "m-001",
+          "id_empleado": "123",
+          "fecha": 1758403200,
+          "tipo": 1
+        },
+        {
+          "id_movimiento": "m-002",
+          "id_empleado": "123",
+          "fecha": 1758406800,
+          "tipo": 2
+        }
+      ]
+    },
+    {
+      "id_empleado": "456",
+      "nombre": "Maria Lopez",
+      "movimientos": [
+        {
+          "id_movimiento": "m-003",
+          "id_empleado": "456",
+          "fecha": "2025-01-01T13:30:00-05:00",
+          "tipo": "1"
+        }
+      ]
+    }
+  ]
+}
