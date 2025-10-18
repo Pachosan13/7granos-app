@@ -16,14 +16,6 @@ export const getFunctionsBase = (): string => {
   return supabaseUrl ? `${supabaseUrl.replace(/\/$/, '')}/functions/v1` : '';
 };
 
-export const rest = async (url: string, anonKey: string, init: RequestInit = {}) => {
-  const headers = new Headers(init.headers || undefined);
-  if (!headers.has('apikey')) headers.set('apikey', anonKey);
-  if (!headers.has('Authorization')) headers.set('Authorization', `Bearer ${anonKey}`);
-  if (!headers.has('Accept')) headers.set('Accept', 'application/json');
-  return fetch(url, { ...init, headers });
-};
-
 export const logEnv = () => {
   if (!isDebug()) return;
   const info = {
@@ -44,7 +36,7 @@ export const tzPanamaEpoch = (year: number, month: number, day: number, endOfDay
   return Math.floor(new Date(iso).getTime() / 1000);
 };
 
-export const yesterdayUTC5Range = () => {
+export const yesterdayRange = () => {
   const now = new Date();
   const panama = new Date(now.toLocaleString('en-US', { timeZone: 'America/Panama' }));
   panama.setDate(panama.getDate() - 1);
@@ -59,8 +51,6 @@ export const yesterdayUTC5Range = () => {
   return { año, mes, dia, desde, hasta: desde, fini, ffin };
 };
 
-export const yesterdayRange = yesterdayUTC5Range;
-
 export const formatFunctionsHost = () => {
   const base = getFunctionsBase();
   try {
@@ -73,7 +63,7 @@ export const formatFunctionsHost = () => {
 export const getProxyUrlForYesterday = () => {
   const base = getFunctionsBase();
   if (!base) return '';
-  const { fini, ffin } = yesterdayUTC5Range();
+  const { fini, ffin } = yesterdayRange();
   return `${base}${FUNCTIONS_SUFFIX}?branch=sf&fini=${fini}&ffin=${ffin}`;
 };
 
@@ -83,3 +73,4 @@ export const debugLog = (...args: unknown[]) => {
     console.log('[debug]', ...args);
   }
 };
+

@@ -1,19 +1,9 @@
 // src/pages/VentasPage.tsx
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { RefreshCw, TrendingUp, DollarSign, Receipt, Building2, Calendar, X } from 'lucide-react';
-import {
-  ResponsiveContainer,
-  ComposedChart,
-  Area,
-  CartesianGrid,
-  XAxis,
-  YAxis,
-  Tooltip,
-  Bar,
-} from 'recharts';
 import { supabase } from '../lib/supabase';
 import { useAuthOrg } from '../context/AuthOrgContext';
-import { formatCurrencyUSD, formatDateDDMMYYYY } from '../lib/format';
+import { formatCurrencyUSD } from '../lib/format';
 import { KPICard } from '../components/KPICard';
 import { RealtimeStatusIndicator } from '../components/RealtimeStatusIndicator';
 import { useRealtimeVentas } from '../hooks/useRealtimeVentas';
@@ -74,7 +64,6 @@ export function VentasPage() {
   const [totalITBMS, setTotalITBMS] = useState(0);
 
   const [rows, setRows] = useState<SucursalRow[]>([]);
-  const [seriesData, setSeriesData] = useState<any[]>([]);
 
   // Banner (se usa para "sync ok" o para "aviso de datos faltantes")
   const [syncBanner, setSyncBanner] = useState<{
@@ -105,145 +94,96 @@ export function VentasPage() {
   const loadData = useCallback(async () => {
     setLoading(true);
     try {
-      const ids = viewingAll
-        ? getFilteredSucursalIds().map(String)
-        : (selectedSucursalId ? [String(selectedSucursalId)] : []);
+      let ventasQuery = supabase
+        .from('invu_ventas')
+        .select('fecha, total, itbms, sucursal_id')
+        .gte('fecha', desde)
+        .lte('fecha', hasta);
 
-      let seriesQuery = supabase
-        .from('v_ui_series_14d')
-        .select('*')
-        .gte('dia', desde)
-        .lte('dia', hasta)
-        .order('dia', { ascending: true });
+      // IDs como string siempre
+      const ids: string[] = (viewingAll ? getFilteredSucursalIds() : [selectedSucursalId!])
+        .filter(Boolean)
+        .map(String);
 
+      // Si NO es “todas”, filtramos por .in(); si es “todas”, no usamos .in()
       if (!viewingAll && ids.length > 0) {
-        seriesQuery = seriesQuery.eq('sucursal_id', ids[0]);
-      } else if (viewingAll && ids.length > 0) {
-        seriesQuery = seriesQuery.in('sucursal_id', ids);
+        ventasQuery = ventasQuery.in('sucursal_id', ids);
       }
 
-      const { data: rawSeries, error: seriesError } = await seriesQuery;
-      if (seriesError) throw seriesError;
+      const { data: ventasRows, error } = await ventasQuery;
+      if (error) throw error;
 
-      const normalizedSeries = (rawSeries ?? []).map((row: Record<string, any>) => {
-        const sucursalId = row.sucursal_id != null ? String(row.sucursal_id) : row.sucursal ?? null;
-        const nombre =
-          row.sucursal_nombre ??
-          row.nombre ??
-          (sucursalId ? `Sucursal ${sucursalId.slice(0, 6)}…` : 'Sin sucursal');
-        const ventas = Number(row.ventas_brutas ?? row.total_bruto ?? 0);
-        const margen = Number(row.margen ?? row.margen_bruto ?? 0);
-        const tickets = Number(row.tickets ?? row.transacciones ?? 0);
-        const lineas = Number(row.lineas ?? row.line_items ?? 0);
-        const cogs = Number(row.cogs ?? row.costo ?? 0);
-        const itbms = Number(row.itbms ?? row.total_impuestos ?? row.impuesto ?? 0);
+      const missingITBMS = (ventasRows ?? []).filter((r: any) => r.itbms == null).length;
 
-        return {
-          dia: row.dia,
-          fecha: formatDateDDMMYYYY(row.dia),
-          ventas,
-          margen,
-          tickets,
-          lineas,
-          cogs,
-          itbms,
-          sucursal_id: sucursalId,
-          sucursal_nombre: nombre,
-        };
+      // Totales KPI (contabilidad estricta: solo lo que viene de DB)
+      const sumTotal = (ventasRows ?? []).reduce((a, r: any) => a + Number(r.total || 0), 0);
+      const sumTrans = (ventasRows ?? []).length;
+      const sumITBMS = (ventasRows ?? [])
+        .filter((r: any) => r.itbms != null)
+        .reduce((a, r: any) => a + Number(r.itbms), 0);
+
+      setTotalVentas(sumTotal);
+      setTotalTransacciones(sumTrans);
+      setTotalITBMS(sumITBMS);
+
+      // Resumen por sucursal (RPC)
+      const { data: rpcData, error: rpcErr } = await supabase.rpc('api_resumen_ventas', {
+        p_desde: desde,
+        p_hasta: hasta,
       });
+      if (rpcErr) throw rpcErr;
 
-      const seriesByDayMap = new Map<
-        string,
-        { dia: string; fecha: string; ventas: number; margen: number; tickets: number }
-      >();
-      normalizedSeries.forEach(row => {
-        const entry =
-          seriesByDayMap.get(row.dia) ?? { dia: row.dia, fecha: row.fecha, ventas: 0, margen: 0, tickets: 0 };
-        entry.ventas += row.ventas;
-        entry.margen += row.margen;
-        entry.tickets += row.tickets;
-        seriesByDayMap.set(row.dia, entry);
-      });
-
-      const seriesForChart = Array.from(seriesByDayMap.values()).sort((a, b) =>
-        a.dia.localeCompare(b.dia)
-      );
-      setSeriesData(seriesForChart);
-
-      const sucursalMap = new Map<
-        string,
-        { nombre: string; ventas: number; transacciones: number }
-      >();
-      normalizedSeries.forEach(row => {
-        const key = row.sucursal_id ?? row.sucursal_nombre ?? 'sin-id';
-        const entry = sucursalMap.get(key) ?? { nombre: row.sucursal_nombre, ventas: 0, transacciones: 0 };
-        entry.ventas += row.ventas;
-        entry.transacciones += row.tickets;
-        sucursalMap.set(key, entry);
-      });
-
-      const rowsList: SucursalRow[] = Array.from(sucursalMap.values())
-        .map(entry => ({
-          nombre: entry.nombre,
-          ventas: entry.ventas,
-          transacciones: entry.transacciones,
-          ticketPromedio: entry.transacciones > 0 ? entry.ventas / entry.transacciones : 0,
-        }))
-        .sort((a, b) => b.ventas - a.ventas);
-
-      setRows(rowsList);
-
-      const totalsFromSeries = normalizedSeries.reduce(
-        (acc, row) => ({
-          ventas: acc.ventas + row.ventas,
-          tickets: acc.tickets + row.tickets,
-          itbms: acc.itbms + row.itbms,
-        }),
-        { ventas: 0, tickets: 0, itbms: 0 }
-      );
-
-      let totals = totalsFromSeries;
-
-      const incluyeHoy = desde <= hoy && hasta >= hoy;
-      if (incluyeHoy) {
-        const { data: kpisHoy, error: kpisError } = await supabase.from('v_ui_kpis_hoy').select('*');
-        if (!kpisError) {
-          const filteredKpis = viewingAll
-            ? kpisHoy ?? []
-            : (kpisHoy ?? []).filter(row => {
-                const rowId = row.sucursal_id != null ? String(row.sucursal_id) : row.sucursal;
-                return !selectedSucursalId || rowId === selectedSucursalId;
-              });
-
-          if (filteredKpis.length > 0) {
-            totals = filteredKpis.reduce(
-              (acc, row) => ({
-                ventas: acc.ventas + Number(row.ventas_brutas ?? row.total_bruto ?? 0),
-                tickets: acc.tickets + Number(row.tickets ?? row.transacciones ?? 0),
-                itbms: acc.itbms + Number(row.itbms ?? row.total_impuestos ?? 0),
-              }),
-              { ventas: 0, tickets: 0, itbms: 0 }
-            );
+      const list: SucursalRow[] = (rpcData || [])
+        .filter((r: any) => {
+          if (viewingAll) return true;
+          const rpcId = (r.sucursal_id != null) ? String(r.sucursal_id) : null;
+          if (rpcId) return rpcId === selectedSucursalId;
+          // Fallback por nombre si el RPC no trae sucursal_id
+          if (selectedSucursalName) {
+            return String(r.nombre ?? '').trim() === String(selectedSucursalName).trim();
           }
-        }
-      }
+          return true;
+        })
+        .map((r: any) => {
+          const ventas = Number(r.total || 0);
+          const trans = Number(r.num_transacciones || 0);
+          return {
+            nombre: String(r.nombre ?? 'N/D'),
+            ventas,
+            transacciones: trans,
+            ticketPromedio: trans > 0 ? ventas / trans : 0,
+          };
+        });
 
-      setTotalVentas(totals.ventas);
-      setTotalTransacciones(totals.tickets);
-      setTotalITBMS(totals.itbms);
+      setRows(list);
 
+      // Debug
       setDebugInfo({
         filtro: { desde, hasta, viewingAll, selectedSucursalId, selectedSucursalName, ids },
-        seriesCount: normalizedSeries.length,
-        seriesSample: normalizedSeries[0] ?? null,
-        totals,
+        ventasRowsCount: ventasRows?.length ?? 0,
+        sumTotal,
+        sumTrans,
+        sumITBMS,
+        missingITBMS,
+        rpcCount: (rpcData || []).length,
+        sampleVenta: ventasRows?.[0] ?? null,
+        sampleRPC: (rpcData || [])[0] ?? null,
       });
 
-      setSyncBanner(prev => (prev && prev.kind === 'warn' ? null : prev));
+      // Aviso si faltan impuestos (no inventamos valores)
+      if (missingITBMS > 0) {
+        setSyncBanner({
+          when: new Date().toISOString(),
+          visible: true,
+          stats: [{ name: 'Faltan ITBMS', orders: missingITBMS }],
+          kind: 'warn',
+        });
+      } else {
+        setSyncBanner((prev) => (prev && prev.kind === 'warn' ? null : prev));
+      }
     } catch (e) {
-      debugLog('[VentasPage] loadData error:', e);
+      debugLog('[VentasPage] loadData error', e);
       setRows([]);
-      setSeriesData([]);
       setTotalVentas(0);
       setTotalTransacciones(0);
       setTotalITBMS(0);
@@ -251,15 +191,7 @@ export function VentasPage() {
     } finally {
       setLoading(false);
     }
-  }, [
-    desde,
-    hasta,
-    viewingAll,
-    selectedSucursalId,
-    selectedSucursalName,
-    getFilteredSucursalIds,
-    hoy,
-  ]);
+  }, [desde, hasta, viewingAll, selectedSucursalId, selectedSucursalName, getFilteredSucursalIds]);
 
   // --------- Sync: Edge function PERSISTE y recarga DB ---------
   const handleSync = useCallback(async () => {
@@ -276,12 +208,9 @@ export function VentasPage() {
 
     setSyncing(true);
     try {
-      const hoySync = hoy;
-      const query = `?desde=${hoySync}&hasta=${hoySync}`;
       const endpoints = [
-        `${functionsBase}/sync-ventas-detalle${query}`,
-        `${functionsBase}/sync-ventas-v4${query}`,
-        `${functionsBase}/sync-ventas${query}`,
+        `${functionsBase}/sync-ventas-v4?desde=${desde}&hasta=${hasta}`,
+        `${functionsBase}/sync-ventas?desde=${desde}&hasta=${hasta}`,
       ];
 
       const invokeEndpoint = async (endpoint: string) => {
@@ -311,15 +240,9 @@ export function VentasPage() {
       for (const endpoint of endpoints) {
         try {
           const response = await invokeEndpoint(endpoint);
-          if (!response.ok && response.status === 404) {
-            if (endpoint.includes('sync-ventas-detalle')) {
-              debugLog('[VentasPage] sync-ventas-detalle no disponible, intentando compatibilidad');
-              continue;
-            }
-            if (endpoint.includes('sync-ventas-v4')) {
-              debugLog('[VentasPage] sync-ventas-v4 no disponible, probando sync-ventas');
-              continue;
-            }
+          if (!response.ok && response.status === 404 && endpoint.includes('sync-ventas-v4')) {
+            debugLog('[VentasPage] sync-ventas-v4 no disponible, probando sync-ventas');
+            continue;
           }
           resp = response;
           break;
@@ -600,68 +523,6 @@ export function VentasPage() {
             color="bg-gradient-to-br from-blue-500 to-cyan-600"
             trend={8}
           />
-        </div>
-
-        {/* Serie 14 días */}
-        <div className="bg-white dark:bg-gray-800 rounded-2xl shadow-lg border border-gray-100 dark:border-gray-700">
-          <div className="p-6 border-b border-gray-100 dark:border-gray-700 flex items-center justify-between">
-            <div>
-              <h3 className="text-xl font-bold text-gray-900 dark:text-white">Serie de ventas (14 días)</h3>
-              <p className="text-sm text-gray-500 dark:text-gray-400">Fuente: vista v_ui_series_14d</p>
-            </div>
-          </div>
-          <div className="h-80 px-6 pb-6">
-            {seriesData.length === 0 ? (
-              <div className="h-full flex items-center justify-center text-gray-500 dark:text-gray-400 text-sm">
-                {loading ? 'Cargando…' : 'Sin datos en el rango seleccionado.'}
-              </div>
-            ) : (
-              <ResponsiveContainer width="100%" height="100%">
-                <ComposedChart data={seriesData} margin={{ top: 20, right: 20, left: 0, bottom: 0 }}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
-                  <XAxis dataKey="fecha" stroke="#6b7280" fontSize={12} minTickGap={16} />
-                  <YAxis
-                    yAxisId="left"
-                    stroke="#6b7280"
-                    fontSize={12}
-                    tickFormatter={(v: number) => formatCurrencyUSD(v)}
-                    width={90}
-                  />
-                  <YAxis
-                    yAxisId="right"
-                    orientation="right"
-                    stroke="#6b7280"
-                    fontSize={12}
-                    width={70}
-                  />
-                  <Tooltip
-                    formatter={(value: number, name) =>
-                      name === 'Ventas' ? formatCurrencyUSD(value) : value.toLocaleString()
-                    }
-                    labelFormatter={(label) => `Día: ${label}`}
-                  />
-                  <Area
-                    yAxisId="left"
-                    type="monotone"
-                    dataKey="ventas"
-                    name="Ventas"
-                    fill="#3b82f6"
-                    stroke="#2563eb"
-                    strokeWidth={2}
-                    activeDot={{ r: 5 }}
-                  />
-                  <Bar
-                    yAxisId="right"
-                    dataKey="tickets"
-                    name="Tickets"
-                    fill="#10b981"
-                    opacity={0.75}
-                    barSize={24}
-                  />
-                </ComposedChart>
-              </ResponsiveContainer>
-            )}
-          </div>
         </div>
 
         {/* Tabla por sucursal */}

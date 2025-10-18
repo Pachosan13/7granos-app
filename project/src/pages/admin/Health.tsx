@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { AlertTriangle, CheckCircle, RefreshCw, Server, ShieldAlert, Database, Activity } from 'lucide-react';
+import { AlertTriangle, CheckCircle, RefreshCw, Server, ShieldAlert, Database } from 'lucide-react';
 import { isSupabaseConfigured, pingSupabase, supabase } from '../../lib/supabase';
 import {
   debugLog,
@@ -8,17 +8,8 @@ import {
   getProxyUrlForYesterday,
   isDebug,
   logEnv,
-  rest,
-  yesterdayUTC5Range,
+  yesterdayRange,
 } from '../../utils/diagnostics';
-
-type Status = 'pending' | 'ok' | 'fail';
-
-type CheckResult = {
-  ok: boolean;
-  status: number;
-  note: string;
-};
 
 interface SyncLogRow {
   created_at: string;
@@ -26,6 +17,8 @@ interface SyncLogRow {
   status?: string | null;
   detalles?: string | null;
 }
+
+type Status = 'pending' | 'ok' | 'fail';
 
 const statusBadge = (status: Status, label: string) => {
   const map = {
@@ -48,29 +41,14 @@ const maskEnv = (value: string | undefined) => {
   return `${value.slice(0, 4)}…${value.slice(-4)}`;
 };
 
-const evaluateResponse = async (response: Response): Promise<CheckResult> => {
-  const text = await response.text().catch(() => '');
-  return {
-    ok: response.ok,
-    status: response.status,
-    note: text.slice(0, 200) || 'Respuesta sin cuerpo',
-  };
-};
-
-const resolveError = (err: unknown): CheckResult => ({
-  ok: false,
-  status: 0,
-  note: err instanceof Error ? err.message : 'Error desconocido',
-});
-
 export const AdminHealth = () => {
   const debugMode = isDebug();
-  const [supabasePing, setSupabasePing] = useState<CheckResult | null>(null);
-  const [restChecks, setRestChecks] = useState<Record<string, CheckResult>>({});
-  const [edgeChecks, setEdgeChecks] = useState<Record<string, CheckResult>>({});
-  const [attendanceCheck, setAttendanceCheck] = useState<CheckResult | null>(null);
+  const [supabasePing, setSupabasePing] = useState<{ ok: boolean; status: number; note: string } | null>(null);
+  const [proxyStatus, setProxyStatus] = useState<Status>(debugMode ? 'pending' : 'fail');
+  const [proxyMessage, setProxyMessage] = useState<string>('En espera');
   const [lastSync, setLastSync] = useState<SyncLogRow | null>(null);
   const [syncError, setSyncError] = useState<string | null>(null);
+  const [restStatuses, setRestStatuses] = useState<Record<string, { ok: boolean; status: number; note: string }>>({});
   const [syncing, setSyncing] = useState(false);
   const [syncNote, setSyncNote] = useState<string | null>(null);
 
@@ -78,12 +56,10 @@ export const AdminHealth = () => {
     const supabaseUrl = import.meta.env.VITE_SUPABASE_URL as string | undefined;
     const anonKey = import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined;
     const functionsBase = getFunctionsBase();
-    const restBase = supabaseUrl ? `${supabaseUrl.replace(/\/$/, '')}/rest/v1` : '';
     return {
       supabaseUrl,
       anonKey,
       functionsBase,
-      restBase,
       functionsHost: formatFunctionsHost(),
     };
   }, []);
@@ -93,101 +69,96 @@ export const AdminHealth = () => {
     logEnv();
     let mounted = true;
 
-    const setIfMounted = <T,>(setter: (value: T) => void) => (value: T) => {
-      if (mounted) setter(value);
-    };
-
     if (!isSupabaseConfigured) {
-      setSupabasePing({ ok: false, status: 0, note: 'Supabase no está configurado' });
+      setSupabasePing({ ok: false, status: 0, note: 'Supabase no configurado' });
     } else {
       pingSupabase()
-        .then(result => setIfMounted(setSupabasePing)(result))
+        .then(result => {
+          if (!mounted) return;
+          setSupabasePing(result);
+        })
         .catch(err => {
           debugLog('[AdminHealth] pingSupabase error', err);
-          setIfMounted(setSupabasePing)(resolveError(err));
+          if (mounted) setSupabasePing({ ok: false, status: 0, note: err instanceof Error ? err.message : 'Error inesperado' });
         });
     }
 
-    const { restBase, anonKey, functionsBase } = envData;
-    const { desde } = yesterdayUTC5Range();
-
-    if (restBase && anonKey) {
-      const restEndpoints = [
-        { key: 'kpis', url: `${restBase}/v_ui_kpis_hoy?select=*`, label: 'v_ui_kpis_hoy' },
-        { key: 'series', url: `${restBase}/v_ui_series_14d?select=*`, label: 'v_ui_series_14d' },
-      ];
-
-      Promise.all(
-        restEndpoints.map(async ({ key, url, label }) => {
-          try {
-            const response = await rest(url, anonKey);
-            const result = await evaluateResponse(response);
-            debugLog('[AdminHealth] REST', label, result.status, result.note);
-            return { key, result };
-          } catch (err) {
-            debugLog('[AdminHealth] REST error', label, err);
-            return { key, result: resolveError(err) };
+    const proxyUrl = getProxyUrlForYesterday();
+    if (!proxyUrl) {
+      setProxyStatus('fail');
+      setProxyMessage('VITE_SUPABASE_FUNCTIONS_BASE no configurado');
+    } else {
+      fetch(proxyUrl, { method: 'GET', headers: { Accept: 'application/json' } })
+        .then(async res => {
+          const text = await res.text().catch(() => '');
+          const sample = text.slice(0, 120);
+          if (!mounted) return;
+          if (res.ok) {
+            setProxyStatus('ok');
+            setProxyMessage(sample || 'JSON sin contenido');
+          } else {
+            setProxyStatus('fail');
+            setProxyMessage(`HTTP ${res.status} ${sample}`);
           }
         })
-      ).then(results => {
-        if (!mounted) return;
-        setRestChecks(prev => {
-          const next = { ...prev };
-          results.forEach(({ key, result }) => {
-            next[key] = result;
-          });
-          return next;
+        .catch(err => {
+          if (!mounted) return;
+          setProxyStatus('fail');
+          setProxyMessage(err?.message || 'Error desconocido en fetch');
         });
-      });
-    } else {
-      if (anonKey == null || envData.supabaseUrl == null) {
-        setRestChecks({
-          kpis: { ok: false, status: 0, note: 'Variables VITE_SUPABASE_URL/ANON_KEY faltantes' },
-          series: { ok: false, status: 0, note: 'Variables VITE_SUPABASE_URL/ANON_KEY faltantes' },
-        });
-      }
     }
 
-    if (functionsBase) {
-      const attendanceUrl = getProxyUrlForYesterday();
-      if (attendanceUrl) {
-        fetch(attendanceUrl, { headers: { Accept: 'application/json' } })
-          .then(evaluateResponse)
-          .then(setIfMounted(setAttendanceCheck))
-          .catch(err => setIfMounted(setAttendanceCheck)(resolveError(err)));
-      } else {
-        setAttendanceCheck({ ok: false, status: 0, note: 'Proxy INVU no configurado' });
-      }
+    const restBase = (import.meta.env.VITE_SUPABASE_URL as string | undefined)?.replace(/\/$/, '');
+    const anonKey = import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined;
 
-      const ordersUrl = `${functionsBase}/invu-orders?branch=sf&from=${desde}&to=${desde}`;
-      fetch(ordersUrl, { headers: { Accept: 'application/json' } })
-        .then(evaluateResponse)
-        .then(result => {
-          if (!mounted) return;
-          setEdgeChecks(prev => ({ ...prev, orders: result }));
-        })
-        .catch(err => {
-          if (!mounted) return;
-          setEdgeChecks(prev => ({ ...prev, orders: resolveError(err) }));
-        });
+    if (restBase && anonKey) {
+      const endpoints = [
+        { key: 'invu_ventas', label: 'invu_ventas' },
+        { key: 'hr_periodo_totales', label: 'hr_periodo_totales' },
+      ];
 
-      const syncUrl = `${functionsBase}/sync-ventas-detalle?desde=${desde}&hasta=${desde}`;
-      fetch(syncUrl, { method: 'POST', headers: { Accept: 'application/json' } })
-        .then(evaluateResponse)
-        .then(result => {
+      Promise.all(endpoints.map(async ({ key, label }) => {
+        const url = `${restBase}/rest/v1/${label}?select=count&limit=1`;
+        try {
+          const response = await fetch(url, {
+            headers: {
+              apikey: anonKey,
+              Authorization: `Bearer ${anonKey}`,
+              Accept: 'application/json',
+            },
+          });
+          const sample = await response.text().catch(() => '');
+          debugLog('[AdminHealth] REST status', label, response.status, sample.slice(0, 120));
+          return {
+            key,
+            value: {
+              ok: response.ok,
+              status: response.status,
+              note: sample.slice(0, 120) || 'Respuesta sin cuerpo',
+            },
+          };
+        } catch (err) {
+          debugLog('[AdminHealth] REST error', label, err);
+          return {
+            key,
+            value: {
+              ok: false,
+              status: 0,
+              note: err instanceof Error ? err.message : 'Error desconocido',
+            },
+          };
+        }
+      }))
+        .then(results => {
           if (!mounted) return;
-          setEdgeChecks(prev => ({ ...prev, sync: result }));
-        })
-        .catch(err => {
-          if (!mounted) return;
-          setEdgeChecks(prev => ({ ...prev, sync: resolveError(err) }));
+          setRestStatuses(prev => {
+            const next = { ...prev };
+            results.forEach(({ key, value }) => {
+              next[key] = value;
+            });
+            return next;
+          });
         });
-    } else {
-      setEdgeChecks({
-        orders: { ok: false, status: 0, note: 'Falta VITE_SUPABASE_FUNCTIONS_BASE' },
-        sync: { ok: false, status: 0, note: 'Falta VITE_SUPABASE_FUNCTIONS_BASE' },
-      });
-      setAttendanceCheck({ ok: false, status: 0, note: 'Falta VITE_SUPABASE_FUNCTIONS_BASE' });
     }
 
     const loadSyncLog = async () => {
@@ -207,7 +178,7 @@ export const AdminHealth = () => {
         if (mounted) setLastSync(data?.[0] ?? null);
       } catch (err) {
         if (mounted) {
-          setSyncError('No fue posible leer sync_log (revisa consola en debug).');
+          setSyncError('No fue posible leer sync_log (ver consola en debug).');
           debugLog('[AdminHealth] sync_log error', err);
         }
       }
@@ -218,7 +189,7 @@ export const AdminHealth = () => {
     return () => {
       mounted = false;
     };
-  }, [debugMode, envData]);
+  }, [debugMode]);
 
   const handleRefetchAll = () => {
     if (!debugMode) return;
@@ -233,10 +204,9 @@ export const AdminHealth = () => {
       return;
     }
 
-    const { desde } = yesterdayUTC5Range();
+    const { desde } = yesterdayRange();
     const query = `?desde=${desde}&hasta=${desde}`;
     const endpoints = [
-      `${functionsBase}/sync-ventas-detalle${query}`,
       `${functionsBase}/sync-ventas-v4${query}`,
       `${functionsBase}/sync-ventas${query}`,
     ];
@@ -245,51 +215,43 @@ export const AdminHealth = () => {
     setSyncNote(null);
 
     const runEndpoint = async (endpoint: string) => {
-      const execute = async (retry: boolean): Promise<CheckResult> => {
-        try {
-          const response = await fetch(endpoint, {
-            method: 'POST',
-            headers: {
-              Authorization: `Bearer ${import.meta.env.VITE_SUPABASE_ANON_KEY}`,
-              'Content-Type': 'application/json',
-            },
-          });
+      const execute = async (retry: boolean): Promise<{ data: any; status: number }> => {
+        const response = await fetch(endpoint, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${import.meta.env.VITE_SUPABASE_ANON_KEY}`,
+            'Content-Type': 'application/json',
+          },
+        });
 
-          if (response.ok) {
-            return evaluateResponse(response);
-          }
-
-          if (response.status >= 500 && retry) {
-            debugLog('[AdminHealth] sync retry por status', response.status);
-            return execute(false);
-          }
-
-          const error = await evaluateResponse(response);
-          throw error;
-        } catch (err) {
-          if (err && typeof err === 'object' && 'status' in err) {
-            throw err;
-          }
-          throw resolveError(err);
+        if (response.ok) {
+          const data = await response.json().catch(() => ({}));
+          return { data, status: response.status };
         }
+
+        const body = await response.text().catch(() => '');
+        if (response.status >= 500 && retry) {
+          debugLog('[AdminHealth] sync retry por status', response.status);
+          return execute(false);
+        }
+
+        const error: any = new Error(`HTTP ${response.status}${body ? ` · ${body.slice(0, 120)}` : ''}`);
+        error.status = response.status;
+        throw error;
       };
 
       return execute(true);
     };
 
     try {
-      let result: CheckResult | null = null;
-
+      let result: any = null;
       for (const endpoint of endpoints) {
         try {
-          result = await runEndpoint(endpoint);
+          const { data } = await runEndpoint(endpoint);
+          result = data;
           break;
         } catch (err: any) {
-          if (err.status === 404 && endpoint.includes('sync-ventas-detalle')) {
-            debugLog('[AdminHealth] sync-ventas-detalle no disponible, probando fallback');
-            continue;
-          }
-          if (err.status === 404 && endpoint.includes('sync-ventas-v4')) {
+          if (err?.status === 404 && endpoint.includes('sync-ventas-v4')) {
             debugLog('[AdminHealth] sync-ventas-v4 no disponible, probando sync-ventas');
             continue;
           }
@@ -298,16 +260,14 @@ export const AdminHealth = () => {
       }
 
       if (!result) {
-        throw new Error('No fue posible ejecutar la sincronización');
+        throw new Error('Sincronización no disponible');
       }
 
       setSyncNote('Sincronización ejecutada correctamente.');
-      setEdgeChecks(prev => ({ ...prev, sync: result }));
+      debugLog('[AdminHealth] sync result', result);
       handleRefetchAll();
-    } catch (err) {
-      const error = err && typeof err === 'object' && 'note' in err ? (err as CheckResult) : resolveError(err);
-      setSyncNote(error.note);
-      setEdgeChecks(prev => ({ ...prev, sync: error }));
+    } catch (err: any) {
+      setSyncNote(err instanceof Error ? err.message : 'Error al ejecutar la sincronización');
       debugLog('[AdminHealth] sync error', err);
     } finally {
       setSyncing(false);
@@ -318,102 +278,105 @@ export const AdminHealth = () => {
     return null;
   }
 
+  const proxyUrl = getProxyUrlForYesterday();
+  const { desde } = yesterdayRange();
   const supabaseStatus: Status = supabasePing ? (supabasePing.ok ? 'ok' : 'fail') : 'pending';
-  const restKpis = restChecks.kpis;
-  const restSeries = restChecks.series;
-  const edgeOrders = edgeChecks.orders;
-  const edgeSync = edgeChecks.sync;
-  const attendanceResult = attendanceCheck;
-  const functionsHost = envData.functionsHost;
+  const inVUStatus = restStatuses['invu_ventas'];
+  const hrStatus = restStatuses['hr_periodo_totales'];
 
   return (
     <div className="space-y-6">
-      <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+      <div className="flex items-center justify-between">
         <div>
           <h2 className="text-2xl font-bold text-gray-900">Panel de Diagnóstico</h2>
           <p className="text-sm text-gray-600">Visión rápida del entorno y conectividad (solo debug)</p>
         </div>
-        <div className="flex flex-wrap items-center gap-3">
-          <button
-            onClick={handleSyncVentas}
-            disabled={syncing}
-            className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-blue-600 text-white hover:bg-blue-700 transition disabled:opacity-60"
-          >
-            <RefreshCw className={`w-4 h-4 ${syncing ? 'animate-spin' : ''}`} />
-            {syncing ? 'Sincronizando…' : 'Sincronizar ahora'}
-          </button>
-          <button
-            onClick={handleRefetchAll}
-            className="inline-flex items-center gap-2 px-4 py-2 rounded-xl border border-blue-200 text-blue-600 hover:bg-blue-50 transition"
-          >
-            <Activity className="w-4 h-4" />
-            Refrescar dashboards
-          </button>
-        </div>
+        <button
+          onClick={handleSyncVentas}
+          disabled={syncing}
+          className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-blue-600 text-white hover:bg-blue-700 transition disabled:opacity-60"
+        >
+          <RefreshCw className="w-4 h-4" />
+          {syncing ? 'Sincronizando…' : 'Sincronizar ahora'}
+        </button>
       </div>
-
       {syncNote && (
-        <div className="text-xs text-blue-700 bg-blue-50 border border-blue-200 rounded-xl px-4 py-2">
+        <div className="text-xs text-gray-600 bg-blue-50 border border-blue-200 rounded-xl px-4 py-2">
           {syncNote}
         </div>
       )}
+      <button
+        onClick={handleRefetchAll}
+        className="text-xs text-blue-600 hover:text-blue-700"
+      >
+        Forzar refetch de dashboards
+      </button>
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        <div className="bg-white border border-gray-200 rounded-2xl p-5 shadow-sm space-y-2 text-sm text-gray-600">
-          <h3 className="text-sm font-semibold text-gray-700 flex items-center gap-2"><Server className="w-4 h-4" /> Supabase</h3>
-          <div>{statusBadge(supabaseStatus, supabaseStatus === 'ok' ? 'Ping ok' : supabaseStatus === 'pending' ? 'Ping pendiente' : 'Ping falló')}</div>
-          <div>URL: {maskEnv(envData.supabaseUrl)}</div>
-          <div>Anon Key: {maskEnv(envData.anonKey)}</div>
-          {supabasePing && (
-            <div className="text-xs text-gray-500">Nota: {supabasePing.note} (status {supabasePing.status || 'n/a'})</div>
-          )}
-        </div>
-
-        <div className="bg-white border border-gray-200 rounded-2xl p-5 shadow-sm space-y-3 text-sm text-gray-600">
-          <h3 className="text-sm font-semibold text-gray-700 flex items-center gap-2"><Database className="w-4 h-4" /> REST checks</h3>
-          <div>
-            <div className="font-semibold">v_ui_kpis_hoy</div>
-            <div className="text-xs text-gray-500">
-              {restKpis ? `Status ${restKpis.status} — ${restKpis.ok ? 'OK' : 'Error'} · ${restKpis.note}` : 'Consultando…'}
-            </div>
-          </div>
-          <div>
-            <div className="font-semibold">v_ui_series_14d</div>
-            <div className="text-xs text-gray-500">
-              {restSeries ? `Status ${restSeries.status} — ${restSeries.ok ? 'OK' : 'Error'} · ${restSeries.note}` : 'Consultando…'}
-            </div>
+        <div className="bg-white border border-gray-200 rounded-2xl p-5 shadow-sm">
+          <h3 className="text-sm font-semibold text-gray-700 flex items-center gap-2 mb-3">
+            <Server className="w-4 h-4" />
+            Supabase
+          </h3>
+          <div className="space-y-2 text-sm text-gray-600">
+            <div>{statusBadge(supabaseStatus, supabaseStatus === 'ok' ? 'Ping ok' : supabaseStatus === 'pending' ? 'Ping pendiente' : 'Ping falló')}</div>
+            <div>URL: {maskEnv(envData.supabaseUrl)}</div>
+            <div>Anon Key: {maskEnv(envData.anonKey)}</div>
+            {supabasePing && (
+              <div className="text-xs text-gray-500">Nota: {supabasePing.note} (status {supabasePing.status || 'n/a'})</div>
+            )}
           </div>
         </div>
 
-        <div className="bg-white border border-gray-200 rounded-2xl p-5 shadow-sm space-y-3 text-sm text-gray-600">
-          <h3 className="text-sm font-semibold text-gray-700 flex items-center gap-2"><Server className="w-4 h-4" /> Edge Functions</h3>
-          <div className="text-xs text-gray-500">Host: {functionsHost}</div>
-          <div>
-            <div className="font-semibold">invu-orders (GET)</div>
-            <div className="text-xs text-gray-500">
-              {edgeOrders ? `Status ${edgeOrders.status} — ${edgeOrders.ok ? 'OK' : 'Error'} · ${edgeOrders.note}` : 'Consultando…'}
-            </div>
-          </div>
-          <div>
-            <div className="font-semibold">sync-ventas-detalle (POST)</div>
-            <div className="text-xs text-gray-500">
-              {edgeSync ? `Status ${edgeSync.status} — ${edgeSync.ok ? 'OK' : 'Error'} · ${edgeSync.note}` : 'Consultando…'}
-            </div>
-          </div>
-        </div>
-
-        <div className="bg-white border border-gray-200 rounded-2xl p-5 shadow-sm space-y-2 text-sm text-gray-600">
-          <h3 className="text-sm font-semibold text-gray-700 flex items-center gap-2"><Database className="w-4 h-4" /> INVU attendance proxy</h3>
-          <div>
-            {attendanceResult
-              ? `Status ${attendanceResult.status} — ${attendanceResult.ok ? 'OK' : 'Error'} · ${attendanceResult.note}`
-              : 'Consultando…'}
+        <div className="bg-white border border-gray-200 rounded-2xl p-5 shadow-sm">
+          <h3 className="text-sm font-semibold text-gray-700 flex items-center gap-2 mb-3">
+            <Server className="w-4 h-4" />
+            Edge Function INVU
+          </h3>
+          <div className="space-y-2 text-sm text-gray-600">
+            <div>{statusBadge(proxyStatus, proxyStatus === 'ok' ? 'Proxy ok' : proxyStatus === 'pending' ? 'Revisando…' : 'Proxy con fallas')}</div>
+            <div>Host: {envData.functionsHost}</div>
+            <div className="break-all text-xs text-gray-500">URL prueba: {proxyUrl || '—'}</div>
+            <div className="text-xs text-gray-500">Resultado: {proxyMessage}</div>
           </div>
         </div>
       </div>
 
       <div className="bg-white border border-gray-200 rounded-2xl p-5 shadow-sm">
-        <h3 className="text-sm font-semibold text-gray-700 mb-3">Última sincronización registrada</h3>
+        <h3 className="text-sm font-semibold text-gray-700 mb-3 flex items-center gap-2">
+          <Database className="w-4 h-4" />
+          Tablas / Vistas críticas (REST)
+        </h3>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm text-gray-600">
+          <div className="border border-gray-100 rounded-xl p-4">
+            <div className="font-semibold mb-1">invu_ventas</div>
+            {inVUStatus ? (
+              <div className="text-xs text-gray-500">
+                Status {inVUStatus.status} — {inVUStatus.ok ? 'OK' : 'Error'}
+                <br />
+                {inVUStatus.note}
+              </div>
+            ) : (
+              <div className="text-xs text-gray-400">Consultando…</div>
+            )}
+          </div>
+          <div className="border border-gray-100 rounded-xl p-4">
+            <div className="font-semibold mb-1">hr_periodo_totales</div>
+            {hrStatus ? (
+              <div className="text-xs text-gray-500">
+                Status {hrStatus.status} — {hrStatus.ok ? 'OK' : 'Error'}
+                <br />
+                {hrStatus.note}
+              </div>
+            ) : (
+              <div className="text-xs text-gray-400">Consultando…</div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      <div className="bg-white border border-gray-200 rounded-2xl p-5 shadow-sm">
+        <h3 className="text-sm font-semibold text-gray-700 mb-3">Última sincronización</h3>
         {lastSync ? (
           <div className="text-sm text-gray-700 space-y-1">
             <div><strong>Fecha:</strong> {new Date(lastSync.created_at).toLocaleString('es-PA')}</div>
@@ -430,11 +393,9 @@ export const AdminHealth = () => {
       <div className="bg-white border border-gray-200 rounded-2xl p-5 shadow-sm">
         <h3 className="text-sm font-semibold text-gray-700 mb-3">Notas</h3>
         <ul className="list-disc list-inside text-sm text-gray-600 space-y-1">
-          <li>REST checks usan el rol anon para consultar v_ui_kpis_hoy y v_ui_series_14d.</li>
-          <li>Las funciones Edge se prueban con invu-orders (GET) y sync-ventas-detalle (POST) para el día de ayer.</li>
-          <li>El botón “Sincronizar ahora” ejecuta sync-ventas-detalle y luego dispara un refetch global.</li>
-          <li>“Refrescar dashboards” emite el evento <code>debug:refetch-all</code> sin ejecutar sincronización.</li>
-          <li>El proxy de asistencia sigue activo mediante invu-attendance-proxy.</li>
+          <li>El rango usado para el proxy INVU es el día de ayer ({desde}) en horario Panamá (UTC-5).</li>
+          <li>Usa ?debug=1 en la URL para mantener este panel accesible.</li>
+          <li>El botón de sincronización dispara un evento global para que Dashboard y Ventas vuelvan a cargar datos.</li>
         </ul>
       </div>
     </div>

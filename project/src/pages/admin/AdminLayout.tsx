@@ -1,23 +1,41 @@
-import React, { useState } from 'react';
-import { Building2, Users, Database, RefreshCw, Calculator } from 'lucide-react';
+import React, { useEffect, useMemo, useState } from 'react';
+import { useLocation } from 'react-router-dom';
+import { Building2, Users, Database, RefreshCw, Calculator, Activity } from 'lucide-react';
 import AdminSucursales from './AdminSucursales';
 import AdminUsuarios from './AdminUsuarios';
 import AdminInvu from './AdminInvu';
 import AdminSync from './AdminSync';
 import AdminPlanilla from './planilla/AdminPlanilla';
+import AdminHealth from './Health';
+import { isDebug } from '../../utils/diagnostics';
 
-type AdminTab = 'sucursales' | 'usuarios' | 'invu' | 'sync' | 'planilla';
+type AdminTab = 'sucursales' | 'usuarios' | 'invu' | 'sync' | 'planilla' | 'health';
 
 const AdminLayout: React.FC = () => {
   const [activeTab, setActiveTab] = useState<AdminTab>('sucursales');
+  const location = useLocation();
+  const debugMode = isDebug();
 
-  const tabs = [
+  const tabs = useMemo(() => {
+    const base = [
     { id: 'sucursales' as AdminTab, label: 'Sucursales', icon: Building2 },
     { id: 'usuarios' as AdminTab, label: 'Usuarios', icon: Users },
     { id: 'invu' as AdminTab, label: 'INVU', icon: Database },
     { id: 'sync' as AdminTab, label: 'Sincronización', icon: RefreshCw },
     { id: 'planilla' as AdminTab, label: 'Planilla', icon: Calculator },
-  ];
+    ];
+    if (debugMode) {
+      base.push({ id: 'health' as AdminTab, label: 'Health', icon: Activity });
+    }
+    return base;
+  }, [debugMode]);
+
+  useEffect(() => {
+    if (!debugMode) return;
+    if (location.hash === '#health' || location.pathname.endsWith('/health')) {
+      setActiveTab('health');
+    }
+  }, [location.hash, location.pathname, debugMode]);
 
   const renderContent = () => {
     switch (activeTab) {
@@ -31,6 +49,8 @@ const AdminLayout: React.FC = () => {
         return <AdminSync />;
       case 'planilla':
         return <AdminPlanilla />;
+      case 'health':
+        return <AdminHealth />;
       default:
         return <AdminSucursales />;
     }
