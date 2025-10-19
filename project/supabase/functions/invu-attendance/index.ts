@@ -1,4 +1,4 @@
-// supabase/functions/invu-marcaciones/index.ts
+// supabase/functions/invu-attendance/index.ts
 // Edge Function oficial para obtener marcaciones de INVU por sucursal.
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
@@ -15,7 +15,11 @@ const TOKEN_ENV: Record<BranchKey, string> = {
 };
 
 const PANAMA_TZ = "America/Panama";
-const DEFAULT_TIMEOUT = Number(Deno.env.get("INVU_MARCACIONES_TIMEOUT_MS") ?? "15000");
+const DEFAULT_TIMEOUT = Number(
+  Deno.env.get("INVU_ATTENDANCE_TIMEOUT_MS")
+    ?? Deno.env.get("INVU_MARCACIONES_TIMEOUT_MS")
+    ?? "15000",
+);
 const MAX_RETRIES = 2;
 
 const pad = (v: number) => String(v).padStart(2, "0");
@@ -36,8 +40,18 @@ const parseDateToEpochRange = (ymd: string): { fini: number; ffin: number } => {
 };
 
 const buildInvuUrl = (fini: number, ffin: number) => {
-  const base = (Deno.env.get("INVU_MARCACIONES_BASE_URL") ?? "https://api6.invupos.com/invuApiPos").replace(/\/+$/, "");
-  return `${base}/index.php?r=empleados/movimientos/fini/${fini}/ffin/${ffin}`;
+  const base = (
+    Deno.env.get("INVU_ATTENDANCE_BASE_URL")
+      ?? Deno.env.get("INVU_MARCACIONES_BASE_URL")
+      ?? "https://api6.invupos.com/invuApiPos"
+  ).replace(/\/+$/, "");
+  const template = (
+    Deno.env.get("INVU_ATTENDANCE_PATH")
+      ?? "index.php?r=empleados/movimientos/fini/{F_INI}/ffin/{F_FIN}"
+  )
+    .replace("{F_INI}", String(fini))
+    .replace("{F_FIN}", String(ffin));
+  return `${base}/${template.replace(/^\/+/, "")}`;
 };
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
@@ -77,6 +91,52 @@ const fetchWithRetry = async (url: string, token: string, timeoutMs: number) => 
   throw lastError ?? new Error("INVU fetch failed");
 };
 
+const toSample = (source: unknown): string | null => {
+  if (source == null) return null;
+  if (typeof source === "string") {
+    const trimmed = source.trim();
+    if (!trimmed) return null;
+    return trimmed.length > 200 ? `${trimmed.slice(0, 200)}…` : trimmed;
+  }
+  try {
+    const json = JSON.stringify(source);
+    if (!json) return null;
+    return json.length > 200 ? `${json.slice(0, 200)}…` : json;
+  } catch {
+    return String(source).slice(0, 200);
+  }
+};
+
+const respondError = (
+  status: number,
+  message: string,
+  {
+    branch,
+    fini,
+    ffin,
+    invuUrl,
+    sampleSource,
+  }: {
+    branch?: string | null;
+    fini?: number | null;
+    ffin?: number | null;
+    invuUrl?: string | null;
+    sampleSource?: unknown;
+  } = {},
+) => {
+  const sample = toSample(sampleSource);
+  return withCors({
+    ok: false,
+    status,
+    error: message,
+    branch: branch ?? null,
+    fini: fini ?? null,
+    ffin: ffin ?? null,
+    inv_url: invuUrl ?? null,
+    sample: sample ?? null,
+  }, { status });
+};
+
 const handler = async (req: Request): Promise<Response> => {
   const preflightResponse = preflight(req);
   if (preflightResponse) return preflightResponse;
@@ -90,20 +150,16 @@ const handler = async (req: Request): Promise<Response> => {
     const ffinParam = url.searchParams.get("ffin");
 
     if (!branchParam || !(branchParam in TOKEN_ENV)) {
-      return withCors({
-        ok: false,
-        branch: branchParam,
-        error: "Parámetro branch inválido. Usa sf|museo|cangrejo|costa|central.",
-      }, { status: 400 });
+      return respondError(400, "Parámetro branch inválido. Usa sf|museo|cangrejo|costa|central.", {
+        branch: branchParam || null,
+      });
     }
 
     const token = Deno.env.get(TOKEN_ENV[branch]);
     if (!token) {
-      return withCors({
-        ok: false,
+      return respondError(500, `No hay token configurado (${TOKEN_ENV[branch]}).`, {
         branch,
-        error: `No hay token configurado (${TOKEN_ENV[branch]}).`,
-      }, { status: 500 });
+      });
     }
 
     let fini: number | null = null;
@@ -113,20 +169,18 @@ const handler = async (req: Request): Promise<Response> => {
       ({ fini, ffin } = parseDateToEpochRange(date));
     } else if (finiParam || ffinParam) {
       if (!finiParam || !ffinParam) {
-        return withCors({
-          ok: false,
+        return respondError(400, "Debes proporcionar ambos parámetros fini y ffin.", {
           branch,
-          error: "Debes proporcionar ambos parámetros fini y ffin.",
-        }, { status: 400 });
+        });
       }
       fini = Math.trunc(Number(finiParam));
       ffin = Math.trunc(Number(ffinParam));
       if (!Number.isFinite(fini) || !Number.isFinite(ffin) || fini <= 0 || ffin <= 0) {
-        return withCors({
-          ok: false,
+        return respondError(400, "fini/ffin deben ser enteros válidos en segundos.", {
           branch,
-          error: "fini/ffin deben ser enteros válidos en segundos.",
-        }, { status: 400 });
+          fini,
+          ffin,
+        });
       }
     } else {
       const now = tzDate(new Date(), PANAMA_TZ);
@@ -137,21 +191,19 @@ const handler = async (req: Request): Promise<Response> => {
     }
 
     if (fini > ffin) {
-      return withCors({
-        ok: false,
+      return respondError(400, "fini no puede ser mayor que ffin.", {
         branch,
         fini,
         ffin,
-        error: "fini no puede ser mayor que ffin.",
-      }, { status: 400 });
+      });
     }
 
     if (fini == null || ffin == null) {
-      return withCors({
-        ok: false,
+      return respondError(400, "Rango inválido: faltan fini/ffin.", {
         branch,
-        error: "Rango inválido: faltan fini/ffin.",
-      }, { status: 400 });
+        fini,
+        ffin,
+      });
     }
 
     fini = Math.trunc(fini);
@@ -162,14 +214,13 @@ const handler = async (req: Request): Promise<Response> => {
     try {
       response = await fetchWithRetry(invuUrl, token, DEFAULT_TIMEOUT);
     } catch (err) {
-      return withCors({
-        ok: false,
+      return respondError(504, "INVU fetch failed (timeout/error).", {
         branch,
         fini,
         ffin,
-        error: "INVU fetch failed",
-        detail: err instanceof Error ? err.message : String(err),
-      }, { status: 504 });
+        invuUrl,
+        sampleSource: err instanceof Error ? err.message : err,
+      });
     }
 
     const rawText = await response.text().catch(() => "");
@@ -180,42 +231,36 @@ const handler = async (req: Request): Promise<Response> => {
       } catch {
         // ignore
       }
-      return withCors({
-        ok: false,
+      return respondError(404, "INVU fetch failed (404).", {
         branch,
         fini,
         ffin,
-        status: 404,
-        error: "INVU fetch failed",
-        detail,
-      }, { status: 404 });
+        invuUrl,
+        sampleSource: detail,
+      });
     }
 
     if (!response.ok) {
-      return withCors({
-        ok: false,
+      return respondError(response.status || 502, "INVU fetch failed.", {
         branch,
         fini,
         ffin,
-        status: response.status,
-        error: "INVU fetch failed",
-        detail: rawText.slice(0, 300),
-      }, { status: response.status || 502 });
+        invuUrl,
+        sampleSource: rawText || response.statusText,
+      });
     }
 
     let parsed: unknown = rawText;
     try {
       parsed = rawText ? JSON.parse(rawText) : [];
     } catch {
-      return withCors({
-        ok: false,
+      return respondError(502, "INVU devolvió una respuesta no JSON.", {
         branch,
         fini,
         ffin,
-        status: 502,
-        error: "INVU devolvió una respuesta no JSON.",
-        detail: rawText.slice(0, 300),
-      }, { status: 502 });
+        invuUrl,
+        sampleSource: rawText,
+      });
     }
 
     const data = Array.isArray(parsed)
@@ -229,15 +274,14 @@ const handler = async (req: Request): Promise<Response> => {
       branch,
       fini: Math.trunc(fini),
       ffin: Math.trunc(ffin),
+      inv_url: invuUrl,
       count: Array.isArray(data) ? data.length : 0,
       data,
     }, { status: 200 });
   } catch (err) {
-    return withCors({
-      ok: false,
-      error: "Unexpected error",
-      detail: err instanceof Error ? err.message : String(err),
-    }, { status: 500 });
+    return respondError(500, "Unexpected error en invu-attendance.", {
+      sampleSource: err instanceof Error ? err.message : String(err),
+    });
   }
 };
 

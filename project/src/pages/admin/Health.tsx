@@ -18,6 +18,7 @@ type CheckResult = {
   ok: boolean;
   status: number;
   note: string;
+  elapsedMs?: number;
 };
 
 interface SyncLogRow {
@@ -48,19 +49,21 @@ const maskEnv = (value: string | undefined) => {
   return `${value.slice(0, 4)}…${value.slice(-4)}`;
 };
 
-const evaluateResponse = async (response: Response): Promise<CheckResult> => {
+const evaluateResponse = async (response: Response, startedAt?: number): Promise<CheckResult> => {
   const text = await response.text().catch(() => '');
   return {
     ok: response.ok,
     status: response.status,
     note: text.slice(0, 200) || 'Respuesta sin cuerpo',
+    elapsedMs: startedAt != null ? Math.round(performance.now() - startedAt) : undefined,
   };
 };
 
-const resolveError = (err: unknown): CheckResult => ({
+const resolveError = (err: unknown, startedAt?: number): CheckResult => ({
   ok: false,
   status: 0,
   note: err instanceof Error ? err.message : 'Error desconocido',
+  elapsedMs: startedAt != null ? Math.round(performance.now() - startedAt) : undefined,
 });
 
 export const AdminHealth = () => {
@@ -118,16 +121,17 @@ export const AdminHealth = () => {
 
       Promise.all(
         restEndpoints.map(async ({ key, url, label }) => {
+          const started = performance.now();
           try {
             const response = await rest(url, anonKey);
-            const result = await evaluateResponse(response);
-            debugLog('[AdminHealth] REST', label, result.status, result.note);
+            const result = await evaluateResponse(response, started);
+            debugLog('[AdminHealth] REST', label, result.status, result.note, result.elapsedMs);
             return { key, result };
           } catch (err) {
             debugLog('[AdminHealth] REST error', label, err);
-            return { key, result: resolveError(err) };
+            return { key, result: resolveError(err, started) };
           }
-        })
+        }),
       ).then(results => {
         if (!mounted) return;
         setRestChecks(prev => {
@@ -150,46 +154,53 @@ export const AdminHealth = () => {
     if (functionsBase) {
       const marcacionesUrl = getInvuMarcacionesUrlForYesterday();
       if (marcacionesUrl) {
+        const started = performance.now();
         fetch(marcacionesUrl, { headers: { Accept: 'application/json' } })
-          .then(evaluateResponse)
+          .then(res => evaluateResponse(res, started))
           .then(result => {
             if (!mounted) return;
             setEdgeChecks(prev => ({ ...prev, marcaciones: result }));
           })
           .catch(err => {
             if (!mounted) return;
-            setEdgeChecks(prev => ({ ...prev, marcaciones: resolveError(err) }));
+            setEdgeChecks(prev => ({ ...prev, marcaciones: resolveError(err, started) }));
           });
       } else {
         setEdgeChecks(prev => ({
           ...prev,
-          marcaciones: { ok: false, status: 0, note: 'Función invu-marcaciones no configurada' },
+          marcaciones: { ok: false, status: 0, note: 'Función invu-attendance no configurada' },
         }));
       }
 
       const ordersUrl = `${functionsBase}/invu-orders?branch=sf&from=${desde}&to=${desde}`;
-      fetch(ordersUrl, { headers: { Accept: 'application/json' } })
-        .then(evaluateResponse)
-        .then(result => {
-          if (!mounted) return;
-          setEdgeChecks(prev => ({ ...prev, orders: result }));
-        })
-        .catch(err => {
-          if (!mounted) return;
-          setEdgeChecks(prev => ({ ...prev, orders: resolveError(err) }));
-        });
+      {
+        const started = performance.now();
+        fetch(ordersUrl, { headers: { Accept: 'application/json' } })
+          .then(res => evaluateResponse(res, started))
+          .then(result => {
+            if (!mounted) return;
+            setEdgeChecks(prev => ({ ...prev, orders: result }));
+          })
+          .catch(err => {
+            if (!mounted) return;
+            setEdgeChecks(prev => ({ ...prev, orders: resolveError(err, started) }));
+          });
+      }
 
       const syncUrl = `${functionsBase}/sync-ventas-detalle?desde=${desde}&hasta=${desde}`;
-      fetch(syncUrl, { method: 'POST', headers: { Accept: 'application/json' } })
-        .then(evaluateResponse)
-        .then(result => {
-          if (!mounted) return;
-          setEdgeChecks(prev => ({ ...prev, sync: result }));
-        })
-        .catch(err => {
-          if (!mounted) return;
-          setEdgeChecks(prev => ({ ...prev, sync: resolveError(err) }));
-        });
+      {
+        const started = performance.now();
+        fetch(syncUrl, { method: 'POST', headers: { Accept: 'application/json' } })
+          .then(res => evaluateResponse(res, started))
+          .then(result => {
+            if (!mounted) return;
+            setEdgeChecks(prev => ({ ...prev, sync: result }));
+          })
+          .catch(err => {
+            if (!mounted) return;
+            setEdgeChecks(prev => ({ ...prev, sync: resolveError(err, started) }));
+          });
+      }
     } else {
       setEdgeChecks({
         orders: { ok: false, status: 0, note: 'Falta VITE_SUPABASE_FUNCTIONS_BASE' },
@@ -254,6 +265,7 @@ export const AdminHealth = () => {
 
     const runEndpoint = async (endpoint: string) => {
       const execute = async (retry: boolean): Promise<CheckResult> => {
+        const started = performance.now();
         try {
           const response = await fetch(endpoint, {
             method: 'POST',
@@ -264,7 +276,7 @@ export const AdminHealth = () => {
           });
 
           if (response.ok) {
-            return evaluateResponse(response);
+            return evaluateResponse(response, started);
           }
 
           if (response.status >= 500 && retry) {
@@ -272,13 +284,13 @@ export const AdminHealth = () => {
             return execute(false);
           }
 
-          const error = await evaluateResponse(response);
+          const error = await evaluateResponse(response, started);
           throw error;
         } catch (err) {
           if (err && typeof err === 'object' && 'status' in err) {
             throw err;
           }
-          throw resolveError(err);
+          throw resolveError(err, started);
         }
       };
 
@@ -338,6 +350,12 @@ export const AdminHealth = () => {
   const edgeMarcaciones = edgeChecks.marcaciones;
   const functionsHost = envData.functionsHost;
 
+  const formatResult = (result?: CheckResult) => {
+    if (!result) return 'Consultando…';
+    const latency = result.elapsedMs != null ? ` (${result.elapsedMs} ms)` : '';
+    return `Status ${result.status} — ${result.ok ? 'OK' : 'Error'}${latency} · ${result.note}`;
+  };
+
   return (
     <div className="space-y-6">
       <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
@@ -386,13 +404,13 @@ export const AdminHealth = () => {
           <div>
             <div className="font-semibold">v_ui_kpis_hoy</div>
             <div className="text-xs text-gray-500">
-              {restKpis ? `Status ${restKpis.status} — ${restKpis.ok ? 'OK' : 'Error'} · ${restKpis.note}` : 'Consultando…'}
+              {formatResult(restKpis)}
             </div>
           </div>
           <div>
             <div className="font-semibold">v_ui_series_14d</div>
             <div className="text-xs text-gray-500">
-              {restSeries ? `Status ${restSeries.status} — ${restSeries.ok ? 'OK' : 'Error'} · ${restSeries.note}` : 'Consultando…'}
+              {formatResult(restSeries)}
             </div>
           </div>
         </div>
@@ -403,19 +421,19 @@ export const AdminHealth = () => {
           <div>
             <div className="font-semibold">invu-orders (GET)</div>
             <div className="text-xs text-gray-500">
-              {edgeOrders ? `Status ${edgeOrders.status} — ${edgeOrders.ok ? 'OK' : 'Error'} · ${edgeOrders.note}` : 'Consultando…'}
+              {formatResult(edgeOrders)}
             </div>
           </div>
           <div>
             <div className="font-semibold">sync-ventas-detalle (POST)</div>
             <div className="text-xs text-gray-500">
-              {edgeSync ? `Status ${edgeSync.status} — ${edgeSync.ok ? 'OK' : 'Error'} · ${edgeSync.note}` : 'Consultando…'}
+              {formatResult(edgeSync)}
             </div>
           </div>
           <div>
-            <div className="font-semibold">invu-marcaciones (GET)</div>
+            <div className="font-semibold">invu-attendance (GET)</div>
             <div className="text-xs text-gray-500">
-              {edgeMarcaciones ? `Status ${edgeMarcaciones.status} — ${edgeMarcaciones.ok ? 'OK' : 'Error'} · ${edgeMarcaciones.note}` : 'Consultando…'}
+              {formatResult(edgeMarcaciones)}
             </div>
           </div>
         </div>
@@ -440,10 +458,10 @@ export const AdminHealth = () => {
         <h3 className="text-sm font-semibold text-gray-700 mb-3">Notas</h3>
         <ul className="list-disc list-inside text-sm text-gray-600 space-y-1">
           <li>REST checks usan el rol anon para consultar v_ui_kpis_hoy y v_ui_series_14d.</li>
-          <li>Las funciones Edge se prueban con invu-orders (GET), invu-marcaciones (GET) y sync-ventas-detalle (POST) para el día de ayer.</li>
+          <li>Las funciones Edge se prueban con invu-orders (GET), invu-attendance (GET) y sync-ventas-detalle (POST) para el día de ayer.</li>
           <li>El botón “Sincronizar ahora” ejecuta sync-ventas-detalle y luego dispara un refetch global.</li>
           <li>“Refrescar dashboards” emite el evento <code>debug:refetch-all</code> sin ejecutar sincronización.</li>
-          <li>Las marcaciones ahora usan directamente la función oficial invu-marcaciones.</li>
+          <li>Las marcaciones ahora usan directamente la función oficial invu-attendance.</li>
         </ul>
       </div>
     </div>

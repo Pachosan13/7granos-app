@@ -1,4 +1,4 @@
-const INVU_MARCACIONES_PATH = '/invu-marcaciones';
+const INVU_ATTENDANCE_PATH = '/invu-attendance';
 
 export const isDebug = (): boolean => {
   if (typeof window === 'undefined') return false;
@@ -74,7 +74,7 @@ export const getInvuMarcacionesUrlForYesterday = () => {
   const base = getFunctionsBase();
   if (!base) return '';
   const { desde } = yesterdayUTC5Range();
-  return `${base}${INVU_MARCACIONES_PATH}?branch=sf&date=${desde}`;
+  return `${base}${INVU_ATTENDANCE_PATH}?branch=sf&date=${desde}`;
 };
 
 export const debugLog = (...args: unknown[]) => {

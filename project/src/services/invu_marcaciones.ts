@@ -19,7 +19,7 @@ type FetchByEpochOptions = FetchOptions & {
 };
 
 const DEFAULT_TIMEOUT = 15000;
-const DEFAULT_PATH = 'invu-marcaciones';
+const DEFAULT_PATH = 'invu-attendance';
 
 const sanitizeBase = (base?: string) => base?.replace(/\/+$/, '') ?? '';
 

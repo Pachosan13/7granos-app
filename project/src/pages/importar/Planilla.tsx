@@ -184,12 +184,22 @@ export const PlanillaPage = () => {
       });
 
       if (response?.ok === false) {
-        const detail = typeof response?.detail === 'string'
-          ? response.detail
-          : response?.detail
-            ? JSON.stringify(response.detail).slice(0, 200)
+        const statusNote = response.status ? `status ${response.status}` : '';
+        const sampleNote = typeof response.sample === 'string'
+          ? response.sample
+          : response?.sample
+            ? JSON.stringify(response.sample).slice(0, 200)
             : '';
-        throw new Error(response?.error ? `${response.error}${detail ? ` · ${detail}` : ''}` : detail || 'Marcaciones no disponibles.');
+        const invUrlNote = typeof response.inv_url === 'string' && response.inv_url
+          ? `INVU: ${response.inv_url}`
+          : '';
+        const parts = [
+          response.error ?? 'Marcaciones no disponibles.',
+          statusNote,
+          sampleNote,
+          invUrlNote,
+        ].filter(Boolean);
+        throw new Error(parts.join(' · '));
       }
 
       const payload = Array.isArray(response?.data)
@@ -477,7 +487,7 @@ export const PlanillaPage = () => {
                 ))}
               </select>
               <p className="text-xs text-slate7g mt-2">
-                Las consultas usan la función Edge oficial <code>invu-marcaciones</code> con tokens seguros en Supabase.
+                Las consultas usan la función Edge oficial <code>invu-attendance</code> con tokens seguros en Supabase.
               </p>
             </div>
           </div>

@@ -15,6 +15,8 @@ type BranchResult = {
   count: number;
   sample?: string;
   note?: string;
+  elapsedMs?: number;
+  invUrl?: string | null;
 };
 
 const BRANCHES: BranchCheck[] = [
@@ -48,10 +50,12 @@ export const AdminHealthInvu = () => {
     try {
       const checks: BranchResult[] = [];
       for (const branch of BRANCHES) {
-        const url = `${functionsBase}/invu-marcaciones?branch=${branch.branch}&date=${testDate}`;
+        const url = `${functionsBase}/invu-attendance?branch=${branch.branch}&date=${testDate}`;
+        const started = performance.now();
         try {
           const response = await fetch(url, { headers: { Accept: 'application/json' } });
           const status = response.status;
+          const elapsedMs = Math.round(performance.now() - started);
           let payload: any = null;
 
           try {
@@ -63,11 +67,17 @@ export const AdminHealthInvu = () => {
           const ok = response.ok && payload?.ok !== false;
           const dataArray = Array.isArray(payload?.data) ? payload.data : [];
           const count = typeof payload?.count === 'number' ? payload.count : dataArray.length;
-          const sample = dataArray.length > 0 ? JSON.stringify(dataArray[0]).slice(0, 160) : undefined;
+          const responseSample = typeof payload?.sample === 'string'
+            ? payload.sample
+            : payload?.sample
+              ? JSON.stringify(payload.sample).slice(0, 160)
+              : undefined;
+          const dataSample = dataArray.length > 0 ? JSON.stringify(dataArray[0]).slice(0, 160) : undefined;
+          const sample = responseSample ?? dataSample;
           const note = payload?.error
             ? String(payload.error)
             : !ok
-              ? payload?.detail ? JSON.stringify(payload.detail).slice(0, 160) : 'Respuesta no exitosa.'
+              ? response.statusText || 'Respuesta no exitosa.'
               : undefined;
 
           checks.push({
@@ -77,6 +87,8 @@ export const AdminHealthInvu = () => {
             count,
             sample,
             note,
+            elapsedMs,
+            invUrl: payload?.inv_url ?? null,
           });
         } catch (err) {
           checks.push({
@@ -86,6 +98,8 @@ export const AdminHealthInvu = () => {
             count: 0,
             sample: undefined,
             note: err instanceof Error ? err.message : String(err),
+            elapsedMs: Math.round(performance.now() - started),
+            invUrl: null,
           });
         }
       }
@@ -176,7 +190,10 @@ export const AdminHealthInvu = () => {
             {results.map(result => (
               <tr key={result.branch}>
                 <td className="px-4 py-3 text-gray-900">{result.branch}</td>
-                <td className="px-4 py-3 text-gray-600">{result.status || '—'}</td>
+                <td className="px-4 py-3 text-gray-600">
+                  {result.status || '—'}
+                  {result.elapsedMs != null ? <span className="text-xs text-gray-400"> ({result.elapsedMs} ms)</span> : null}
+                </td>
                 <td className={`px-4 py-3 ${result.ok ? 'text-green-600' : 'text-red-600'}`}>
                   {result.ok ? 'Sí' : 'No'}
                 </td>
@@ -184,8 +201,11 @@ export const AdminHealthInvu = () => {
                 <td className="px-4 py-3 text-gray-500">
                   {result.sample ? <code className="text-xs break-all">{result.sample}</code> : '—'}
                 </td>
-                <td className="px-4 py-3 text-gray-500">
-                  {result.note ? <span className="text-xs break-all">{result.note}</span> : '—'}
+                <td className="px-4 py-3 text-gray-500 space-y-1">
+                  {result.note ? <span className="block text-xs break-all">{result.note}</span> : <span className="text-xs">—</span>}
+                  {result.invUrl ? (
+                    <span className="block text-[10px] text-gray-400 break-all">{result.invUrl}</span>
+                  ) : null}
                 </td>
               </tr>
             ))}
