@@ -197,7 +197,10 @@ export const AdminHealthInvu = () => {
                 <td className={`px-4 py-3 ${result.ok ? 'text-green-600' : 'text-red-600'}`}>
                   {result.ok ? 'Sí' : 'No'}
                 </td>
-                <td className="px-4 py-3 text-gray-600">{result.count}</td>
+                <td className="px-4 py-3 text-gray-600">
+                  {result.count}
+                  {result.count === 0 ? <span className="text-xs text-gray-400"> (sin datos)</span> : null}
+                </td>
                 <td className="px-4 py-3 text-gray-500">
                   {result.sample ? <code className="text-xs break-all">{result.sample}</code> : '—'}
                 </td>

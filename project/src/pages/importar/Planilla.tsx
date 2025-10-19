@@ -1,5 +1,5 @@
 import { useState, useRef, useMemo } from 'react';
-import { Upload, FileText, AlertCircle, CheckCircle, Clock, Users, CloudDownload, Loader2 } from 'lucide-react';
+import { Upload, FileText, AlertCircle, CheckCircle, Clock, Users, CloudDownload, Loader2, CalendarDays } from 'lucide-react';
 import { useAuthOrg } from '../../context/AuthOrgContext';
 import { parseCSV } from '../../lib/csv/parse';
 import { saveUpload, logSync } from '../../lib/storage/saveUpload';
@@ -39,6 +39,9 @@ const BRANCH_OPTIONS: Array<{ value: InvuBranch; label: string }> = [
   { value: 'central', label: 'Central' },
 ];
 
+const findBranchLabel = (value: InvuBranch): string =>
+  BRANCH_OPTIONS.find(option => option.value === value)?.label ?? value.toUpperCase();
+
 const getDefaultPeriod = (baseDate: Date = new Date()): PeriodSelection => ({
   mes: baseDate.getMonth() + 1,
   año: baseDate.getFullYear(),
@@ -68,6 +71,22 @@ const buildRangeForPeriod = (period: PeriodSelection): RemoteRange => {
 const getDefaultRemoteRange = (): RemoteRange => {
   const { desde, hasta } = yesterdayUTC5Range();
   return { desde, hasta };
+};
+
+const getPanamaTodayDetails = () => {
+  const now = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Panama' }));
+  const año = now.getFullYear();
+  const mes = now.getMonth() + 1;
+  const dia = now.getDate();
+  const ymd = formatDateInput(now);
+  return {
+    año,
+    mes,
+    dia,
+    ymd,
+    fini: startOfDayLocal(año, mes, dia),
+    ffin: endOfDayLocal(año, mes, dia),
+  };
 };
 
 const parseDateParts = (value: string): { año: number; mes: number; dia: number } | null => {
@@ -151,10 +170,10 @@ export const PlanillaPage = () => {
     setRemoteError(null);
   };
 
-  async function handleLoadInvu() {
+  const loadRemoteRange = async (range: RemoteRange) => {
     const fallbackRange = getDefaultRemoteRange();
-    const desde = remoteRange.desde || fallbackRange.desde;
-    const hasta = remoteRange.hasta || fallbackRange.hasta;
+    const desde = range.desde || fallbackRange.desde;
+    const hasta = range.hasta || fallbackRange.hasta;
 
     const inicio = parseDateParts(desde);
     const fin = parseDateParts(hasta);
@@ -207,6 +226,9 @@ export const PlanillaPage = () => {
         : Array.isArray(response)
           ? response
           : [];
+      const responseCount = typeof response?.count === 'number' ? response.count : undefined;
+      const branchLabel = findBranchLabel(remoteBranch);
+      const friendlyRange = `${desde} → ${hasta}`;
 
       const flattened = flattenInvuMovements(payload).sort(
         (a, b) => new Date(a.fecha).getTime() - new Date(b.fecha).getTime()
@@ -215,7 +237,12 @@ export const PlanillaPage = () => {
       setRemoteMovements(flattened);
       setRemoteFetchedRange({ desde, hasta });
       setRemoteLastUpdated(new Date().toISOString());
-      setRemoteNotice(flattened.length === 0 ? 'Sin marcaciones en el rango.' : null);
+      const totalCount = responseCount ?? flattened.length;
+      if (totalCount === 0) {
+        setRemoteNotice(`Sin marcaciones reportadas para ${branchLabel} (${friendlyRange}).`);
+      } else {
+        setRemoteNotice(null);
+      }
     } catch (error) {
       debugLog('Error obteniendo marcaciones INVU:', error);
       setRemoteError(error instanceof Error ? error.message : 'Error desconocido al consultar INVU');
@@ -225,7 +252,19 @@ export const PlanillaPage = () => {
     } finally {
       setRemoteLoading(false);
     }
+  };
+
+  async function handleLoadInvu() {
+    await loadRemoteRange(remoteRange);
   }
+
+  const handleTestToday = async () => {
+    const today = getPanamaTodayDetails();
+    const range = { desde: today.ymd, hasta: today.ymd };
+    setRemotePeriod({ mes: today.mes, año: today.año });
+    setRemoteRange(range);
+    await loadRemoteRange(range);
+  };
 
   // Drag & Drop handlers
   const handleDrag = (e: React.DragEvent) => {
@@ -528,14 +567,27 @@ export const PlanillaPage = () => {
               </div>
             </div>
 
-            <div className="mt-6 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+            <div className="mt-6 flex flex-col gap-4">
               {remoteError && (
                 <div className="flex items-start space-x-2 text-sm text-red-600 bg-red-50 border border-red-200 rounded-xl px-4 py-3">
                   <AlertCircle className="h-5 w-5 flex-shrink-0 mt-0.5" />
                   <span>{remoteError}</span>
                 </div>
               )}
-              <div className="flex-1 sm:flex sm:justify-end">
+              <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-end">
+                <button
+                  type="button"
+                  onClick={handleTestToday}
+                  disabled={remoteLoading}
+                  className={`w-full sm:w-auto inline-flex items-center justify-center space-x-2 px-6 py-3 font-semibold rounded-2xl border transition-all duration-200 focus:outline-none focus:ring-4 focus:ring-offset-2 ${
+                    remoteLoading
+                      ? 'border-gray-300 text-gray-400 cursor-not-allowed'
+                      : 'border-purple-200 text-purple-700 hover:bg-purple-50 focus:ring-purple-200'
+                  }`}
+                >
+                  <CalendarDays className="h-5 w-5" />
+                  <span>{remoteLoading ? 'Consultando…' : 'Probar marcaciones hoy'}</span>
+                </button>
                 <button
                   onClick={handleLoadInvu}
                   disabled={remoteLoading}
