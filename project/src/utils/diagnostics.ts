@@ -1,4 +1,4 @@
-const FUNCTIONS_SUFFIX = '/invu-attendance-proxy';
+const INVU_MARCACIONES_PATH = '/invu-marcaciones';
 
 export const isDebug = (): boolean => {
   if (typeof window === 'undefined') return false;
@@ -14,6 +14,14 @@ export const getFunctionsBase = (): string => {
 
   const supabaseUrl = (import.meta.env.VITE_SUPABASE_URL as string | undefined) || '';
   return supabaseUrl ? `${supabaseUrl.replace(/\/$/, '')}/functions/v1` : '';
+};
+
+export const rest = async (url: string, anonKey: string, init: RequestInit = {}) => {
+  const headers = new Headers(init.headers || undefined);
+  if (!headers.has('apikey')) headers.set('apikey', anonKey);
+  if (!headers.has('Authorization')) headers.set('Authorization', `Bearer ${anonKey}`);
+  if (!headers.has('Accept')) headers.set('Accept', 'application/json');
+  return fetch(url, { ...init, headers });
 };
 
 export const logEnv = () => {
@@ -36,7 +44,7 @@ export const tzPanamaEpoch = (year: number, month: number, day: number, endOfDay
   return Math.floor(new Date(iso).getTime() / 1000);
 };
 
-export const yesterdayRange = () => {
+export const yesterdayUTC5Range = () => {
   const now = new Date();
   const panama = new Date(now.toLocaleString('en-US', { timeZone: 'America/Panama' }));
   panama.setDate(panama.getDate() - 1);
@@ -51,6 +59,8 @@ export const yesterdayRange = () => {
   return { año, mes, dia, desde, hasta: desde, fini, ffin };
 };
 
+export const yesterdayRange = yesterdayUTC5Range;
+
 export const formatFunctionsHost = () => {
   const base = getFunctionsBase();
   try {
@@ -60,11 +70,11 @@ export const formatFunctionsHost = () => {
   }
 };
 
-export const getProxyUrlForYesterday = () => {
+export const getInvuMarcacionesUrlForYesterday = () => {
   const base = getFunctionsBase();
   if (!base) return '';
-  const { fini, ffin } = yesterdayRange();
-  return `${base}${FUNCTIONS_SUFFIX}?branch=sf&fini=${fini}&ffin=${ffin}`;
+  const { desde } = yesterdayUTC5Range();
+  return `${base}${INVU_MARCACIONES_PATH}?branch=sf&date=${desde}`;
 };
 
 export const debugLog = (...args: unknown[]) => {
@@ -74,3 +84,7 @@ export const debugLog = (...args: unknown[]) => {
   }
 };
 
+export const isColumnMissing = (error: { message?: string } | null | undefined) => {
+  const msg = error?.message ?? '';
+  return msg.toLowerCase().includes('column') && msg.toLowerCase().includes('does not exist');
+};

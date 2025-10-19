@@ -1,5 +1,3 @@
-import { getFunctionsBase } from '../utils/diagnostics';
-
 /**
  * Servicio mock para integración con INVU
  * En el futuro se reemplazará con llamadas reales a la API de INVU
@@ -424,52 +422,3 @@ export const fetchCompras = async (
   
   return compras.sort((a, b) => new Date(b.fecha).getTime() - new Date(a.fecha).getTime());
 };
-
-// --- INVU via Edge Function Proxy (seguro) ---
-export async function fetchInvuMovementsViaProxy({
-  branch,
-  fini,
-  ffin,
-  base,
-  timeout = 15000,
-  path = 'invu-attendance-proxy',
-}: {
-  branch: "sf" | "cangrejo" | "costa" | "museo" | "central";
-  fini: number;
-  ffin: number;
-  base?: string;
-  timeout?: number;
-  path?: string;
-}) {
-  const resolvedBase = (base ?? getFunctionsBase()).replace(/\/+$/, '') || '';
-  if (!resolvedBase) throw new Error("Falta VITE_SUPABASE_FUNCTIONS_BASE en .env");
-  if (!branch) throw new Error("Sucursal requerida");
-  if (!Number.isFinite(fini) || !Number.isFinite(ffin) || fini > ffin) {
-    throw new Error("Rango inválido (epoch segundos)");
-  }
-
-  const sanitizedPath = (path ?? 'invu-attendance-proxy').replace(/^\/+/, '');
-  const url = `${resolvedBase}/${sanitizedPath}?branch=${encodeURIComponent(branch)}&fini=${Math.trunc(fini)}&ffin=${Math.trunc(ffin)}`;
-
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeout);
-
-  try {
-    const res = await fetch(url, {
-      method: "GET",
-      headers: { Accept: "application/json" },
-      signal: controller.signal,
-    });
-
-    clearTimeout(timer);
-
-    if (!res.ok) {
-      const txt = await res.text().catch(() => "");
-      throw new Error(`Proxy error ${res.status}${txt ? `: ${txt.slice(0, 200)}` : ""}`);
-    }
-    return await res.json();
-  } catch (err: any) {
-    if (err?.name === "AbortError") throw new Error("Tiempo de espera agotado");
-    throw err;
-  }
-}

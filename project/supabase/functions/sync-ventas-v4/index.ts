@@ -6,7 +6,7 @@ const handler = async (req: Request): Promise<Response> => {
   try {
     return await handleSyncVentasDetalle(req);
   } catch (err) {
-    return withCors({ error: `sync-ventas delegación falló: ${String(err?.message ?? err)}` }, { status: 500 });
+    return withCors({ error: `sync-ventas-v4 delegación falló: ${String(err?.message ?? err)}` }, { status: 500 });
   }
 };
 

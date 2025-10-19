@@ -12,8 +12,9 @@ import {
 import { InlineSucursalSelector } from '../../components/InlineSucursalSelector';
 import { Layout } from '../../components/Layout';
 import { MonthYearPicker } from '../../lib/ui/MonthYearPicker';
-import { fetchInvuMovementsViaProxy, flattenInvuMovements, FlattenedInvuMovement, InvuMovementType } from '../../services/invu';
-import { debugLog } from '../../utils/diagnostics';
+import { flattenInvuMovements, FlattenedInvuMovement, InvuMovementType } from '../../services/invu';
+import { fetchInvuMarcacionesByEpoch, InvuBranch } from '../../services/invu_marcaciones';
+import { debugLog, yesterdayUTC5Range } from '../../utils/diagnostics';
 
 interface PeriodSelection {
   mes: number;
@@ -30,8 +31,6 @@ interface RemoteRange {
   hasta: string;
 }
 
-type InvuBranch = 'sf' | 'cangrejo' | 'costa' | 'museo' | 'central';
-
 const BRANCH_OPTIONS: Array<{ value: InvuBranch; label: string }> = [
   { value: 'sf', label: 'San Francisco' },
   { value: 'cangrejo', label: 'El Cangrejo' },
@@ -44,6 +43,11 @@ const getDefaultPeriod = (baseDate: Date = new Date()): PeriodSelection => ({
   mes: baseDate.getMonth() + 1,
   año: baseDate.getFullYear(),
 });
+
+const getDefaultRemotePeriod = (): PeriodSelection => {
+  const { año, mes } = yesterdayUTC5Range();
+  return { mes, año };
+};
 
 const formatDateInput = (date: Date): string => {
   const year = date.getFullYear();
@@ -61,18 +65,9 @@ const buildRangeForPeriod = (period: PeriodSelection): RemoteRange => {
   };
 };
 
-const getDefaultRemoteDate = (): Date => {
-  const date = new Date();
-  date.setUTCDate(date.getUTCDate() - 1);
-  return date;
-};
-
 const getDefaultRemoteRange = (): RemoteRange => {
-  const date = getDefaultRemoteDate();
-  const iso = `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, '0')}-${String(
-    date.getUTCDate()
-  ).padStart(2, '0')}`;
-  return { desde: iso, hasta: iso };
+  const { desde, hasta } = yesterdayUTC5Range();
+  return { desde, hasta };
 };
 
 const parseDateParts = (value: string): { año: number; mes: number; dia: number } | null => {
@@ -107,7 +102,7 @@ export const PlanillaPage = () => {
   const [isUploading, setIsUploading] = useState(false);
   const [dragActive, setDragActive] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const [remotePeriod, setRemotePeriod] = useState<PeriodSelection>(() => getDefaultPeriod(getDefaultRemoteDate()));
+  const [remotePeriod, setRemotePeriod] = useState<PeriodSelection>(getDefaultRemotePeriod);
   const [remoteRange, setRemoteRange] = useState<RemoteRange>(() => getDefaultRemoteRange());
   const [remoteBranch, setRemoteBranch] = useState<InvuBranch>('sf');
   const [remoteMovements, setRemoteMovements] = useState<FlattenedInvuMovement[]>([]);
@@ -182,20 +177,35 @@ export const PlanillaPage = () => {
     setRemoteNotice(null);
 
     try {
-      const raw = await fetchInvuMovementsViaProxy({
+      const response = await fetchInvuMarcacionesByEpoch({
         branch: remoteBranch,
         fini,
         ffin,
       });
 
-      const flattened = flattenInvuMovements(raw).sort(
+      if (response?.ok === false) {
+        const detail = typeof response?.detail === 'string'
+          ? response.detail
+          : response?.detail
+            ? JSON.stringify(response.detail).slice(0, 200)
+            : '';
+        throw new Error(response?.error ? `${response.error}${detail ? ` · ${detail}` : ''}` : detail || 'Marcaciones no disponibles.');
+      }
+
+      const payload = Array.isArray(response?.data)
+        ? response.data
+        : Array.isArray(response)
+          ? response
+          : [];
+
+      const flattened = flattenInvuMovements(payload).sort(
         (a, b) => new Date(a.fecha).getTime() - new Date(b.fecha).getTime()
       );
 
       setRemoteMovements(flattened);
       setRemoteFetchedRange({ desde, hasta });
       setRemoteLastUpdated(new Date().toISOString());
-      setRemoteNotice(flattened.length === 0 ? 'Sin marcaciones en el rango solicitado.' : null);
+      setRemoteNotice(flattened.length === 0 ? 'Sin marcaciones en el rango.' : null);
     } catch (error) {
       debugLog('Error obteniendo marcaciones INVU:', error);
       setRemoteError(error instanceof Error ? error.message : 'Error desconocido al consultar INVU');
@@ -454,7 +464,7 @@ export const PlanillaPage = () => {
             </div>
 
             <div>
-              <label className="block text-sm font-semibold text-bean mb-3">Sucursal INVU (proxy)</label>
+              <label className="block text-sm font-semibold text-bean mb-3">Sucursal INVU</label>
               <select
                 value={remoteBranch}
                 onChange={(e) => handleBranchChange(e.target.value as InvuBranch)}
@@ -467,7 +477,7 @@ export const PlanillaPage = () => {
                 ))}
               </select>
               <p className="text-xs text-slate7g mt-2">
-                Las consultas viajan por la Edge Function <code>invu-attendance-proxy</code>, sin exponer tokens en el navegador.
+                Las consultas usan la función Edge oficial <code>invu-marcaciones</code> con tokens seguros en Supabase.
               </p>
             </div>
           </div>

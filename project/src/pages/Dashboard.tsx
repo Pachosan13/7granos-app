@@ -16,7 +16,7 @@ import { RealtimeStatusIndicator } from '../components/RealtimeStatusIndicator';
 import { supabase } from '../lib/supabase';
 import { formatCurrencyUSD, formatDateDDMMYYYY } from '../lib/format';
 import { useRealtimeVentas } from '../hooks/useRealtimeVentas';
-import { debugLog, getFunctionsBase } from '../utils/diagnostics';
+import { debugLog, getFunctionsBase, isColumnMissing } from '../utils/diagnostics';
 
 // Helpers
 const usd = (v: number) => formatCurrencyUSD(Number(v || 0));
@@ -41,11 +41,11 @@ export const Dashboard = () => {
 
   const [sucursalFiltro, setSucursalFiltro] = useState<string>('todas');
   const [kpis, setKpis] = useState({
-    ventasHoy: 0,
-    transaccionesHoy: 0,
-    ticketPromedio: 0,
-    planillaActiva: 0,
-    utilidadBruta: 0,
+    ventasBrutas: 0,
+    cogs: 0,
+    margen: 0,
+    tickets: 0,
+    lineas: 0,
   });
   const [ventasDiarias, setVentasDiarias] = useState<any[]>([]);
   const [sucursalSummary, setSucursalSummary] = useState<any[]>([]);
@@ -75,44 +75,67 @@ export const Dashboard = () => {
       : [String(sucursalFiltro)];
   }, [sucursalFiltro, sucursales]);
 
-  const applySucursalFilter = (qb: any, col: string) => {
-    const ids = selectedIds();
-    return ids.length > 0 ? qb.in(col, ids) : qb;
-  };
-
   // === KPIs ===
   const loadKPIs = useCallback(async () => {
-    if (sucursales.length === 0) return;
+    const view = 'v_ui_kpis_hoy';
     const today = todayYMD();
+    const selectedId = sucursalFiltro === 'todas' ? null : String(sucursalFiltro);
+    let segmentationSupported = true;
+
     try {
-      const { data: ventasHoy, error } = await supabase
-        .from('invu_ventas')
-        .select('total, sucursal_id, fecha')
-        .gte('fecha', today)
-        .lte('fecha', today)
-        .in('sucursal_id', selectedIds());
-      if (error) throw error;
+      let query = supabase.from(view).select('*');
+      if (selectedId) {
+        query = query.eq('sucursal_id', selectedId);
+      }
+      const { data, error } = await query;
 
-      const totalVentas = ventasHoy.reduce((s, v) => s + Number(v.total || 0), 0);
-      const totalTrans = ventasHoy.length;
+      let rows: Record<string, any>[] = [];
+      if (error) {
+        if (selectedId && isColumnMissing(error)) {
+          segmentationSupported = false;
+        } else {
+          throw error;
+        }
+      } else {
+        rows = data ?? [];
+      }
 
-      const now = new Date();
-      const { data: planillaData, error: planillaError } = await supabase
-        .from('hr_periodo_totales')
-        .select('total_costo_laboral, hr_periodo!inner(periodo_mes, periodo_ano, sucursal_id)')
-        .eq('hr_periodo.periodo_mes', now.getMonth() + 1)
-        .eq('hr_periodo.periodo_ano', now.getFullYear())
-        .in('hr_periodo.sucursal_id', selectedIds());
-      if (planillaError) throw planillaError;
+      if (!segmentationSupported) {
+        const { data: fallbackData, error: fallbackError } = await supabase.from(view).select('*');
+        if (fallbackError) throw fallbackError;
+        rows = fallbackData ?? [];
+        registerAlert({
+          id: 'kpi-segmentation-warning',
+          type: 'warning',
+          title: 'Vista sin segmentación',
+          message: 'Esta vista no soporta segmentación por sucursal; mostrando totales.',
+          icon: AlertTriangle,
+        });
+      } else {
+        clearAlert('kpi-segmentation-warning');
+      }
 
-      const costoLaboral = (planillaData ?? []).reduce((s, p) => s + Number(p.total_costo_laboral || 0), 0);
-      setKpis({
-        ventasHoy: totalVentas,
-        transaccionesHoy: totalTrans,
-        ticketPromedio: totalTrans > 0 ? totalVentas / totalTrans : 0,
-        planillaActiva: costoLaboral,
-        utilidadBruta: totalVentas * 0.65,
-      });
+      const filteredRows = rows.filter(row => !row?.dia || row.dia === today);
+
+      const aggregate = filteredRows.reduce(
+        (acc, row: Record<string, any>) => {
+          const ventas = Number(row.ventas ?? row.ventas_brutas ?? row.total_bruto ?? 0);
+          const cogs = Number(row.cogs ?? row.costo ?? 0);
+          const margen = Number(row.margen ?? row.margen_bruto ?? ventas - cogs);
+          const tickets = Number(row.tickets ?? row.transacciones ?? 0);
+          const lineas = Number(row.lineas ?? row.line_items ?? 0);
+          return {
+            ventasBrutas: acc.ventasBrutas + ventas,
+            cogs: acc.cogs + cogs,
+            margen: acc.margen + margen,
+            tickets: acc.tickets + tickets,
+            lineas: acc.lineas + lineas,
+          };
+        },
+        { ventasBrutas: 0, cogs: 0, margen: 0, tickets: 0, lineas: 0 }
+      );
+
+      setKpis(aggregate);
       clearAlert('kpi-error');
     } catch (err) {
       debugLog('[Dashboard] loadKPIs error', err);
@@ -120,103 +143,248 @@ export const Dashboard = () => {
         id: 'kpi-error',
         type: 'error',
         title: 'Error cargando KPIs',
-        message: 'No fue posible leer ventas/planilla. Revisa la conexión a Supabase.',
+        message: err instanceof Error ? err.message : 'No fue posible leer v_ui_kpis_hoy.',
         icon: AlertTriangle,
       });
+      setKpis({ ventasBrutas: 0, cogs: 0, margen: 0, tickets: 0, lineas: 0 });
     }
-  }, [clearAlert, registerAlert, selectedIds, sucursales]);
+  }, [clearAlert, registerAlert, sucursalFiltro]);
+
 
   // === Ventas 30 días ===
   const loadVentasDiarias = useCallback(async () => {
-    const since = new Date();
-    since.setDate(since.getDate() - 30);
-    const from = since.toISOString().slice(0, 10);
-
+    const today = todayYMD();
+    const start = ymdInTZ('America/Panama', -13);
+    let segmentationSupported = true;
     try {
-      const { data, error } = await applySucursalFilter(
-        supabase.from('invu_ventas').select('fecha,total').gte('fecha', from).order('fecha'),
-        'sucursal_id'
-      );
-      if (error) throw error;
+      let query = supabase
+        .from('v_ui_series_14d')
+        .select('*')
+        .gte('dia', start)
+        .lte('dia', today)
+        .order('dia', { ascending: true });
 
-      const grouped: Record<string, { ventas: number; trans: number }> = {};
-      (data ?? []).forEach(v => {
-        grouped[v.fecha] ??= { ventas: 0, trans: 0 };
-        grouped[v.fecha].ventas += Number(v.total || 0);
-        grouped[v.fecha].trans += 1;
-      });
+      if (sucursalFiltro !== 'todas') {
+        const ids = selectedIds();
+        if (ids.length > 0) {
+          query = query.eq('sucursal_id', ids[0]);
+        }
+      }
+
+      const { data, error } = await query;
+      let sourceRows: Record<string, any>[] = [];
+      if (error) {
+        if (sucursalFiltro !== 'todas' && isColumnMissing(error)) {
+          segmentationSupported = false;
+          registerAlert({
+            id: 'series-segmentation-warning',
+            type: 'warning',
+            title: 'Vista sin segmentación',
+            message: 'Esta vista no soporta segmentación por sucursal; mostrando totales.',
+            icon: AlertTriangle,
+          });
+          const { data: fallbackData, error: fallbackError } = await supabase
+            .from('v_ui_series_14d')
+            .select('*')
+            .gte('dia', start)
+            .lte('dia', today)
+            .order('dia', { ascending: true });
+          if (fallbackError) throw fallbackError;
+          sourceRows = fallbackData ?? [];
+        } else {
+          throw error;
+        }
+      } else {
+        sourceRows = data ?? [];
+        clearAlert('series-segmentation-warning');
+      }
+
+      const rawRows = sourceRows.map((row: Record<string, any>) => ({
+        dia: row.dia as string,
+        fecha: formatDateDDMMYYYY(row.dia),
+        ventas: Number(row.ventas ?? 0),
+        margen: Number(row.margen ?? 0),
+        tickets: Number(row.tickets ?? 0),
+        lineas: Number(row.lineas ?? 0),
+        cogs: Number(row.cogs ?? 0),
+        sucursal_id: row.sucursal_id != null ? String(row.sucursal_id) : undefined,
+        sucursal_nombre: row.sucursal_nombre ?? row.nombre ?? undefined,
+      }));
+
+      const chartRows =
+        sucursalFiltro === 'todas'
+          ? Array.from(
+              rawRows.reduce((map, row) => {
+                const entry = map.get(row.dia) ?? {
+                  dia: row.dia,
+                  fecha: row.fecha,
+                  ventas: 0,
+                  margen: 0,
+                  tickets: 0,
+                  lineas: 0,
+                  cogs: 0,
+                };
+                entry.ventas += row.ventas;
+                entry.margen += row.margen;
+                entry.tickets += row.tickets;
+                entry.lineas += row.lineas;
+                entry.cogs += row.cogs;
+                map.set(row.dia, entry);
+                return map;
+              }, new Map<string, any>())
+            ).sort((a, b) => a.dia.localeCompare(b.dia))
+          : rawRows;
 
       setVentasDiarias(
-        Object.entries(grouped).map(([fecha, g]) => ({
-          fecha: formatDateDDMMYYYY(fecha),
-          ventas: g.ventas,
-          transacciones: g.trans,
+        chartRows.map(row => ({
+          ...row,
+          transacciones: row.tickets,
         }))
       );
+
+      const todaysRows = rawRows.filter(row => row.dia === today);
+      if (todaysRows.length > 0) {
+        if (segmentationSupported) {
+          const summaryMap = todaysRows.reduce((acc, row) => {
+            const key = row.sucursal_id ?? row.sucursal_nombre ?? 'sin-id';
+            const current = acc.get(key) ?? {
+              id: key,
+              nombre: row.sucursal_nombre ?? `Sucursal ${String(key).slice(0, 6) || 'N/D'}`,
+              ventas: 0,
+              transacciones: 0,
+            };
+            current.ventas += row.ventas;
+            current.transacciones += row.tickets;
+            acc.set(key, current);
+            return acc;
+          }, new Map<string, any>());
+
+          const summary = Array.from(summaryMap.values()).map((entry: any) => ({
+            ...entry,
+            ticketPromedio: entry.transacciones > 0 ? entry.ventas / entry.transacciones : 0,
+          }));
+
+          setSucursalSummary(summary.sort((a, b) => b.ventas - a.ventas));
+          clearAlert('sucursal-summary-error');
+        } else {
+          const totals = todaysRows.reduce(
+            (acc, row) => ({
+              ventas: acc.ventas + row.ventas,
+              transacciones: acc.transacciones + row.tickets,
+            }),
+            { ventas: 0, transacciones: 0 }
+          );
+          setSucursalSummary([{
+            id: 'global',
+            nombre: 'Todas las sucursales',
+            ventas: totals.ventas,
+            transacciones: totals.transacciones,
+            ticketPromedio: totals.transacciones > 0 ? totals.ventas / totals.transacciones : 0,
+          }]);
+          clearAlert('sucursal-summary-error');
+        }
+      } else {
+        setSucursalSummary([]);
+        registerAlert({
+          id: 'sucursal-summary-error',
+          type: 'warning',
+          title: 'Sin datos de hoy',
+          message: 'v_ui_series_14d no devolvió registros para el día actual.',
+          icon: AlertTriangle,
+        });
+      }
+
       clearAlert('ventas-diarias-error');
     } catch (err) {
       debugLog('[Dashboard] loadVentasDiarias error', err);
       registerAlert({
         id: 'ventas-diarias-error',
         type: 'error',
-        title: 'Ventas (30 días)',
-        message: 'No se pudieron obtener las ventas históricas.',
+        title: 'Ventas (14 días)',
+        message: err instanceof Error ? err.message : 'No se pudieron obtener los datos de v_ui_series_14d.',
         icon: AlertTriangle,
       });
       setVentasDiarias([]);
+      setSucursalSummary([]);
     }
-  }, [applySucursalFilter, clearAlert, registerAlert]);
+  }, [clearAlert, registerAlert, selectedIds, sucursalFiltro]);
 
-  // === Sucursal Summary ===
-  const loadSucursalSummary = useCallback(async () => {
-    const today = todayYMD();
+  /* const loadVentasDiariasLegacy = useCallback(async () => {
     try {
-      const { data, error } = await applySucursalFilter(
-        supabase.from('invu_ventas').select('sucursal_id,total').eq('fecha', today),
-        'sucursal_id'
-      );
-      if (error) throw error;
+      const { data, error, status } = await supabase
+        .from('v_ui_series_14d')
+        .select('*')
+        .order('dia', { ascending: true });
+      if (error) {
+        if (status === 400) {
+          registerAlert({
+            id: 'ventas-diarias-error',
+            type: 'warn',
+            title: 'Vista v_ui_series_14d',
+            message: isColumnMissing(error) ? 'Datos no disponibles para esta vista (v_ui_series_14d).' : error.message,
+            icon: AlertTriangle,
+          });
+          setVentasDiarias([]);
+          setSucursalSummary([]);
+          return;
+        }
+        throw error;
+      }
 
-      const map = new Map<string, { ventas: number; trans: number }>();
-      (data ?? []).forEach((r: any) => {
-        const k = String(r.sucursal_id);
-        const cur = map.get(k) ?? { ventas: 0, trans: 0 };
-        cur.ventas += Number(r.total || 0);
-        cur.trans += 1;
-        map.set(k, cur);
-      });
-
-      const nameById = new Map(sucursales.map(s => [String(s.id), s.nombre]));
-      const summary = Array.from(map.entries()).map(([id, v]) => ({
-        id,
-        nombre: nameById.get(id) ?? `Sucursal ${id.slice(0, 6)}…`,
-        ventas: v.ventas,
-        transacciones: v.trans,
-        ticketPromedio: v.trans ? v.ventas / v.trans : 0,
+      const dataset = (data ?? []).map((row: Record<string, any>) => ({
+        dia: row.dia,
+        fecha: formatDateDDMMYYYY(row.dia),
+        ventas: Number(row.ventas_brutas ?? row.total_bruto ?? 0),
+        margen: Number(row.margen ?? row.margen_bruto ?? 0),
+        tickets: Number(row.tickets ?? row.transacciones ?? 0),
+        lineas: Number(row.lineas ?? row.line_items ?? 0),
+        cogs: Number(row.cogs ?? row.costo ?? 0),
+        transacciones: Number(row.tickets ?? row.transacciones ?? 0),
+        sucursal_id: row.sucursal_id,
+        sucursal_nombre: row.sucursal_nombre ?? row.nombre ?? undefined,
       }));
 
-      if (sucursalFiltro === 'todas') {
-        sucursales.forEach(s => {
-          if (!summary.find(x => x.nombre === s.nombre))
-            summary.push({ nombre: s.nombre, ventas: 0, transacciones: 0, ticketPromedio: 0 });
+      setVentasDiarias(dataset);
+
+      const today = todayYMD();
+      const todaysRows = dataset.filter(row => row.dia === today);
+      if (todaysRows.length > 0) {
+        const summary = todaysRows.map(row => ({
+          id: row.sucursal_id ?? row.sucursal_nombre ?? row.dia,
+          nombre: row.sucursal_nombre ?? `Sucursal ${String(row.sucursal_id ?? '').slice(0, 6) || 'N/D'}`,
+          ventas: row.ventas,
+          transacciones: row.tickets,
+          ticketPromedio: row.tickets ? row.ventas / row.tickets : 0,
+        }));
+        setSucursalSummary(summary.sort((a, b) => b.ventas - a.ventas));
+        clearAlert('sucursal-summary-error');
+      } else {
+        setSucursalSummary([]);
+        registerAlert({
+          id: 'sucursal-summary-error',
+          type: 'warning',
+          title: 'Sin datos de hoy',
+          message: 'v_ui_series_14d no devolvió registros para el día actual.',
+          icon: AlertTriangle,
         });
       }
 
-      setSucursalSummary(summary.sort((a, b) => b.ventas - a.ventas));
-      clearAlert('sucursal-summary-error');
+      clearAlert('ventas-diarias-error');
     } catch (err) {
-      debugLog('[Dashboard] loadSucursalSummary error', err);
+      debugLog('[Dashboard] loadVentasDiarias error', err);
       registerAlert({
-        id: 'sucursal-summary-error',
+        id: 'ventas-diarias-error',
         type: 'error',
-        title: 'Rendimiento por sucursal',
-        message: 'No se pudo calcular el resumen por sucursal.',
+        title: 'Ventas (14 días)',
+        message: 'No se pudieron obtener los datos de v_ui_series_14d.',
         icon: AlertTriangle,
       });
+      setVentasDiarias([]);
       setSucursalSummary([]);
     }
-  }, [applySucursalFilter, clearAlert, registerAlert, sucursalFiltro, sucursales]);
+  }, [clearAlert, registerAlert]); */
 
+  // === Sucursal Summary ===
   // === Alerts ===
   const loadAlerts = useCallback(async () => {
     try {
@@ -245,9 +413,9 @@ export const Dashboard = () => {
 
   const loadDashboardData = useCallback(async () => {
     setDashboardLoading(true);
-    await Promise.all([loadKPIs(), loadVentasDiarias(), loadSucursalSummary(), loadAlerts()]);
+    await Promise.all([loadKPIs(), loadVentasDiarias(), loadAlerts()]);
     setDashboardLoading(false);
-  }, [loadKPIs, loadVentasDiarias, loadSucursalSummary, loadAlerts]);
+  }, [loadAlerts, loadKPIs, loadVentasDiarias]);
 
   const handleSync = useCallback(async () => {
     if (!functionsBase) {
@@ -266,9 +434,11 @@ export const Dashboard = () => {
     setSyncing(true);
     try {
       const ymd = isEarlyPanamaHour(8) ? ymdInTZ('America/Panama', -1) : ymdInTZ('America/Panama', 0);
+      const query = `?desde=${ymd}&hasta=${ymd}`;
       const endpoints = [
-        `${functionsBase}/sync-ventas-v4?desde=${ymd}&hasta=${ymd}`,
-        `${functionsBase}/sync-ventas?desde=${ymd}&hasta=${ymd}`,
+        `${functionsBase}/sync-ventas-detalle${query}`,
+        `${functionsBase}/sync-ventas-v4${query}`,
+        `${functionsBase}/sync-ventas${query}`,
       ];
 
       const invokeEndpoint = async (endpoint: string) => {
@@ -321,6 +491,10 @@ export const Dashboard = () => {
           break;
         } catch (err: any) {
           lastError = err;
+          if (err?.status === 404 && endpoint.includes('sync-ventas-detalle')) {
+            debugLog('[Dashboard] sync-ventas-detalle no disponible, intentando fallback');
+            continue;
+          }
           if (err?.status === 404 && endpoint.includes('sync-ventas-v4')) {
             debugLog('[Dashboard] sync-ventas-v4 no disponible, probando sync-ventas');
             continue;
@@ -337,6 +511,7 @@ export const Dashboard = () => {
       clearAlert('sync-error');
       setSyncStatus({ lastSyncTime: new Date(), syncMessage: '✓ Sincronización completada' });
       await loadDashboardData();
+      window.dispatchEvent(new Event('debug:refetch-all'));
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Error en sincronización';
       setSyncStatus({ lastSyncTime: new Date(), syncMessage: `✗ ${message}` });
@@ -447,11 +622,11 @@ export const Dashboard = () => {
 
         {/* KPIs */}
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-6">
-          <KPICard title="Ventas del Día" value={kpis.ventasHoy} icon={DollarSign} color="bg-gradient-to-br from-green-500 to-emerald-600" prefix="$" />
-          <KPICard title="Transacciones" value={kpis.transaccionesHoy} icon={Receipt} color="bg-gradient-to-br from-blue-500 to-cyan-600" />
-          <KPICard title="Ticket Promedio" value={kpis.ticketPromedio} icon={TrendingUp} color="bg-gradient-to-br from-purple-500 to-pink-600" prefix="$" />
-          <KPICard title="Planilla Activa" value={kpis.planillaActiva} icon={Users} color="bg-gradient-to-br from-orange-500 to-red-600" prefix="$" />
-          <KPICard title="Utilidad Bruta" value={kpis.utilidadBruta} icon={PieChart} color="bg-gradient-to-br from-indigo-500 to-purple-600" prefix="$" />
+          <KPICard title="Ventas Brutas" value={kpis.ventasBrutas} icon={DollarSign} color="bg-gradient-to-br from-green-500 to-emerald-600" prefix="$" />
+          <KPICard title="COGS" value={kpis.cogs} icon={Receipt} color="bg-gradient-to-br from-blue-500 to-cyan-600" prefix="$" />
+          <KPICard title="Margen Bruto" value={kpis.margen} icon={TrendingUp} color="bg-gradient-to-br from-purple-500 to-pink-600" prefix="$" />
+          <KPICard title="Tickets" value={kpis.tickets} icon={Users} color="bg-gradient-to-br from-orange-500 to-red-600" />
+          <KPICard title="Líneas" value={kpis.lineas} icon={PieChart} color="bg-gradient-to-br from-indigo-500 to-purple-600" />
         </div>
 
         {/* Charts */}

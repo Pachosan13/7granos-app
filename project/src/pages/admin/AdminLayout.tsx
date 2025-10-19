@@ -1,15 +1,16 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { useLocation } from 'react-router-dom';
-import { Building2, Users, Database, RefreshCw, Calculator, Activity } from 'lucide-react';
+import { Building2, Users, Database, RefreshCw, Calculator, Activity, HeartPulse } from 'lucide-react';
 import AdminSucursales from './AdminSucursales';
 import AdminUsuarios from './AdminUsuarios';
 import AdminInvu from './AdminInvu';
 import AdminSync from './AdminSync';
 import AdminPlanilla from './planilla/AdminPlanilla';
 import AdminHealth from './Health';
+import AdminHealthInvu from './HealthInvu';
 import { isDebug } from '../../utils/diagnostics';
 
-type AdminTab = 'sucursales' | 'usuarios' | 'invu' | 'sync' | 'planilla' | 'health';
+type AdminTab = 'sucursales' | 'usuarios' | 'invu' | 'sync' | 'planilla' | 'health' | 'health-invu';
 
 const AdminLayout: React.FC = () => {
   const [activeTab, setActiveTab] = useState<AdminTab>('sucursales');
@@ -26,6 +27,7 @@ const AdminLayout: React.FC = () => {
     ];
     if (debugMode) {
       base.push({ id: 'health' as AdminTab, label: 'Health', icon: Activity });
+      base.push({ id: 'health-invu' as AdminTab, label: 'Health INVU', icon: HeartPulse });
     }
     return base;
   }, [debugMode]);
@@ -34,6 +36,8 @@ const AdminLayout: React.FC = () => {
     if (!debugMode) return;
     if (location.hash === '#health' || location.pathname.endsWith('/health')) {
       setActiveTab('health');
+    } else if (location.hash === '#health-invu' || location.pathname.endsWith('/health-invu')) {
+      setActiveTab('health-invu');
     }
   }, [location.hash, location.pathname, debugMode]);
 
@@ -51,6 +55,8 @@ const AdminLayout: React.FC = () => {
         return <AdminPlanilla />;
       case 'health':
         return <AdminHealth />;
+      case 'health-invu':
+        return <AdminHealthInvu />;
       default:
         return <AdminSucursales />;
     }
