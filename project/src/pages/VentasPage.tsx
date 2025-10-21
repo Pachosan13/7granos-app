@@ -18,7 +18,7 @@ import { KPICard } from '../components/KPICard';
 import { RealtimeStatusIndicator } from '../components/RealtimeStatusIndicator';
 import { useRealtimeVentas } from '../hooks/useRealtimeVentas';
 import { debugLog, getFunctionsBase } from '../utils/diagnostics';
-import { getDefaultInvuBranch } from '../utils/invuBranches';
+import { mapSucursalToInvuBranch } from '../utils/invuBranches';
 
 type SucursalRow = {
   nombre: string;
@@ -50,10 +50,10 @@ export function VentasPage() {
   const {
     sucursales,
     sucursalSeleccionada,
+    isViewingAll,
   } = useAuthOrg();
 
   const functionsBase = useMemo(() => getFunctionsBase(), []);
-  const activeBranchCode = getDefaultInvuBranch();
   const activeBranchLabel = 'San Francisco'; // TODO: reemplazar cuando activemos otras sucursales
 
   // --------- Filtros ---------
@@ -62,7 +62,7 @@ export function VentasPage() {
   const [hasta, setHasta] = useState(hoy);
 
   // IDs como string (UUID)
-  const [, setSelectedSucursalId] = useState<string | null>(
+  const [selectedSucursalId, setSelectedSucursalId] = useState<string | null>(
     sucursalSeleccionada?.id ? String(sucursalSeleccionada.id) : null
   );
 
@@ -92,17 +92,24 @@ export function VentasPage() {
   const [debugInfo, setDebugInfo] = useState<any>(null);
 
   // Helpers UI
-  const headerNote = `Viendo datos de ${activeBranchLabel} (otras sucursales próximamente)`;
+  const viewingAll = isViewingAll || selectedSucursalId === null;
+  const selectedSucursalName = !viewingAll
+    ? sucursales.find(s => String(s.id) === selectedSucursalId)?.nombre ?? 'Sucursal'
+    : null;
+  const headerNote = viewingAll
+    ? `Viendo datos de ${activeBranchLabel} (otras sucursales próximamente)`
+    : `Viendo únicamente ${selectedSucursalName}`;
 
   // --------- Carga desde DB ---------
   const loadData = useCallback(async () => {
     setLoading(true);
     setSeriesStatus('loading');
     try {
+      const branchCode = mapSucursalToInvuBranch(viewingAll ? activeBranchLabel : selectedSucursalName);
       const { data, error } = await supabase
         .from('v_ui_series_14d')
         .select('*')
-        .eq('sucursal', activeBranchCode)
+        .eq('sucursal', branchCode)
         .gte('dia', desde)
         .lte('dia', hasta)
         .order('dia', { ascending: true });
@@ -116,7 +123,7 @@ export function VentasPage() {
         setTotalITBMS(0);
         setSeriesStatus('empty');
         setSyncBanner(prev => (prev && prev.kind === 'warn' ? prev : null));
-        setDebugInfo({ error: error.message, filtro: { desde, hasta, branch: activeBranchCode } });
+        setDebugInfo({ error: error.message, filtro: { desde, hasta, branch: branchCode } });
         return;
       }
 
@@ -128,7 +135,7 @@ export function VentasPage() {
         setTotalITBMS(0);
         setSeriesStatus('empty');
         setSyncBanner(prev => (prev && prev.kind === 'warn' ? prev : null));
-        setDebugInfo({ info: 'sin datos', filtro: { desde, hasta, branch: activeBranchCode } });
+        setDebugInfo({ info: 'sin datos', filtro: { desde, hasta, branch: branchCode } });
         return;
       }
 
@@ -163,7 +170,7 @@ export function VentasPage() {
 
       setRows([
         {
-          nombre: activeBranchLabel,
+          nombre: selectedSucursalName ?? activeBranchLabel,
           ventas: totals.ventas,
           transacciones: totals.tickets,
           ticketPromedio: totals.tickets > 0 ? totals.ventas / totals.tickets : 0,
@@ -176,7 +183,7 @@ export function VentasPage() {
       setSeriesStatus('ok');
       setSyncBanner(prev => (prev && prev.kind === 'warn' ? null : prev));
       setDebugInfo({
-        filtro: { desde, hasta, branch: activeBranchCode },
+        filtro: { desde, hasta, branch: branchCode },
         seriesCount: normalized.length,
         sample: normalized[0] ?? null,
         totals,
@@ -193,7 +200,7 @@ export function VentasPage() {
     } finally {
       setLoading(false);
     }
-  }, [activeBranchCode, activeBranchLabel, desde, hasta]);
+  }, [activeBranchLabel, desde, hasta, selectedSucursalName, viewingAll]);
 
 
   // --------- Sync: Edge function PERSISTE y recarga DB ---------
@@ -475,13 +482,11 @@ export function VentasPage() {
               <label className="block text-sm text-gray-600 dark:text-gray-400 mb-1">Sucursal</label>
               <div className="flex gap-2">
                 <select
-                  value="sf"
-                  disabled
+                  value={viewingAll ? '' : String(selectedSucursalId ?? '')}
                   onChange={(e) => setSelectedSucursalId(e.target.value ? String(e.target.value) : null)}
-                  className="flex-1 px-3 py-2 rounded-lg border dark:border-gray-700 bg-white dark:bg-gray-900 text-gray-900 dark:text-gray-100 cursor-not-allowed"
+                  className="flex-1 px-3 py-2 rounded-lg border dark:border-gray-700 bg-white dark:bg-gray-900 text-gray-900 dark:text-gray-100"
                 >
                   <option value="">Todas las sucursales</option>
-                  <option value="sf">San Francisco</option>
                   {sucursales.map((s) => (
                     <option key={String(s.id)} value={String(s.id)}>
                       {s.nombre}

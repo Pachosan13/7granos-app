@@ -20,6 +20,7 @@ import { debugLog, getFunctionsBase, isColumnMissing } from '../utils/diagnostic
 
 // Helpers
 const usd = (v: number) => formatCurrencyUSD(Number(v || 0));
+const safeStr = (value: unknown) => (value ?? '').toString();
 const todayYMD = () => {
   const tz = 'America/Panama';
   const nowPa = new Date(new Date().toLocaleString('en-US', { timeZone: tz }));
@@ -232,7 +233,7 @@ export const Dashboard = () => {
                 map.set(row.dia, entry);
                 return map;
               }, new Map<string, any>())
-            ).sort((a, b) => a.dia.localeCompare(b.dia))
+            ).sort((a, b) => safeStr(a.dia).localeCompare(safeStr(b.dia)))
           : rawRows;
 
       setVentasDiarias(
