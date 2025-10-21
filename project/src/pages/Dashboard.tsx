@@ -1,482 +1,577 @@
+// src/pages/Dashboard.tsx
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import {
-  DollarSign, Receipt, TrendingUp, Users, PieChart,
-  RefreshCw, AlertTriangle, Building2, Clock,
+  DollarSign,
+  Receipt,
+  TrendingUp,
+  Users,
+  PieChart,
+  RefreshCw,
+  AlertTriangle,
+  Building2,
+  Clock,
 } from 'lucide-react';
 import {
-  BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip,
-  ResponsiveContainer, ComposedChart, Area,
+  BarChart,
+  Bar,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip,
+  ResponsiveContainer,
+  PieChart as RePieChart,
+  Pie,
+  Cell,
+  Legend,
 } from 'recharts';
+import { supabase } from '../lib/supabase';
 import { useAuthOrg } from '../context/AuthOrgContext';
-import { LiveClock } from '../components/LiveClock';
+import { formatCurrencyUSD } from '../lib/format';
 import { KPICard } from '../components/KPICard';
 import { RealtimeStatusIndicator } from '../components/RealtimeStatusIndicator';
-import { supabase } from '../lib/supabase';
-import { formatCurrencyUSD, formatDateDDMMYYYY } from '../lib/format';
 import { useRealtimeVentas } from '../hooks/useRealtimeVentas';
-import { debugLog, getFunctionsBase } from '../utils/diagnostics';
 
-// Helpers
-const usd = (v: number) => formatCurrencyUSD(Number(v || 0));
-const todayYMD = () => {
-  const tz = 'America/Panama';
-  const nowPa = new Date(new Date().toLocaleString('en-US', { timeZone: tz }));
-  return nowPa.toISOString().slice(0, 10);
-};
-const ymdInTZ = (tz: string, offsetDays = 0) => {
-  const nowTz = new Date(new Date().toLocaleString('en-US', { timeZone: tz }));
-  nowTz.setDate(nowTz.getDate() + offsetDays);
-  return nowTz.toISOString().slice(0, 10);
-};
-const isEarlyPanamaHour = (limitHour = 8) => {
-  const nowPa = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Panama' }));
-  return nowPa.getHours() < limitHour;
+const COLORS = ['#3b82f6', '#8b5cf6', '#ec4899', '#f59e0b', '#10b981', '#06b6d4'];
+
+type KPI = {
+  ventas_brutas: number;
+  tickets: number;
+  ticket_promedio: number;
+  margen_bruto: number;
+  clientes_activos: number;
+  sucursal?: string;
+  sucursal_id?: string;
+  sucursal_nombre?: string;
 };
 
-export const Dashboard = () => {
+type SeriesRow = {
+  dia: string;
+  ventas_brutas: number;
+  tickets: number;
+  margen_bruto: number;
+  sucursal_id?: string;
+  sucursal_nombre?: string;
+};
+
+type TopProduct = {
+  producto: string;
+  cantidad: number;
+  total: number;
+};
+
+export function Dashboard() {
   const navigate = useNavigate();
-  const { sucursales, loading: authOrgLoading } = useAuthOrg();
+  const { sucursales, sucursalSeleccionada, getFilteredSucursalIds } = useAuthOrg();
 
-  const [sucursalFiltro, setSucursalFiltro] = useState<string>('todas');
-  const [kpis, setKpis] = useState({
-    ventasBrutas: 0,
-    cogs: 0,
-    margen: 0,
-    tickets: 0,
-    lineas: 0,
+  // Estado local para filtro de sucursal (independiente del contexto)
+  const [selectedSucursalId, setSelectedSucursalId] = useState<string | null>(
+    sucursalSeleccionada?.id ? String(sucursalSeleccionada.id) : null
+  );
+
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  // KPIs
+  const [totalVentas, setTotalVentas] = useState(0);
+  const [totalTransacciones, setTotalTransacciones] = useState(0);
+  const [ticketPromedio, setTicketPromedio] = useState(0);
+  const [margenBruto, setMargenBruto] = useState(0);
+  const [clientesActivos, setClientesActivos] = useState(0);
+
+  // Datos para gráficos
+  const [ventasPorDia, setVentasPorDia] = useState<any[]>([]);
+  const [ventasPorSucursal, setVentasPorSucursal] = useState<any[]>([]);
+  const [topProductos, setTopProductos] = useState<TopProduct[]>([]);
+
+  // Sincronización
+  const [lastSync, setLastSync] = useState<Date | null>(null);
+
+  // Helpers
+  const viewingAll = selectedSucursalId === null;
+  const selectedSucursalName = viewingAll
+    ? null
+    : sucursales.find(s => String(s.id) === selectedSucursalId)?.nombre ?? 'Sucursal';
+
+  // Realtime hook
+  const rt: any = useRealtimeVentas({
+    enabled: true,
+    debounceMs: 2000,
+    onUpdate: () => {
+      console.log('[Dashboard] Actualización en tiempo real detectada');
+      loadData();
+    },
   });
-  const [ventasDiarias, setVentasDiarias] = useState<any[]>([]);
-  const [sucursalSummary, setSucursalSummary] = useState<any[]>([]);
-  const [alerts, setAlerts] = useState<any[]>([]);
-  const [dashboardLoading, setDashboardLoading] = useState(true);
-  const [syncing, setSyncing] = useState(false);
-  const [syncStatus, setSyncStatus] = useState({
-    lastSyncTime: null as Date | null,
-    syncMessage: null as string | null,
-  });
-  const functionsBase = useMemo(() => getFunctionsBase(), []);
 
-  const registerAlert = useCallback((alert: any) => {
-    setAlerts(prev => {
-      const filtered = prev.filter((item: any) => item.id !== alert.id);
-      return [...filtered, alert];
-    });
-  }, []);
+  let rtConnected = false;
+  let rtError: string | null = null;
+  let rtLastUpdate: string | Date | null = null;
+  let onReconnect: () => void = () => window.location.reload();
 
-  const clearAlert = useCallback((id: string) => {
-    setAlerts(prev => prev.filter((item: any) => item.id !== id));
-  }, []);
+  if (typeof rt === 'string') {
+    rtConnected = rt === 'open';
+    rtError = rt === 'error' ? 'Connection error' : null;
+  } else if (rt && typeof rt === 'object') {
+    if (typeof rt.connected === 'boolean') rtConnected = rt.connected;
+    if (typeof rt.error === 'string') rtError = rt.error || null;
+    if (rt.lastUpdate) rtLastUpdate = rt.lastUpdate;
+    if (!('connected' in rt) && typeof rt.status === 'string') {
+      rtConnected = rt.status === 'open';
+      if (rt.status === 'error' && !rtError) rtError = 'Connection error';
+    }
+    if (typeof rt.manualReconnect === 'function') {
+      onReconnect = rt.manualReconnect;
+    }
+  }
 
-  const selectedIds = useCallback(() => {
-    return sucursalFiltro === 'todas'
-      ? sucursales.map(s => String(s.id))
-      : [String(sucursalFiltro)];
-  }, [sucursalFiltro, sucursales]);
+  // Cargar datos del dashboard
+  const loadData = useCallback(async () => {
+    setLoading(true);
+    setError(null);
 
-  // === KPIs ===
-  const loadKPIs = useCallback(async () => {
     try {
-      const { data, error } = await supabase.from('v_ui_kpis_hoy').select('*');
-      if (error) throw error;
+      const idsToFilter = viewingAll
+        ? getFilteredSucursalIds().map(String)
+        : selectedSucursalId
+        ? [String(selectedSucursalId)]
+        : [];
 
-      const ids = selectedIds();
-      const filtered = sucursalFiltro === 'todas'
-        ? data ?? []
-        : (data ?? []).filter(row => String(row.sucursal_id ?? row.sucursal) === (ids[0] ?? ''));
+      // 1. KPIs de hoy
+      let kpisQuery = supabase.from('v_ui_kpis_hoy').select('*');
 
-      const aggregate = filtered.reduce(
+      if (!viewingAll && idsToFilter.length > 0) {
+        kpisQuery = kpisQuery.eq('sucursal_id', idsToFilter[0]);
+      } else if (viewingAll && idsToFilter.length > 0) {
+        kpisQuery = kpisQuery.in('sucursal_id', idsToFilter);
+      }
+
+      const { data: kpisData, error: kpisError } = await kpisQuery;
+      if (kpisError) throw kpisError;
+
+      const kpis = (kpisData ?? []) as KPI[];
+
+      const totals = kpis.reduce(
         (acc, row) => ({
-          ventasBrutas: acc.ventasBrutas + Number(row.ventas_brutas ?? row.total_bruto ?? 0),
-          cogs: acc.cogs + Number(row.cogs ?? row.costo ?? 0),
-          margen: acc.margen + Number(row.margen ?? row.margen_bruto ?? 0),
-          tickets: acc.tickets + Number(row.tickets ?? row.transacciones ?? 0),
-          lineas: acc.lineas + Number(row.lineas ?? row.line_items ?? 0),
+          ventas: acc.ventas + (row.ventas_brutas ?? 0),
+          tickets: acc.tickets + (row.tickets ?? 0),
+          margen: acc.margen + (row.margen_bruto ?? 0),
+          clientes: acc.clientes + (row.clientes_activos ?? 0),
         }),
-        { ventasBrutas: 0, cogs: 0, margen: 0, tickets: 0, lineas: 0 }
+        { ventas: 0, tickets: 0, margen: 0, clientes: 0 }
       );
 
-      setKpis(aggregate);
-      clearAlert('kpi-error');
-    } catch (err) {
-      debugLog('[Dashboard] loadKPIs error', err);
-      registerAlert({
-        id: 'kpi-error',
-        type: 'error',
-        title: 'Error cargando KPIs',
-        message: 'No fue posible leer v_ui_kpis_hoy.',
-        icon: AlertTriangle,
-      });
-    }
-  }, [clearAlert, registerAlert, selectedIds, sucursalFiltro]);
+      setTotalVentas(totals.ventas);
+      setTotalTransacciones(totals.tickets);
+      setTicketPromedio(totals.tickets > 0 ? totals.ventas / totals.tickets : 0);
+      setMargenBruto(totals.margen);
+      setClientesActivos(totals.clientes);
 
-  // === Ventas 30 días ===
-  const loadVentasDiarias = useCallback(async () => {
-    try {
-      let query = supabase.from('v_ui_series_14d').select('*').order('dia', { ascending: true });
-      if (sucursalFiltro !== 'todas') {
-        const ids = selectedIds();
-        if (ids.length > 0) {
-          query = query.eq('sucursal_id', ids[0]);
-        }
+      // 2. Serie de ventas últimos 7 días
+      const hoy = new Date();
+      const hace7dias = new Date(hoy);
+      hace7dias.setDate(hace7dias.getDate() - 7);
+
+      const desde = hace7dias.toISOString().split('T')[0];
+      const hasta = hoy.toISOString().split('T')[0];
+
+      let seriesQuery = supabase
+        .from('v_ui_series_14d')
+        .select('*')
+        .gte('dia', desde)
+        .lte('dia', hasta)
+        .order('dia', { ascending: true });
+
+      if (!viewingAll && idsToFilter.length > 0) {
+        seriesQuery = seriesQuery.eq('sucursal_id', idsToFilter[0]);
+      } else if (viewingAll && idsToFilter.length > 0) {
+        seriesQuery = seriesQuery.in('sucursal_id', idsToFilter);
       }
 
-      const { data, error } = await query;
-      if (error) throw error;
+      const { data: seriesData, error: seriesError } = await seriesQuery;
+      if (seriesError) throw seriesError;
 
-      const dataset = (data ?? []).map((row: Record<string, any>) => ({
-        dia: row.dia,
-        fecha: formatDateDDMMYYYY(row.dia),
-        ventas: Number(row.ventas_brutas ?? row.total_bruto ?? 0),
-        margen: Number(row.margen ?? row.margen_bruto ?? 0),
-        tickets: Number(row.tickets ?? row.transacciones ?? 0),
-        lineas: Number(row.lineas ?? row.line_items ?? 0),
-        cogs: Number(row.cogs ?? row.costo ?? 0),
-        transacciones: Number(row.tickets ?? row.transacciones ?? 0),
-        sucursal_id: row.sucursal_id,
-        sucursal_nombre: row.sucursal_nombre ?? row.nombre ?? undefined,
-      }));
+      const series = (seriesData ?? []) as SeriesRow[];
 
-      setVentasDiarias(dataset);
+      // Agrupar por día
+      const ventasPorDiaMap = new Map<string, { dia: string; ventas: number; tickets: number }>();
+      series.forEach(row => {
+        const dia = row.dia;
+        const entry = ventasPorDiaMap.get(dia) ?? { dia, ventas: 0, tickets: 0 };
+        entry.ventas += row.ventas_brutas ?? 0;
+        entry.tickets += row.tickets ?? 0;
+        ventasPorDiaMap.set(dia, entry);
+      });
 
-      const today = todayYMD();
-      const todaysRows = dataset.filter(row => row.dia === today);
-      if (todaysRows.length > 0) {
-        const summary = todaysRows.map(row => ({
-          id: row.sucursal_id ?? row.sucursal_nombre ?? row.dia,
-          nombre: row.sucursal_nombre ?? `Sucursal ${String(row.sucursal_id ?? '').slice(0, 6) || 'N/D'}`,
+      const ventasPorDiaArray = Array.from(ventasPorDiaMap.values())
+        .sort((a, b) => a.dia.localeCompare(b.dia))
+        .map(row => ({
+          fecha: new Date(row.dia).toLocaleDateString('es-PA', { month: 'short', day: 'numeric' }),
           ventas: row.ventas,
-          transacciones: row.tickets,
-          ticketPromedio: row.tickets ? row.ventas / row.tickets : 0,
+          tickets: row.tickets,
         }));
-        setSucursalSummary(summary.sort((a, b) => b.ventas - a.ventas));
-        clearAlert('sucursal-summary-error');
-      } else {
-        setSucursalSummary([]);
-        registerAlert({
-          id: 'sucursal-summary-error',
-          type: 'warning',
-          title: 'Sin datos de hoy',
-          message: 'v_ui_series_14d no devolvió registros para el día actual.',
-          icon: AlertTriangle,
+
+      setVentasPorDia(ventasPorDiaArray);
+
+      // 3. Ventas por sucursal (solo si viendo todas)
+      if (viewingAll) {
+        const ventasPorSucursalMap = new Map<string, { nombre: string; ventas: number }>();
+        series.forEach(row => {
+          const sucursalId = row.sucursal_id ?? row.sucursal_nombre ?? 'Sin sucursal';
+          const nombre = row.sucursal_nombre ?? sucursalId;
+          const entry = ventasPorSucursalMap.get(sucursalId) ?? { nombre, ventas: 0 };
+          entry.ventas += row.ventas_brutas ?? 0;
+          ventasPorSucursalMap.set(sucursalId, entry);
         });
+
+        const ventasPorSucursalArray = Array.from(ventasPorSucursalMap.values())
+          .sort((a, b) => b.ventas - a.ventas)
+          .slice(0, 6); // Top 6 sucursales
+
+        setVentasPorSucursal(ventasPorSucursalArray);
+      } else {
+        setVentasPorSucursal([]);
       }
 
-      clearAlert('ventas-diarias-error');
-    } catch (err) {
-      debugLog('[Dashboard] loadVentasDiarias error', err);
-      registerAlert({
-        id: 'ventas-diarias-error',
-        type: 'error',
-        title: 'Ventas (14 días)',
-        message: 'No se pudieron obtener los datos de v_ui_series_14d.',
-        icon: AlertTriangle,
-      });
-      setVentasDiarias([]);
-      setSucursalSummary([]);
-    }
-  }, [clearAlert, registerAlert, selectedIds, sucursalFiltro]);
+      // 4. Top productos (desde v_ui_top_productos_mes si existe)
+      try {
+        let topQuery = supabase
+          .from('v_ui_top_productos_mes')
+          .select('*')
+          .order('cantidad', { ascending: false })
+          .limit(5);
 
-  // === Sucursal Summary ===
-  // === Alerts ===
-  const loadAlerts = useCallback(async () => {
-    try {
-      const { data: creds, error: credsError } = await supabase.from('invu_credenciales').select('sucursal_id');
-      if (credsError) throw credsError;
-
-      const { data: act, error: actError } = await supabase.from('sucursal').select('id,nombre').eq('activa', true);
-      if (actError) throw actError;
-
-      const faltantes = (act ?? []).filter(s => !(creds ?? []).some(c => c.sucursal_id === s.id));
-      if (faltantes.length) {
-        registerAlert({
-          id: 'missing-creds',
-          type: 'warning',
-          title: 'Credenciales INVU faltantes',
-          message: `${faltantes.length} sucursales sin token configurado`,
-          icon: AlertTriangle,
-        });
-      } else {
-        clearAlert('missing-creds');
-      }
-    } catch (err) {
-      debugLog('[Dashboard] loadAlerts error', err);
-    }
-  }, [clearAlert, registerAlert]);
-
-  const loadDashboardData = useCallback(async () => {
-    setDashboardLoading(true);
-    await Promise.all([loadKPIs(), loadVentasDiarias(), loadAlerts()]);
-    setDashboardLoading(false);
-  }, [loadAlerts, loadKPIs, loadVentasDiarias]);
-
-  const handleSync = useCallback(async () => {
-    if (!functionsBase) {
-      const message = 'Edge Function no configurada (revisa VITE_SUPABASE_FUNCTIONS_BASE).';
-      setSyncStatus({ lastSyncTime: new Date(), syncMessage: `✗ ${message}` });
-      registerAlert({
-        id: 'sync-error',
-        type: 'error',
-        title: 'Sincronización no disponible',
-        message,
-        icon: AlertTriangle,
-      });
-      return;
-    }
-
-    setSyncing(true);
-    try {
-      const ymd = isEarlyPanamaHour(8) ? ymdInTZ('America/Panama', -1) : ymdInTZ('America/Panama', 0);
-      const query = `?desde=${ymd}&hasta=${ymd}`;
-      const endpoints = [
-        `${functionsBase}/sync-ventas-detalle${query}`,
-        `${functionsBase}/sync-ventas-v4${query}`,
-        `${functionsBase}/sync-ventas${query}`,
-      ];
-
-      const invokeEndpoint = async (endpoint: string) => {
-        debugLog('[Dashboard] sincronización →', endpoint);
-        const run = async (retry: boolean): Promise<{ data: any; status: number }> => {
-          const response = await fetch(endpoint, {
-            method: 'POST',
-            headers: {
-              Authorization: `Bearer ${import.meta.env.VITE_SUPABASE_ANON_KEY}`,
-              'Content-Type': 'application/json',
-            },
-          });
-
-          if (response.ok) {
-            const data = await response.json().catch(() => ({}));
-            return { data, status: response.status };
-          }
-
-          const body = await response.text().catch(() => '');
-          if (response.status >= 500 && retry) {
-            debugLog('[Dashboard] sync retry por status', response.status);
-            return run(false);
-          }
-
-          let friendly = `HTTP ${response.status}`;
-          if (response.status === 401 || response.status === 403) {
-            friendly = 'Sesión caducada o permisos insuficientes.';
-          } else if (response.status === 404) {
-            friendly = 'Recurso de sincronización no encontrado.';
-          } else if (response.status >= 500) {
-            friendly = 'Servicio remoto con errores, reintenta en unos minutos.';
-          }
-          const error: any = new Error(`${friendly}${body ? ` · ${body.slice(0, 120)}` : ''}`);
-          error.status = response.status;
-          throw error;
-        };
-
-        return run(true);
-      };
-
-      let syncResult: any = null;
-      let success = false;
-      let lastError: any = null;
-
-      for (const endpoint of endpoints) {
-        try {
-          const { data } = await invokeEndpoint(endpoint);
-          syncResult = data;
-          success = true;
-          break;
-        } catch (err: any) {
-          lastError = err;
-          if (err?.status === 404 && endpoint.includes('sync-ventas-v4')) {
-            debugLog('[Dashboard] sync-ventas-v4 no disponible, probando sync-ventas');
-            continue;
-          }
-          throw err;
+        if (!viewingAll && idsToFilter.length > 0) {
+          topQuery = topQuery.eq('sucursal_id', idsToFilter[0]);
+        } else if (viewingAll && idsToFilter.length > 0) {
+          topQuery = topQuery.in('sucursal_id', idsToFilter);
         }
+
+        const { data: topData, error: topError } = await topQuery;
+        if (!topError && topData) {
+          setTopProductos(topData as TopProduct[]);
+        } else {
+          setTopProductos([]);
+        }
+      } catch (e) {
+        console.log('[Dashboard] Top productos no disponible', e);
+        setTopProductos([]);
       }
 
-      if (!success) {
-        throw lastError ?? new Error('No fue posible ejecutar la sincronización');
-      }
-
-      debugLog('[Dashboard] sync result', syncResult);
-      clearAlert('sync-error');
-      setSyncStatus({ lastSyncTime: new Date(), syncMessage: '✓ Sincronización completada' });
-      await loadDashboardData();
+      setLastSync(new Date());
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Error en sincronización';
-      setSyncStatus({ lastSyncTime: new Date(), syncMessage: `✗ ${message}` });
-      registerAlert({
-        id: 'sync-error',
-        type: 'error',
-        title: 'Sincronización fallida',
-        message,
-        icon: AlertTriangle,
-      });
-      debugLog('[Dashboard] handleSync error', err);
+      console.error('[Dashboard] Error cargando datos:', err);
+      setError(err instanceof Error ? err.message : 'Error desconocido');
     } finally {
-      setSyncing(false);
+      setLoading(false);
     }
-  }, [clearAlert, functionsBase, loadDashboardData, registerAlert]);
+  }, [viewingAll, selectedSucursalId, getFilteredSucursalIds]);
 
+  // Cargar datos al montar y cuando cambia el filtro
   useEffect(() => {
-    if (!authOrgLoading && sucursales.length) {
-      loadDashboardData();
+    loadData();
+  }, [loadData]);
+
+  // Sincronizar con el contexto cuando cambia la sucursal seleccionada
+  useEffect(() => {
+    if (sucursalSeleccionada?.id) {
+      setSelectedSucursalId(String(sucursalSeleccionada.id));
+    } else {
+      setSelectedSucursalId(null);
     }
-  }, [authOrgLoading, loadDashboardData, sucursalFiltro, sucursales]);
+  }, [sucursalSeleccionada]);
 
-  useEffect(() => {
-    const handler = () => {
-      debugLog('[Dashboard] evento debug:refetch-all recibido');
-      loadDashboardData();
-    };
-    window.addEventListener('debug:refetch-all', handler);
-    return () => window.removeEventListener('debug:refetch-all', handler);
-  }, [loadDashboardData]);
+  const containerVariants = {
+    hidden: { opacity: 0 },
+    visible: {
+      opacity: 1,
+      transition: { staggerChildren: 0.1 },
+    },
+  };
 
-  const realtimeStatus = useRealtimeVentas(() => loadDashboardData());
-  const realtimeConnected = realtimeStatus === 'open';
-
-  if (authOrgLoading || dashboardLoading)
-    return <div className="min-h-screen flex items-center justify-center text-gray-600">Cargando datos del dashboard...</div>;
+  const itemVariants = {
+    hidden: { y: 20, opacity: 0 },
+    visible: {
+      y: 0,
+      opacity: 1,
+    },
+  };
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100">
-      <div className="p-8 space-y-8">
+    <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 dark:from-gray-900 dark:to-gray-800">
+      <div className="p-6 lg:p-8 space-y-6">
         {/* Header */}
-        <motion.div initial={{ opacity: 0, y: -20 }} animate={{ opacity: 1, y: 0 }}
-          className="bg-white rounded-2xl shadow-lg p-6 border border-gray-100">
-          <div className="flex flex-col lg:flex-row justify-between items-center gap-4">
-            <div className="flex items-center gap-4">
-              <img src="/branding/7granos-logo.png" alt="7 Granos" className="h-12 w-12 rounded-full" />
-              <div>
-                <h1 className="text-3xl font-bold text-gray-900">Centro de Control 7 Granos</h1>
-                <div className="flex items-center gap-4 text-gray-600">
-                  <div className="flex items-center gap-2"><Clock className="h-4 w-4" /><LiveClock /></div>
-                  <div className="flex items-center gap-2">
-                    <Building2 className="h-4 w-4" />
-                    <select value={sucursalFiltro} onChange={e => setSucursalFiltro(e.target.value)}
-                      className="border rounded-lg px-2 py-1 text-sm">
-                      <option value="todas">Todas las sucursales</option>
-                      {sucursales.map(s => <option key={s.id} value={String(s.id)}>{s.nombre}</option>)}
-                    </select>
-                  </div>
-                  <RealtimeStatusIndicator connected={realtimeConnected} compact />
-                </div>
+        <motion.div
+          initial={{ opacity: 0, y: -20 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="bg-white dark:bg-gray-800 rounded-2xl shadow-lg p-6 border border-gray-100 dark:border-gray-700"
+        >
+          <div className="flex items-start justify-between gap-4">
+            <div className="flex-1">
+              <div className="flex items-center gap-4 mb-2">
+                <h1 className="text-3xl font-bold text-gray-900 dark:text-white">Dashboard</h1>
+                <RealtimeStatusIndicator
+                  connected={rtConnected}
+                  lastUpdate={rtLastUpdate}
+                  error={rtError}
+                  onReconnect={onReconnect}
+                  compact
+                />
               </div>
+              <p className="text-gray-600 dark:text-gray-400">
+                Resumen general de operaciones en tiempo real
+              </p>
+              <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
+                {viewingAll
+                  ? `Viendo datos de todas las sucursales (${sucursales.length} sucursales)`
+                  : `Viendo únicamente: ${selectedSucursalName}`}
+              </p>
             </div>
-            <div className="flex flex-col items-end space-y-2">
-              {syncStatus.lastSyncTime && (
-                <span className="text-xs text-gray-600 bg-green-50 px-3 py-1 rounded-full">
-                  Última sync: {syncStatus.lastSyncTime.toLocaleTimeString('es-PA', { hour: '2-digit', minute: '2-digit' })}
-                </span>
-              )}
-              <button onClick={handleSync} disabled={syncing}
-                className={`flex items-center gap-3 px-6 py-3 rounded-2xl font-semibold text-white bg-gradient-to-r from-blue-600 to-purple-600 hover:scale-105 transition ${syncing ? 'opacity-60' : ''}`}>
-                <RefreshCw className={`h-5 w-5 ${syncing ? 'animate-spin' : ''}`} />
-                {syncing ? 'Sincronizando...' : 'Sincronizar Ahora'}
-              </button>
-              {syncStatus.syncMessage && (
-                <div className={`text-xs px-3 py-1 rounded-lg ${
-                  syncStatus.syncMessage.includes('✓') ? 'bg-green-100 text-green-800'
-                    : syncStatus.syncMessage.includes('✗') ? 'bg-red-100 text-red-800'
-                    : 'bg-blue-100 text-blue-800'
-                }`}>
-                  {syncStatus.syncMessage}
-                </div>
-              )}
-            </div>
+            <button
+              onClick={loadData}
+              disabled={loading}
+              className="inline-flex items-center gap-2 px-5 py-3 rounded-xl text-white bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-700 hover:to-purple-700 shadow-lg disabled:opacity-50 transition-all"
+            >
+              <RefreshCw className={`h-5 w-5 ${loading ? 'animate-spin' : ''}`} />
+              {loading ? 'Actualizando…' : 'Actualizar'}
+            </button>
           </div>
-          {alerts.length > 0 && (
-            <div className="mt-4 w-full space-y-3">
-              {alerts.map((alert: any) => {
-                const Icon = alert.icon ?? AlertTriangle;
-                const palette =
-                  alert.type === 'error'
-                    ? 'bg-red-50 border-red-200 text-red-800'
-                    : alert.type === 'warning'
-                      ? 'bg-amber-50 border-amber-200 text-amber-900'
-                      : 'bg-blue-50 border-blue-200 text-blue-800';
-                return (
-                  <div key={alert.id} className={`flex items-start gap-3 border rounded-xl px-4 py-3 ${palette}`}>
-                    <Icon className="h-5 w-5 flex-shrink-0 mt-0.5" />
-                    <div>
-                      <div className="font-semibold text-sm">{alert.title}</div>
-                      {alert.message && <p className="text-sm mt-0.5">{alert.message}</p>}
-                    </div>
-                  </div>
-                );
-              })}
+
+          {lastSync && (
+            <div className="mt-4 flex items-center gap-2 text-sm text-gray-500 dark:text-gray-400">
+              <Clock className="h-4 w-4" />
+              Última actualización: {lastSync.toLocaleTimeString('es-PA')}
             </div>
           )}
         </motion.div>
 
+        {/* Filtro de sucursal */}
+        <motion.div
+          initial={{ opacity: 0, y: -20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.1 }}
+          className="bg-white dark:bg-gray-800 rounded-2xl shadow-lg p-6 border border-gray-100 dark:border-gray-700"
+        >
+          <div className="flex items-center gap-4">
+            <Building2 className="h-5 w-5 text-gray-500 dark:text-gray-400" />
+            <select
+              value={viewingAll ? '' : String(selectedSucursalId ?? '')}
+              onChange={(e) => setSelectedSucursalId(e.target.value ? String(e.target.value) : null)}
+              className="flex-1 px-4 py-2 rounded-lg border dark:border-gray-700 bg-white dark:bg-gray-900 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-blue-500 dark:focus:ring-blue-400"
+            >
+              <option value="">Todas las sucursales</option>
+              {sucursales.map((s) => (
+                <option key={String(s.id)} value={String(s.id)}>
+                  {s.nombre}
+                </option>
+              ))}
+            </select>
+            <div className="px-4 py-2 rounded-lg border dark:border-gray-700 bg-gray-50 dark:bg-gray-900 text-gray-700 dark:text-gray-300 text-sm font-medium">
+              {viewingAll ? 'Vista General' : 'Vista Individual'}
+            </div>
+          </div>
+        </motion.div>
+
+        {/* Error Alert */}
+        {error && (
+          <motion.div
+            initial={{ opacity: 0, scale: 0.95 }}
+            animate={{ opacity: 1, scale: 1 }}
+            className="bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-700 rounded-xl p-4"
+          >
+            <div className="flex items-start gap-3">
+              <AlertTriangle className="h-5 w-5 text-red-600 dark:text-red-400 flex-shrink-0 mt-0.5" />
+              <div>
+                <h3 className="font-semibold text-red-800 dark:text-red-300">Error al cargar datos</h3>
+                <p className="text-sm text-red-700 dark:text-red-400 mt-1">{error}</p>
+              </div>
+            </div>
+          </motion.div>
+        )}
+
         {/* KPIs */}
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-6">
-          <KPICard title="Ventas Brutas" value={kpis.ventasBrutas} icon={DollarSign} color="bg-gradient-to-br from-green-500 to-emerald-600" prefix="$" />
-          <KPICard title="COGS" value={kpis.cogs} icon={Receipt} color="bg-gradient-to-br from-blue-500 to-cyan-600" prefix="$" />
-          <KPICard title="Margen Bruto" value={kpis.margen} icon={TrendingUp} color="bg-gradient-to-br from-purple-500 to-pink-600" prefix="$" />
-          <KPICard title="Tickets" value={kpis.tickets} icon={Users} color="bg-gradient-to-br from-orange-500 to-red-600" />
-          <KPICard title="Líneas" value={kpis.lineas} icon={PieChart} color="bg-gradient-to-br from-indigo-500 to-purple-600" />
-        </div>
+        <motion.div
+          variants={containerVariants}
+          initial="hidden"
+          animate="visible"
+          className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-6"
+        >
+          <motion.div variants={itemVariants}>
+            <KPICard
+              title="Ventas Hoy"
+              value={totalVentas}
+              icon={DollarSign}
+              color="bg-gradient-to-br from-green-500 to-emerald-600"
+              prefix="USD "
+              onClick={() => navigate('/ventas')}
+            />
+          </motion.div>
+          <motion.div variants={itemVariants}>
+            <KPICard
+              title="Transacciones"
+              value={totalTransacciones}
+              icon={Receipt}
+              color="bg-gradient-to-br from-blue-500 to-cyan-600"
+              onClick={() => navigate('/ventas')}
+            />
+          </motion.div>
+          <motion.div variants={itemVariants}>
+            <KPICard
+              title="Ticket Promedio"
+              value={ticketPromedio}
+              icon={TrendingUp}
+              color="bg-gradient-to-br from-purple-500 to-pink-600"
+              prefix="USD "
+            />
+          </motion.div>
+          <motion.div variants={itemVariants}>
+            <KPICard
+              title="Margen Bruto"
+              value={margenBruto}
+              icon={PieChart}
+              color="bg-gradient-to-br from-orange-500 to-red-600"
+              prefix="USD "
+            />
+          </motion.div>
+          <motion.div variants={itemVariants}>
+            <KPICard
+              title="Clientes Activos"
+              value={clientesActivos}
+              icon={Users}
+              color="bg-gradient-to-br from-indigo-500 to-purple-600"
+              onClick={() => navigate('/clientes')}
+            />
+          </motion.div>
+        </motion.div>
 
-        {/* Charts */}
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-          {/* Ventas últimos 30 días */}
-          <motion.div initial={{ opacity: 0, x: -20 }} animate={{ opacity: 1, x: 0 }}
-            className="bg-white rounded-2xl shadow-lg p-6 border border-gray-100">
-            <h3 className="text-xl font-bold text-gray-900 mb-6">Ventas Últimos 30 Días</h3>
-            <ResponsiveContainer width="100%" height={300}>
-              <ComposedChart data={ventasDiarias}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
-                <XAxis dataKey="fecha" stroke="#6b7280" fontSize={12} />
-                <YAxis stroke="#6b7280" fontSize={12} />
-                <Tooltip />
-                <Area type="monotone" dataKey="ventas" fill="#3b82f6" stroke="#3b82f6" strokeWidth={2} />
-                <Bar dataKey="transacciones" fill="#10b981" opacity={0.7} />
-              </ComposedChart>
-            </ResponsiveContainer>
+        {/* Charts Grid */}
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          {/* Ventas por día */}
+          <motion.div
+            variants={itemVariants}
+            initial="hidden"
+            animate="visible"
+            className="bg-white dark:bg-gray-800 rounded-2xl shadow-lg border border-gray-100 dark:border-gray-700"
+          >
+            <div className="p-6 border-b border-gray-100 dark:border-gray-700">
+              <h3 className="text-xl font-bold text-gray-900 dark:text-white">
+                Ventas últimos 7 días
+              </h3>
+              <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">
+                Evolución diaria de ventas
+              </p>
+            </div>
+            <div className="p-6 h-80">
+              {ventasPorDia.length === 0 ? (
+                <div className="h-full flex items-center justify-center text-gray-500 dark:text-gray-400">
+                  {loading ? 'Cargando…' : 'Sin datos disponibles'}
+                </div>
+              ) : (
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={ventasPorDia}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
+                    <XAxis dataKey="fecha" stroke="#6b7280" fontSize={12} />
+                    <YAxis
+                      stroke="#6b7280"
+                      fontSize={12}
+                      tickFormatter={(v) => `$${(v / 1000).toFixed(0)}k`}
+                    />
+                    <Tooltip
+                      formatter={(value: number) => formatCurrencyUSD(value)}
+                      contentStyle={{
+                        backgroundColor: 'rgba(255, 255, 255, 0.95)',
+                        border: '1px solid #e5e7eb',
+                        borderRadius: '8px',
+                      }}
+                    />
+                    <Bar dataKey="ventas" fill="#3b82f6" radius={[8, 8, 0, 0]} />
+                  </BarChart>
+                </ResponsiveContainer>
+              )}
+            </div>
           </motion.div>
 
-          {/* Rendimiento por Sucursal */}
-          <motion.div initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }}
-            className="bg-white rounded-2xl shadow-lg p-6 border border-gray-100">
-            <h3 className="text-xl font-bold text-gray-900 mb-6">Rendimiento por Sucursal (Hoy)</h3>
-            <ResponsiveContainer width="100%" height={300}>
-  <BarChart data={sucursalSummary}>
-    <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
-    <XAxis
-      dataKey="nombre"
-      stroke="#6b7280"
-      fontSize={12}
-      interval={0}
-      height={50}
-    />
-    <YAxis
-      stroke="#6b7280"
-      fontSize={12}
-      tickFormatter={(v: number) => formatCurrencyUSD(v)}
-      width={70}
-    />
-    <Tooltip />
-    <Bar
-      dataKey="ventas"
-      fill="#10b981"
-      radius={[8, 8, 0, 0]}
-      barSize={32}
-      onClick={(data: any) => {
-        const nombre = data?.nombre;
-        if (!nombre) return;
-        const suc = sucursales.find((s) => s.nombre === nombre);
-        const today = todayYMD();
-        const params = new URLSearchParams({ fecha: today });
-        if (suc?.id) params.set('sucursal_id', String(suc.id));
-        navigate(`/ventas/detalle?${params.toString()}`);
-      }}
-    />
-  </BarChart>
-</ResponsiveContainer>
-          </motion.div>
+          {/* Ventas por sucursal (solo si viendo todas) */}
+          {viewingAll && ventasPorSucursal.length > 0 && (
+            <motion.div
+              variants={itemVariants}
+              initial="hidden"
+              animate="visible"
+              className="bg-white dark:bg-gray-800 rounded-2xl shadow-lg border border-gray-100 dark:border-gray-700"
+            >
+              <div className="p-6 border-b border-gray-100 dark:border-gray-700">
+                <h3 className="text-xl font-bold text-gray-900 dark:text-white">
+                  Ventas por sucursal
+                </h3>
+                <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">
+                  Distribución últimos 7 días
+                </p>
+              </div>
+              <div className="p-6 h-80">
+                <ResponsiveContainer width="100%" height="100%">
+                  <RePieChart>
+                    <Pie
+                      data={ventasPorSucursal}
+                      dataKey="ventas"
+                      nameKey="nombre"
+                      cx="50%"
+                      cy="50%"
+                      outerRadius={100}
+                      label={(entry) => entry.nombre}
+                    >
+                      {ventasPorSucursal.map((_, index) => (
+                        <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
+                      ))}
+                    </Pie>
+                    <Tooltip formatter={(value: number) => formatCurrencyUSD(value)} />
+                    <Legend />
+                  </RePieChart>
+                </ResponsiveContainer>
+              </div>
+            </motion.div>
+          )}
+
+          {/* Top productos */}
+          {topProductos.length > 0 && (
+            <motion.div
+              variants={itemVariants}
+              initial="hidden"
+              animate="visible"
+              className="bg-white dark:bg-gray-800 rounded-2xl shadow-lg border border-gray-100 dark:border-gray-700"
+            >
+              <div className="p-6 border-b border-gray-100 dark:border-gray-700">
+                <h3 className="text-xl font-bold text-gray-900 dark:text-white">
+                  Top Productos
+                </h3>
+                <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">
+                  Más vendidos este mes
+                </p>
+              </div>
+              <div className="p-6">
+                <div className="space-y-4">
+                  {topProductos.map((prod, idx) => (
+                    <div key={idx} className="flex items-center justify-between">
+                      <div className="flex-1">
+                        <p className="font-medium text-gray-900 dark:text-white">
+                          {prod.producto}
+                        </p>
+                        <p className="text-sm text-gray-500 dark:text-gray-400">
+                          {prod.cantidad} unidades
+                        </p>
+                      </div>
+                      <div className="text-right">
+                        <p className="font-bold text-gray-900 dark:text-white">
+                          {formatCurrencyUSD(prod.total)}
+                        </p>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </motion.div>
+          )}
         </div>
       </div>
     </div>
   );
-};
+}
