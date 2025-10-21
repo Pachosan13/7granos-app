@@ -17,7 +17,8 @@ import { formatCurrencyUSD, formatDateDDMMYYYY } from '../lib/format';
 import { KPICard } from '../components/KPICard';
 import { RealtimeStatusIndicator } from '../components/RealtimeStatusIndicator';
 import { useRealtimeVentas } from '../hooks/useRealtimeVentas';
-import { debugLog, getFunctionsBase, isColumnMissing } from '../utils/diagnostics';
+import { debugLog, getFunctionsBase } from '../utils/diagnostics';
+import { getDefaultInvuBranch } from '../utils/invuBranches';
 
 type SucursalRow = {
   nombre: string;
@@ -49,10 +50,11 @@ export function VentasPage() {
   const {
     sucursales,
     sucursalSeleccionada,
-    isViewingAll,
   } = useAuthOrg();
 
   const functionsBase = useMemo(() => getFunctionsBase(), []);
+  const activeBranchCode = getDefaultInvuBranch();
+  const activeBranchLabel = 'San Francisco'; // TODO: reemplazar cuando activemos otras sucursales
 
   // --------- Filtros ---------
   const hoy = useMemo(() => todayYMD(), []);
@@ -60,7 +62,7 @@ export function VentasPage() {
   const [hasta, setHasta] = useState(hoy);
 
   // IDs como string (UUID)
-  const [selectedSucursalId, setSelectedSucursalId] = useState<string | null>(
+  const [, setSelectedSucursalId] = useState<string | null>(
     sucursalSeleccionada?.id ? String(sucursalSeleccionada.id) : null
   );
 
@@ -74,6 +76,7 @@ export function VentasPage() {
 
   const [rows, setRows] = useState<SucursalRow[]>([]);
   const [seriesData, setSeriesData] = useState<any[]>([]);
+  const [seriesStatus, setSeriesStatus] = useState<'loading' | 'ok' | 'empty'>('loading');
 
   // Banner (se usa para "sync ok" o para "aviso de datos faltantes")
   const [syncBanner, setSyncBanner] = useState<{
@@ -89,441 +92,109 @@ export function VentasPage() {
   const [debugInfo, setDebugInfo] = useState<any>(null);
 
   // Helpers UI
-  const viewingAll = isViewingAll || selectedSucursalId === null;
-
-  const selectedSucursalName =
-    !viewingAll
-      ? (sucursales.find(s => String(s.id) === selectedSucursalId)?.nombre ?? 'Sucursal')
-      : null;
-
-  const headerNote = viewingAll
-    ? `Viendo datos de todas las sucursales`
-    : `Viendo únicamente ${selectedSucursalName}`;
+  const headerNote = `Viendo datos de ${activeBranchLabel} (otras sucursales próximamente)`;
 
   // --------- Carga desde DB ---------
   const loadData = useCallback(async () => {
     setLoading(true);
-    let segmentationSupported = true;
+    setSeriesStatus('loading');
     try {
-      const ids = viewingAll
-        ? getFilteredSucursalIds().map(String)
-        : (selectedSucursalId ? [String(selectedSucursalId)] : []);
-
-      let seriesQuery = supabase
+      const { data, error } = await supabase
         .from('v_ui_series_14d')
         .select('*')
+        .eq('sucursal', activeBranchCode)
         .gte('dia', desde)
         .lte('dia', hasta)
         .order('dia', { ascending: true });
 
-      if (!viewingAll && ids.length > 0) {
-        seriesQuery = seriesQuery.eq('sucursal_id', ids[0]);
-      } else if (viewingAll && ids.length > 0) {
-        seriesQuery = seriesQuery.in('sucursal_id', ids);
+      if (error) {
+        console.warn('v_ui_series_14d error:', error);
+        setRows([]);
+        setSeriesData([]);
+        setTotalVentas(0);
+        setTotalTransacciones(0);
+        setTotalITBMS(0);
+        setSeriesStatus('empty');
+        setSyncBanner(prev => (prev && prev.kind === 'warn' ? prev : null));
+        setDebugInfo({ error: error.message, filtro: { desde, hasta, branch: activeBranchCode } });
+        return;
       }
 
-      const { data: rawSeries, error: seriesError, status: seriesStatus } = await seriesQuery;
-      let seriesRows: Record<string, any>[] = rawSeries ?? [];
-      if (seriesError) {
-        if (seriesStatus === 400 && isColumnMissing(seriesError)) {
-          segmentationSupported = false;
-          setSyncBanner({
-            when: new Date().toISOString(),
-            visible: true,
-            kind: 'warn',
-            stats: [],
-            message: 'Esta vista no soporta segmentación por sucursal; mostrando totales.',
-          });
-          const { data: fallbackData, error: fallbackError } = await supabase
-            .from('v_ui_series_14d')
-            .select('*')
-            .gte('dia', desde)
-            .lte('dia', hasta)
-            .order('dia', { ascending: true });
-          if (fallbackError) throw fallbackError;
-          seriesRows = fallbackData ?? [];
-        } else if (seriesStatus === 400) {
-          setSyncBanner({
-            when: new Date().toISOString(),
-            visible: true,
-            kind: 'warn',
-            stats: [],
-            message: seriesError.message || 'v_ui_series_14d devolvió un error 400.',
-          });
-          setRows([]);
-          setSeriesData([]);
-          setTotalVentas(0);
-          setTotalTransacciones(0);
-          setTotalITBMS(0);
-          setLoading(false);
-          return;
-        } else {
-          throw seriesError;
-        }
-      } else if (segmentationSupported && syncBanner?.kind === 'warn') {
-        setSyncBanner(prev => (prev && prev.kind === 'warn' ? { ...prev, visible: false } : prev));
+      if (!data || data.length === 0) {
+        setRows([]);
+        setSeriesData([]);
+        setTotalVentas(0);
+        setTotalTransacciones(0);
+        setTotalITBMS(0);
+        setSeriesStatus('empty');
+        setSyncBanner(prev => (prev && prev.kind === 'warn' ? prev : null));
+        setDebugInfo({ info: 'sin datos', filtro: { desde, hasta, branch: activeBranchCode } });
+        return;
       }
 
-      const normalizedSeries = (seriesRows ?? []).map((row: Record<string, any>) => {
-        const sucursalId = row.sucursal_id != null ? String(row.sucursal_id) : row.sucursal ?? null;
-        const nombre =
-          row.sucursal_nombre ??
-          row.nombre ??
-          (sucursalId ? `Sucursal ${sucursalId.slice(0, 6)}…` : 'Sin sucursal');
+      const normalized = data.map((row: Record<string, any>) => {
         const ventas = Number(row.ventas ?? row.ventas_brutas ?? row.total_bruto ?? 0);
-        const margen = Number(row.margen ?? row.margen_bruto ?? 0);
         const tickets = Number(row.tickets ?? row.transacciones ?? 0);
-        const lineas = Number(row.lineas ?? row.line_items ?? 0);
-        const cogs = Number(row.cogs ?? row.costo ?? 0);
-        const itbms = Number(row.itbms ?? row.total_impuestos ?? row.impuesto ?? 0);
-
+        const itbms = Number(row.itbms ?? row.total_impuestos ?? 0);
         return {
-          dia: row.dia,
+          dia: row.dia as string,
           fecha: formatDateDDMMYYYY(row.dia),
           ventas,
-          margen,
           tickets,
-          lineas,
-          cogs,
           itbms,
-          sucursal_id: sucursalId,
-          sucursal_nombre: nombre,
         };
       });
 
-      const seriesByDayMap = new Map<
-        string,
-        { dia: string; fecha: string; ventas: number; margen: number; tickets: number; lineas: number }
-      >();
-      normalizedSeries.forEach(row => {
-        const entry =
-          seriesByDayMap.get(row.dia) ??
-          { dia: row.dia, fecha: row.fecha, ventas: 0, margen: 0, tickets: 0, lineas: 0 };
-        entry.ventas += row.ventas;
-        entry.margen += row.margen;
-        entry.tickets += row.tickets;
-        entry.lineas += row.lineas;
-        seriesByDayMap.set(row.dia, entry);
-      });
+      const chartSeries = normalized.map(item => ({
+        fecha: item.fecha,
+        ventas: item.ventas,
+        tickets: item.tickets,
+      }));
+      setSeriesData(chartSeries);
 
-      const seriesForChart = Array.from(seriesByDayMap.values()).sort((a, b) =>
-        a.dia.localeCompare(b.dia)
-      );
-      setSeriesData(seriesForChart);
-
-      const totalsFromSeries = normalizedSeries.reduce(
-        (acc, row) => ({
-          ventas: acc.ventas + row.ventas,
-          tickets: acc.tickets + row.tickets,
-          itbms: acc.itbms + row.itbms,
+      const totals = normalized.reduce(
+        (acc, item) => ({
+          ventas: acc.ventas + item.ventas,
+          tickets: acc.tickets + item.tickets,
+          itbms: acc.itbms + item.itbms,
         }),
         { ventas: 0, tickets: 0, itbms: 0 }
       );
 
-      const sucursalMap = new Map<
-        string,
-        { nombre: string; ventas: number; transacciones: number }
-      >();
-      normalizedSeries.forEach(row => {
-        const key = row.sucursal_id ?? row.sucursal_nombre ?? 'sin-id';
-        const entry = sucursalMap.get(key) ?? { nombre: row.sucursal_nombre, ventas: 0, transacciones: 0 };
-        entry.ventas += row.ventas;
-        entry.transacciones += row.tickets;
-        sucursalMap.set(key, entry);
-      });
-
-      const rowsList: SucursalRow[] = segmentationSupported
-        ? Array.from(sucursalMap.values())
-            .map(entry => ({
-              nombre: entry.nombre,
-              ventas: entry.ventas,
-              transacciones: entry.transacciones,
-              ticketPromedio: entry.transacciones > 0 ? entry.ventas / entry.transacciones : 0,
-            }))
-            .sort((a, b) => b.ventas - a.ventas)
-        : [{
-            nombre: 'Todas las sucursales',
-            ventas: totalsFromSeries.ventas,
-            transacciones: totalsFromSeries.tickets,
-            ticketPromedio: totalsFromSeries.tickets > 0 ? totalsFromSeries.ventas / totalsFromSeries.tickets : 0,
-          }];
-
-      setRows(rowsList);
-
-      let totals = totalsFromSeries;
-
-      const incluyeHoy = desde <= hoy && hasta >= hoy;
-      if (incluyeHoy) {
-        const { data: kpisHoy, error: kpisError, status: kpisStatus } = await supabase
-          .from('v_ui_kpis_hoy')
-          .select('*');
-        if (!kpisError) {
-          if (segmentationSupported && !viewingAll) {
-            const filteredKpis = (kpisHoy ?? []).filter(row => {
-              const rowId = row.sucursal_id != null ? String(row.sucursal_id) : row.sucursal;
-              return !selectedSucursalId || rowId === selectedSucursalId;
-            });
-
-            if (filteredKpis.length > 0) {
-              totals = filteredKpis.reduce(
-                (acc, row) => ({
-                  ventas: acc.ventas + Number(row.ventas ?? row.ventas_brutas ?? row.total_bruto ?? 0),
-                  tickets: acc.tickets + Number(row.tickets ?? row.transacciones ?? 0),
-                  itbms: acc.itbms + Number(row.itbms ?? row.total_impuestos ?? 0),
-                }),
-                { ventas: 0, tickets: 0, itbms: 0 }
-              );
-            }
-          } else if (viewingAll) {
-            totals = (kpisHoy ?? []).reduce(
-              (acc, row) => ({
-                ventas: acc.ventas + Number(row.ventas ?? row.ventas_brutas ?? row.total_bruto ?? 0),
-                tickets: acc.tickets + Number(row.tickets ?? row.transacciones ?? 0),
-                itbms: acc.itbms + Number(row.itbms ?? row.total_impuestos ?? 0),
-              }),
-              { ventas: 0, tickets: 0, itbms: 0 }
-            );
-          }
-        } else if (!viewingAll && kpisStatus === 400 && isColumnMissing(kpisError)) {
-          segmentationSupported = false;
-          setSyncBanner({
-            when: new Date().toISOString(),
-            visible: true,
-            kind: 'warn',
-            stats: [],
-            message: 'Esta vista no soporta segmentación por sucursal; mostrando totales.',
-          });
-        } else if (kpisStatus === 400) {
-          setSyncBanner({
-            when: new Date().toISOString(),
-            visible: true,
-            kind: 'warn',
-            stats: [],
-            message: kpisError.message || 'v_ui_kpis_hoy devolvió un error 400.',
-          });
-        } else {
-          throw kpisError;
-        }
-      }
+      setRows([
+        {
+          nombre: activeBranchLabel,
+          ventas: totals.ventas,
+          transacciones: totals.tickets,
+          ticketPromedio: totals.tickets > 0 ? totals.ventas / totals.tickets : 0,
+        },
+      ]);
 
       setTotalVentas(totals.ventas);
       setTotalTransacciones(totals.tickets);
       setTotalITBMS(totals.itbms);
-
-      setDebugInfo({
-        filtro: { desde, hasta, viewingAll, selectedSucursalId, selectedSucursalName, ids },
-        seriesCount: normalizedSeries.length,
-        seriesSample: normalizedSeries[0] ?? null,
-        totals,
-      });
-
-      setSyncBanner(prev => {
-        if (!prev || prev.kind !== 'warn') return prev;
-        return segmentationSupported ? null : prev;
-      });
-    } catch (e) {
-      debugLog('[VentasPage] loadData error:', e);
-      setRows([]);
-      setSeriesData([]);
-      setTotalVentas(0);
-      setTotalTransacciones(0);
-      setTotalITBMS(0);
-      setDebugInfo({ error: String(e) });
-    } finally {
-      setLoading(false);
-    }
-  }, [
-    desde,
-    hasta,
-    viewingAll,
-    selectedSucursalId,
-    selectedSucursalName,
-    getFilteredSucursalIds,
-    hoy,
-    syncBanner,
-  ]);
-
-  /* const loadDataLegacy = useCallback(async () => {
-    setLoading(true);
-    try {
-      const { data: rawSeries, error: seriesError, status: seriesStatus } = await supabase
-        .from('v_ui_series_14d')
-        .select('*')
-        .gte('dia', desde)
-        .lte('dia', hasta)
-        .order('dia', { ascending: true });
-      if (seriesError) {
-        if (seriesStatus === 400) {
-          setSyncBanner({
-            when: new Date().toISOString(),
-            visible: true,
-            kind: 'warn',
-            stats: [],
-            message: isColumnMissing(seriesError)
-              ? 'Datos no disponibles para esta vista (v_ui_series_14d).'
-              : seriesError.message || 'v_ui_series_14d devolvió un error 400.',
-          });
-          setSeriesData([]);
-          setRows([]);
-          setTotalVentas(0);
-          setTotalTransacciones(0);
-          setTotalITBMS(0);
-          setLoading(false);
-          return;
-        }
-        throw seriesError;
-      }
-
-      const normalizedSeries = (rawSeries ?? []).map((row: Record<string, any>) => {
-        const sucursalId = row.sucursal_id != null ? String(row.sucursal_id) : row.sucursal ?? null;
-        const nombre =
-          row.sucursal_nombre ??
-          row.nombre ??
-          (sucursalId ? `Sucursal ${sucursalId.slice(0, 6)}…` : 'Sin sucursal');
-        const ventas = Number(row.ventas_brutas ?? row.total_bruto ?? 0);
-        const margen = Number(row.margen ?? row.margen_bruto ?? 0);
-        const tickets = Number(row.tickets ?? row.transacciones ?? 0);
-        const lineas = Number(row.lineas ?? row.line_items ?? 0);
-        const cogs = Number(row.cogs ?? row.costo ?? 0);
-        const itbms = Number(row.itbms ?? row.total_impuestos ?? row.impuesto ?? 0);
-
-        return {
-          dia: row.dia,
-          fecha: formatDateDDMMYYYY(row.dia),
-          ventas,
-          margen,
-          tickets,
-          lineas,
-          cogs,
-          itbms,
-          sucursal_id: sucursalId,
-          sucursal_nombre: nombre,
-        };
-      });
-
-      const seriesByDayMap = new Map<
-        string,
-        { dia: string; fecha: string; ventas: number; margen: number; tickets: number }
-      >();
-      normalizedSeries.forEach(row => {
-        const entry =
-          seriesByDayMap.get(row.dia) ?? { dia: row.dia, fecha: row.fecha, ventas: 0, margen: 0, tickets: 0 };
-        entry.ventas += row.ventas;
-        entry.margen += row.margen;
-        entry.tickets += row.tickets;
-        seriesByDayMap.set(row.dia, entry);
-      });
-
-      const seriesForChart = Array.from(seriesByDayMap.values()).sort((a, b) =>
-        a.dia.localeCompare(b.dia)
-      );
-      setSeriesData(seriesForChart);
-
-      const sucursalMap = new Map<
-        string,
-        { nombre: string; ventas: number; transacciones: number }
-      >();
-
-      const ids = viewingAll ? [] : selectedSucursalId ? [String(selectedSucursalId)] : [];
-
-      normalizedSeries.forEach(row => {
-        const key = row.sucursal_id ?? row.sucursal_nombre ?? 'global';
-        const entry = sucursalMap.get(key) ?? { nombre: row.sucursal_nombre ?? 'Total global', ventas: 0, transacciones: 0 };
-        entry.ventas += row.ventas;
-        entry.transacciones += row.tickets;
-        if (!entry.nombre) entry.nombre = 'Total global';
-        sucursalMap.set(key, entry);
-      });
-
-      const rowsList: SucursalRow[] = Array.from(sucursalMap.values())
-        .map(entry => ({
-          nombre: entry.nombre ?? 'Total global',
-          ventas: entry.ventas,
-          transacciones: entry.transacciones,
-          ticketPromedio: entry.transacciones > 0 ? entry.ventas / entry.transacciones : 0,
-        }))
-        .sort((a, b) => b.ventas - a.ventas);
-
-      setRows(rowsList);
-
-      const totalsFromSeries = normalizedSeries.reduce(
-        (acc, row) => ({
-          ventas: acc.ventas + row.ventas,
-          tickets: acc.tickets + row.tickets,
-          itbms: acc.itbms + row.itbms,
-        }),
-        { ventas: 0, tickets: 0, itbms: 0 }
-      );
-
-      let totals = totalsFromSeries;
-
-      const incluyeHoy = desde <= hoy && hasta >= hoy;
-      if (incluyeHoy) {
-        const { data: kpisHoy, error: kpisError, status: kpisStatus } = await supabase.from('v_ui_kpis_hoy').select('*');
-        if (!kpisError) {
-          const filteredKpis = viewingAll
-            ? kpisHoy ?? []
-            : (kpisHoy ?? []).filter(row => {
-                const rowId = row.sucursal_id != null ? String(row.sucursal_id) : row.sucursal;
-                return !selectedSucursalId || rowId === selectedSucursalId;
-              });
-
-          if (filteredKpis.length > 0) {
-            totals = filteredKpis.reduce(
-              (acc, row) => ({
-                ventas: acc.ventas + Number(row.ventas_brutas ?? row.total_bruto ?? 0),
-                tickets: acc.tickets + Number(row.tickets ?? row.transacciones ?? 0),
-                itbms: acc.itbms + Number(row.itbms ?? row.total_impuestos ?? 0),
-              }),
-              { ventas: 0, tickets: 0, itbms: 0 }
-            );
-          }
-        } else if (kpisStatus === 400) {
-          setSyncBanner({
-            when: new Date().toISOString(),
-            visible: true,
-            kind: 'warn',
-            stats: [],
-            message: isColumnMissing(kpisError)
-              ? 'Datos no disponibles para esta vista (v_ui_kpis_hoy).'
-              : kpisError.message || 'v_ui_kpis_hoy devolvió un error 400.',
-          });
-        } else {
-          throw kpisError;
-        }
-      }
-
-      setTotalVentas(totals.ventas);
-      setTotalTransacciones(totals.tickets);
-      setTotalITBMS(totals.itbms);
-
-      setDebugInfo({
-        filtro: { desde, hasta, viewingAll, selectedSucursalId, selectedSucursalName, ids },
-        seriesCount: normalizedSeries.length,
-        seriesSample: normalizedSeries[0] ?? null,
-        totals,
-      });
-
+      setSeriesStatus('ok');
       setSyncBanner(prev => (prev && prev.kind === 'warn' ? null : prev));
-    } catch (e) {
-      debugLog('[VentasPage] loadData error:', e);
+      setDebugInfo({
+        filtro: { desde, hasta, branch: activeBranchCode },
+        seriesCount: normalized.length,
+        sample: normalized[0] ?? null,
+        totals,
+      });
+    } catch (err) {
+      console.warn('v_ui_series_14d unexpected error:', err);
       setRows([]);
       setSeriesData([]);
       setTotalVentas(0);
       setTotalTransacciones(0);
       setTotalITBMS(0);
-      setDebugInfo({ error: String(e) });
+      setSeriesStatus('empty');
+      setDebugInfo({ error: String(err) });
     } finally {
       setLoading(false);
     }
-  }, [
-    desde,
-    hasta,
-    viewingAll,
-    selectedSucursalId,
-    selectedSucursalName,
-    hoy,
-  ]); */
+  }, [activeBranchCode, activeBranchLabel, desde, hasta]);
+
 
   // --------- Sync: Edge function PERSISTE y recarga DB ---------
   const handleSync = useCallback(async () => {
@@ -804,11 +475,13 @@ export function VentasPage() {
               <label className="block text-sm text-gray-600 dark:text-gray-400 mb-1">Sucursal</label>
               <div className="flex gap-2">
                 <select
-                  value={viewingAll ? '' : String(selectedSucursalId ?? '')}
+                  value="sf"
+                  disabled
                   onChange={(e) => setSelectedSucursalId(e.target.value ? String(e.target.value) : null)}
-                  className="flex-1 px-3 py-2 rounded-lg border dark:border-gray-700 bg-white dark:bg-gray-900 text-gray-900 dark:text-gray-100"
+                  className="flex-1 px-3 py-2 rounded-lg border dark:border-gray-700 bg-white dark:bg-gray-900 text-gray-900 dark:text-gray-100 cursor-not-allowed"
                 >
                   <option value="">Todas las sucursales</option>
+                  <option value="sf">San Francisco</option>
                   {sucursales.map((s) => (
                     <option key={String(s.id)} value={String(s.id)}>
                       {s.nombre}
@@ -817,7 +490,7 @@ export function VentasPage() {
                 </select>
                 <div className="inline-flex items-center px-3 rounded-lg border dark:border-gray-700 bg-gray-50 dark:bg-gray-900 text-gray-700 dark:text-gray-300">
                   <Building2 className="h-4 w-4 mr-2" />
-                  {viewingAll ? 'Todas' : 'Individual'}
+                  {activeBranchLabel}
                 </div>
               </div>
             </div>
@@ -875,11 +548,7 @@ export function VentasPage() {
             </div>
           </div>
           <div className="h-80 px-6 pb-6">
-            {seriesData.length === 0 ? (
-              <div className="h-full flex items-center justify-center text-gray-500 dark:text-gray-400 text-sm">
-                {loading ? 'Cargando…' : 'Sin datos en el rango seleccionado.'}
-              </div>
-            ) : (
+            {seriesStatus === 'ok' ? (
               <ResponsiveContainer width="100%" height="100%">
                 <ComposedChart data={seriesData} margin={{ top: 20, right: 20, left: 0, bottom: 0 }}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
@@ -924,6 +593,10 @@ export function VentasPage() {
                   />
                 </ComposedChart>
               </ResponsiveContainer>
+            ) : (
+              <div className="h-full flex items-center justify-center text-gray-500 dark:text-gray-400 text-sm">
+                {seriesStatus === 'loading' ? 'Cargando…' : '(sin datos)'}
+              </div>
             )}
           </div>
         </div>
@@ -939,9 +612,7 @@ export function VentasPage() {
           {loading ? (
             <div className="p-8 text-center text-gray-500 dark:text-gray-400">Cargando…</div>
           ) : rows.length === 0 ? (
-            <div className="p-12 text-center text-gray-500 dark:text-gray-400">
-              No hay datos de ventas en el período seleccionado.
-            </div>
+            <div className="p-12 text-center text-gray-500 dark:text-gray-400 text-sm">(sin datos)</div>
           ) : (
             <div className="overflow-x-auto">
               <table className="min-w-full">
