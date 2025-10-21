@@ -49,7 +49,6 @@ export function VentasPage() {
   const {
     sucursales,
     sucursalSeleccionada,
-    isViewingAll,
     getFilteredSucursalIds,
   } = useAuthOrg();
 
@@ -89,17 +88,16 @@ export function VentasPage() {
   const [showDebug, setShowDebug] = useState(false);
   const [debugInfo, setDebugInfo] = useState<any>(null);
 
-  // Helpers UI
-  const viewingAll = isViewingAll || selectedSucursalId === null;
+  // Helpers UI - usar SOLO el estado local
+  const viewingAll = selectedSucursalId === null;
 
-  const selectedSucursalName =
-    !viewingAll
-      ? (sucursales.find(s => String(s.id) === selectedSucursalId)?.nombre ?? 'Sucursal')
-      : null;
+  const selectedSucursalName = viewingAll
+    ? null
+    : (sucursales.find(s => String(s.id) === selectedSucursalId)?.nombre ?? 'Sucursal');
 
   const headerNote = viewingAll
-    ? `Viendo datos de todas las sucursales`
-    : `Viendo únicamente ${selectedSucursalName}`;
+    ? `Viendo datos de todas las sucursales (${sucursales.length} sucursales)`
+    : `Viendo únicamente: ${selectedSucursalName}`;
 
   // --------- Carga desde DB ---------
   const loadData = useCallback(async () => {
@@ -380,7 +378,7 @@ export function VentasPage() {
     } finally {
       setSyncing(false);
     }
-  }, [desde, functionsBase, hasta, loadData]);
+  }, [functionsBase, hoy, loadData]);
 
   // --------- Realtime: normalizar salida del hook (string u objeto) ---------
   const rt: any = useRealtimeVentas({
@@ -436,10 +434,13 @@ export function VentasPage() {
 
   // Si el contexto cambia, sincronizar el selector local (como string)
   useEffect(() => {
-    if (sucursalSeleccionada?.id && !isViewingAll) {
+    if (sucursalSeleccionada?.id) {
       setSelectedSucursalId(String(sucursalSeleccionada.id));
+    } else {
+      // Si no hay sucursal seleccionada en el contexto, mostrar todas
+      setSelectedSucursalId(null);
     }
-  }, [sucursalSeleccionada, isViewingAll]);
+  }, [sucursalSeleccionada]);
 
   const bannerClass =
     syncBanner?.kind === 'warn'
