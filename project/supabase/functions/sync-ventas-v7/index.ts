@@ -205,7 +205,19 @@ function stripTrailingSlash(s: string) {
 function dedupe<T>(arr: T[]): T[] {
   return Array.from(new Set(arr));
 }
-
+// añade helpers para epoch
+function toEpochSeconds(dateYYYYMMDD: string): number {
+  // usa medianoche local Panamá para evitar off-by-one
+  const d = new Date(`${dateYYYYMMDD}T00:00:00-05:00`);
+  return Math.floor(d.getTime() / 1000);
+}
+function replaceTpl(s: string, desde: string, hasta: string) {
+  return s
+    .replaceAll("{desde}", desde)
+    .replaceAll("{hasta}", hasta)
+    .replaceAll("{desde_epoch}", String(toEpochSeconds(desde)))
+    .replaceAll("{hasta_epoch}", String(toEpochSeconds(hasta)));
+}
 // prueba un conjunto de paths; devuelve items o error con detalle
 async function fetchInvuAny(
   base: string,
