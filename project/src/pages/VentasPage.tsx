@@ -28,6 +28,17 @@ type SucursalRow = {
 
 type SyncBranchStat = { name: string; orders: number; sales?: number };
 
+// nombre visible → código corto usado por las vistas
+const nameToCode = (nombre?: string) => {
+  const n = (nombre ?? '').toLowerCase();
+  if (n.includes('san francisco')) return 'sf';
+  if (n.includes('museo')) return 'museo';
+  if (n.includes('cangrejo')) return 'cangrejo';
+  if (n.includes('costa')) return 'costa';
+  if (n.includes('central')) return 'central';
+  return 'sf';
+};
+
 function todayYMD(tz = 'America/Panama') {
   const d = new Date(new Date().toLocaleString('en-US', { timeZone: tz }));
   const y = d.getFullYear();
@@ -46,20 +57,22 @@ function addDays(ymd: string, days: number) {
 }
 
 export function VentasPage() {
-  const {
-    sucursales,
-    sucursalSeleccionada,
-    getFilteredSucursalIds,
-  } = useAuthOrg();
+  const { sucursales, sucursalSeleccionada, getFilteredSucursalIds } = useAuthOrg();
 
   const functionsBase = useMemo(() => getFunctionsBase(), []);
+
+  // Mapa id → code para traducir selección a códigos de sucursal
+  const idToCode = useMemo(
+    () => new Map<string, string>(sucursales.map(s => [String(s.id), nameToCode(s.nombre)])),
+    [sucursales]
+  );
 
   // --------- Filtros ---------
   const hoy = useMemo(() => todayYMD(), []);
   const [desde, setDesde] = useState(addDays(hoy, -7));
   const [hasta, setHasta] = useState(hoy);
 
-  // IDs como string (UUID)
+  // Selección local (id como string)
   const [selectedSucursalId, setSelectedSucursalId] = useState<string | null>(
     sucursalSeleccionada?.id ? String(sucursalSeleccionada.id) : null
   );
@@ -75,7 +88,7 @@ export function VentasPage() {
   const [rows, setRows] = useState<SucursalRow[]>([]);
   const [seriesData, setSeriesData] = useState<any[]>([]);
 
-  // Banner (se usa para "sync ok" o para "aviso de datos faltantes")
+  // Banner
   const [syncBanner, setSyncBanner] = useState<{
     when: string;
     stats: SyncBranchStat[];
@@ -88,7 +101,7 @@ export function VentasPage() {
   const [showDebug, setShowDebug] = useState(false);
   const [debugInfo, setDebugInfo] = useState<any>(null);
 
-  // Helpers UI - usar SOLO el estado local
+  // Helpers UI
   const viewingAll = selectedSucursalId === null;
 
   const selectedSucursalName = viewingAll
@@ -103,10 +116,17 @@ export function VentasPage() {
   const loadData = useCallback(async () => {
     setLoading(true);
     try {
-      const ids = viewingAll
-        ? getFilteredSucursalIds().map(String)
-        : (selectedSucursalId ? [String(selectedSucursalId)] : []);
+      // IDs → códigos de sucursal
+      const codes = viewingAll
+        ? getFilteredSucursalIds()
+            .map(String)
+            .map(id => idToCode.get(id))
+            .filter((x): x is string => !!x)
+        : selectedSucursalId
+        ? [idToCode.get(String(selectedSucursalId))!].filter(Boolean)
+        : [];
 
+      // v_ui_series_14d se filtra por 'sucursal' (código texto) + rango de fechas
       let seriesQuery = supabase
         .from('v_ui_series_14d')
         .select('*')
@@ -114,21 +134,21 @@ export function VentasPage() {
         .lte('dia', hasta)
         .order('dia', { ascending: true });
 
-      if (!viewingAll && ids.length > 0) {
-        seriesQuery = seriesQuery.eq('sucursal_id', ids[0]);
-      } else if (viewingAll && ids.length > 0) {
-        seriesQuery = seriesQuery.in('sucursal_id', ids);
+      if (!viewingAll && codes.length === 1) {
+        seriesQuery = seriesQuery.eq('sucursal', codes[0]);
+      } else if (viewingAll && codes.length > 0) {
+        seriesQuery = seriesQuery.in('sucursal', codes);
       }
 
       const { data: rawSeries, error: seriesError } = await seriesQuery;
       if (seriesError) throw seriesError;
 
       const normalizedSeries = (rawSeries ?? []).map((row: Record<string, any>) => {
-        const sucursalId = row.sucursal_id != null ? String(row.sucursal_id) : row.sucursal ?? null;
+        const sucCode = row.sucursal ?? null;
         const nombre =
           row.sucursal_nombre ??
           row.nombre ??
-          (sucursalId ? `Sucursal ${sucursalId.slice(0, 6)}…` : 'Sin sucursal');
+          (sucCode ? `Sucursal ${String(sucCode).toUpperCase()}` : 'Sin sucursal');
         const ventas = Number(row.ventas_brutas ?? row.total_bruto ?? 0);
         const margen = Number(row.margen ?? row.margen_bruto ?? 0);
         const tickets = Number(row.tickets ?? row.transacciones ?? 0);
@@ -145,7 +165,7 @@ export function VentasPage() {
           lineas,
           cogs,
           itbms,
-          sucursal_id: sucursalId,
+          sucursal: sucCode,
           sucursal_nombre: nombre,
         };
       });
@@ -163,8 +183,9 @@ export function VentasPage() {
         seriesByDayMap.set(row.dia, entry);
       });
 
+      const safe = (v?: string) => v ?? '';
       const seriesForChart = Array.from(seriesByDayMap.values()).sort((a, b) =>
-        a.dia.localeCompare(b.dia)
+        safe(a.dia).localeCompare(safe(b.dia))
       );
       setSeriesData(seriesForChart);
 
@@ -173,7 +194,7 @@ export function VentasPage() {
         { nombre: string; ventas: number; transacciones: number }
       >();
       normalizedSeries.forEach(row => {
-        const key = row.sucursal_id ?? row.sucursal_nombre ?? 'sin-id';
+        const key = row.sucursal ?? row.sucursal_nombre ?? 'sin-code';
         const entry = sucursalMap.get(key) ?? { nombre: row.sucursal_nombre, ventas: 0, transacciones: 0 };
         entry.ventas += row.ventas;
         entry.transacciones += row.tickets;
@@ -191,6 +212,7 @@ export function VentasPage() {
 
       setRows(rowsList);
 
+      // Totales desde la serie
       const totalsFromSeries = normalizedSeries.reduce(
         (acc, row) => ({
           ventas: acc.ventas + row.ventas,
@@ -202,27 +224,25 @@ export function VentasPage() {
 
       let totals = totalsFromSeries;
 
+      // Si el rango incluye hoy, intentamos v_ui_kpis_hoy (también por 'sucursal')
       const incluyeHoy = desde <= hoy && hasta >= hoy;
       if (incluyeHoy) {
-        const { data: kpisHoy, error: kpisError } = await supabase.from('v_ui_kpis_hoy').select('*');
-        if (!kpisError) {
-          const filteredKpis = viewingAll
-            ? kpisHoy ?? []
-            : (kpisHoy ?? []).filter(row => {
-                const rowId = row.sucursal_id != null ? String(row.sucursal_id) : row.sucursal;
-                return !selectedSucursalId || rowId === selectedSucursalId;
-              });
-
-          if (filteredKpis.length > 0) {
-            totals = filteredKpis.reduce(
-              (acc, row) => ({
-                ventas: acc.ventas + Number(row.ventas_brutas ?? row.total_bruto ?? 0),
-                tickets: acc.tickets + Number(row.tickets ?? row.transacciones ?? 0),
-                itbms: acc.itbms + Number(row.itbms ?? row.total_impuestos ?? 0),
-              }),
-              { ventas: 0, tickets: 0, itbms: 0 }
-            );
-          }
+        let kpisQuery = supabase.from('v_ui_kpis_hoy').select('*');
+        if (!viewingAll && codes.length === 1) {
+          kpisQuery = kpisQuery.eq('sucursal', codes[0]);
+        } else if (viewingAll && codes.length > 0) {
+          kpisQuery = kpisQuery.in('sucursal', codes);
+        }
+        const { data: kpisHoy, error: kpisError } = await kpisQuery;
+        if (!kpisError && Array.isArray(kpisHoy) && kpisHoy.length > 0) {
+          totals = (kpisHoy as any[]).reduce(
+            (acc, row) => ({
+              ventas: acc.ventas + Number(row.ventas_brutas ?? row.total_bruto ?? 0),
+              tickets: acc.tickets + Number(row.tickets ?? row.transacciones ?? 0),
+              itbms: acc.itbms + Number(row.itbms ?? row.total_impuestos ?? 0),
+            }),
+            { ventas: 0, tickets: 0, itbms: 0 }
+          );
         }
       }
 
@@ -231,7 +251,7 @@ export function VentasPage() {
       setTotalITBMS(totals.itbms);
 
       setDebugInfo({
-        filtro: { desde, hasta, viewingAll, selectedSucursalId, selectedSucursalName, ids },
+        filtro: { desde, hasta, viewingAll, selectedSucursalId, selectedSucursalName, codes },
         seriesCount: normalizedSeries.length,
         seriesSample: normalizedSeries[0] ?? null,
         totals,
@@ -257,6 +277,7 @@ export function VentasPage() {
     selectedSucursalName,
     getFilteredSucursalIds,
     hoy,
+    idToCode,
   ]);
 
   // --------- Sync: Edge function PERSISTE y recarga DB ---------
@@ -380,7 +401,7 @@ export function VentasPage() {
     }
   }, [functionsBase, hoy, loadData]);
 
-  // --------- Realtime: normalizar salida del hook (string u objeto) ---------
+  // --------- Realtime ---------
   const rt: any = useRealtimeVentas({
     enabled: true,
     debounceMs: 1500,
@@ -432,12 +453,11 @@ export function VentasPage() {
     return () => window.removeEventListener('debug:refetch-all', handler);
   }, [loadData]);
 
-  // Si el contexto cambia, sincronizar el selector local (como string)
+  // Sincronizar selector local cuando cambia el contexto
   useEffect(() => {
     if (sucursalSeleccionada?.id) {
       setSelectedSucursalId(String(sucursalSeleccionada.id));
     } else {
-      // Si no hay sucursal seleccionada en el contexto, mostrar todas
       setSelectedSucursalId(null);
     }
   }, [sucursalSeleccionada]);
@@ -722,3 +742,4 @@ export function VentasPage() {
     </div>
   );
 }
+
