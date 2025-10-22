@@ -1,7 +1,7 @@
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 import { createClient, SupabaseClient } from "https://esm.sh/@supabase/supabase-js@2";
 
-const VERSION = "sync-ventas-v8-2025-10-22-ROBUST+AUTO";
+const VERSION = "sync-ventas-v8.1-2025-10-22-ROBUST+AUTO";
 const SF_UUID = "1918f8f7-9b5d-4f6a-9b53-a953f82b71ad";
 
 type VentaDetalleIn = {
@@ -22,7 +22,7 @@ type VentaDetalleIn = {
 serve(async (req) => {
   try {
     const url = new URL(req.url);
-    const mode = url.searchParams.get("mode") ?? "ping";   // ping | diag | insert | sync
+    const mode = url.searchParams.get("mode") ?? "ping";
     const sucursal = url.searchParams.get("sucursal") ?? "";
     const desde = url.searchParams.get("desde") ?? "";
     const hasta = url.searchParams.get("hasta") ?? "";
@@ -50,7 +50,7 @@ serve(async (req) => {
     }
     const sb = createClient(SUPABASE_URL, SERVICE_ROLE, { auth: { persistSession: false } });
 
-    // probe conexión básica
+    // probe
     {
       const { error: probeErr } = await sb.from("ventas").select("id", { head: true, count: "exact" }).limit(1);
       if (probeErr) return j({ ok: false, version: VERSION, step: "probe", error: probeErr.message ?? probeErr }, 500);
@@ -80,7 +80,7 @@ serve(async (req) => {
 
       // === INVU real: override con auto-permutaciones ===
       const token = Deno.env.get("SF_TOKEN")!;
-      const override = Deno.env.get("INVU_SALES_URL"); // URL con placeholders (opcional)
+      const override = Deno.env.get("INVU_SALES_URL");
       if (override) {
         const candidates = buildOverrideCandidates(override, desde, hasta);
         const attempts: Array<{ url: string; status: number; preview?: string }> = [];
@@ -105,17 +105,13 @@ serve(async (req) => {
             });
           } else {
             attempts.push({ url: u, status: r.status, preview: await safePreview(r) });
-            // Si no es 404, usualmente es problema de auth/servidor: corta y reporta
-            if (r.status !== 404) {
-              return j({ ok: false, version: VERSION, step: "invu.fetch.override", attempts }, 502);
-            }
+            if (r.status !== 404) return j({ ok: false, version: VERSION, step: "invu.fetch.override", attempts }, 502);
           }
         }
-        // Todos fallaron
         return j({ ok: false, version: VERSION, step: "invu.fetch.override", attempts }, 502);
       }
 
-      // === Fallback antiguo por paths conocidos ===
+      // Fallback por paths conocidos (por si no hay INVU_SALES_URL)
       const base = Deno.env.get("INVU_BASE_URL")!;
       const path = Deno.env.get("INVU_SALES_PATH") ?? "/ventas";
       const items = await fetchInvuAny(base, token, dedupe([path, "/ventas", "/orders", "/GetSales", "/GetInvoices"]), desde, hasta);
@@ -130,7 +126,6 @@ serve(async (req) => {
       return j({ ok: true, version: VERSION, mode, note: "SYNC INVU SF OK", desde, hasta, ventas_dias: ventasByDia.size, detalle_rows: detalleRows.length });
     }
 
-    // help
     return j({
       ok: true, version: VERSION, mode,
       help: {
@@ -214,57 +209,72 @@ function needsManualUrl(s: string): boolean {
 
 // ====== AUTOGENERADOR de permutaciones ======
 function buildOverrideCandidates(override: string, desde: string, hasta: string): string[] {
-  // 1) primera pasada: reemplazo literal del secret
   const byReplace = replaceTpl(override, desde, hasta);
 
-  // 2) si quedan llaves, fabricamos URLs “conocidas” de INVU
   const epochMs = { d: toEpochMillis(desde), h: toEpochMillis(hasta) };
   const epochS  = { d: toEpochSeconds(desde), h: toEpochSeconds(hasta) };
 
   const base = "https://api6.invupos.com/invuApiPos/index.php";
+  const paths = [
+    "citas/ordenesAllAdv",
+    "citas/totalporfecha",
 
-  // ordenesAllAdv: combinaciones
-  const ord = (qs: Record<string, string | number>) => {
-    const u = new URL(base);
-    u.searchParams.set("r", "citas/ordenesAllAdv");
-    for (const [k, v] of Object.entries(qs)) u.searchParams.set(k, String(v));
-    return u.toString();
-  };
+    // nuevas rutas probables de ventas
+    "ventas/ordenesAllAdv",
+    "ventas/totalporfecha",
+    "ventas/porfecha",
+    "ventas/ventasdiarias",
+    "ventas/ordenes",
 
-  // totalporfecha: combinaciones
-  const tot = (qs: Record<string, string | number>) => {
-    const u = new URL(base);
-    u.searchParams.set("r", "citas/totalporfecha");
-    for (const [k, v] of Object.entries(qs)) u.searchParams.set(k, String(v));
-    return u.toString();
-  };
+    // reportes/facturas (algunos tenants)
+    "reportes/ventas",
+    "facturas/totalporfecha",
 
-  const cands: string[] = [
-    byReplace, // lo que diga el secret (si ya quedó sin llaves)
-    // ordenesAllAdv (epoch MS / S, con y sin tipo)
-    ord({ fini: epochMs.d, ffin: epochMs.h, tipo: "all" }),
-    ord({ fini: epochMs.d, ffin: epochMs.h }),
-    ord({ fini: epochS.d,  ffin: epochS.h,  tipo: "all" }),
-    ord({ fini: epochS.d,  ffin: epochS.h }),
-    // alias param names (some tenants)
-    ord({ ini: epochMs.d, fin: epochMs.h, tipo: "all" }),
-    ord({ ini: epochS.d,  fin: epochS.h,  tipo: "all" }),
-
-    // totalporfecha (epoch MS / S)
-    tot({ fini: epochMs.d, ffin: epochMs.h }),
-    tot({ fini: epochS.d,  ffin: epochS.h }),
-    // alias fechaIni/fechaFin (por si acaso)
-    tot({ fechaIni: epochMs.d, fechaFin: epochMs.h }),
-    tot({ fechaIni: epochS.d,  fechaFin: epochS.h }),
+    // alias “anglo”
+    "sales/GetSales",
+    "sales/GetInvoices",
   ];
 
-  // Si el secret no tenía llaves (byReplace “limpio”), ponlo primero;
-  // si tenía llaves, ignóralo al principio.
-  const cleanReplace = !needsManualUrl(byReplace);
-  const final = cleanReplace ? cands : cands.slice(1);
+  const withR = (r: string, qs: Record<string, string | number>) => {
+    const u = new URL(base);
+    u.searchParams.set("r", r);
+    for (const [k, v] of Object.entries(qs)) u.searchParams.set(k, String(v));
+    return u.toString();
+  };
 
-  // Elimina duplicados conservando orden
-  return Array.from(new Set(final));
+  // Conjuntos de parámetros a probar (orden importa)
+  const paramSets: Array<Record<string, string | number>> = [
+    // EPOCH en ms
+    { fini: epochMs.d, ffin: epochMs.h, tipo: "all", format: "json" },
+    { fini: epochMs.d, ffin: epochMs.h, format: "json" },
+    { ini: epochMs.d,  fin:  epochMs.h, tipo: "all", format: "json" },
+    { ini: epochMs.d,  fin:  epochMs.h, format: "json" },
+    { fechaIni: epochMs.d, fechaFin: epochMs.h, format: "json" },
+
+    // EPOCH en segundos
+    { fini: epochS.d, ffin: epochS.h, tipo: "all", format: "json" },
+    { fini: epochS.d, ffin: epochS.h, format: "json" },
+    { ini: epochS.d,  fin:  epochS.h, tipo: "all", format: "json" },
+    { ini: epochS.d,  fin:  epochS.h, format: "json" },
+    { fechaIni: epochS.d, fechaFin: epochS.h, format: "json" },
+
+    // YYYY-MM-DD (sin epoch): distintas keys usadas por tenants
+    { desde, hasta, format: "json" },
+    { ini: desde, fin: hasta, format: "json" },
+    { fechaIni: desde, fechaFin: hasta, format: "json" },
+  ];
+
+  const cands: string[] = [];
+  // 1) lo que diga el secret (si quedó limpio)
+  if (!needsManualUrl(byReplace)) cands.push(byReplace);
+
+  // 2) todas las permutaciones r × params
+  for (const r of paths) {
+    for (const ps of paramSets) cands.push(withR(r, ps));
+  }
+
+  // quitar duplicados conservando orden
+  return Array.from(new Set(cands));
 }
 
 // ================= normalización & DB =================
