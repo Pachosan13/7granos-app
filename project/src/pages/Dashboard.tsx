@@ -1,4 +1,4 @@
-// src/pages/Dashboard.tsx
+// project/src/pages/Dashboard.tsx
 import { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { motion } from 'framer-motion';
@@ -35,49 +35,19 @@ import { useRealtimeVentas } from '../hooks/useRealtimeVentas';
 
 const COLORS = ['#3b82f6', '#8b5cf6', '#ec4899', '#f59e0b', '#10b981', '#06b6d4'];
 
-// 👇 Helper local: nombre de sucursal → código corto usado por las vistas v_ui_*
-const nameToCode = (nombre?: string) => {
-  const n = (nombre ?? '').toLowerCase();
-  if (n.includes('san francisco')) return 'sf';
-  if (n.includes('museo')) return 'museo';
-  if (n.includes('cangrejo')) return 'cangrejo';
-  if (n.includes('costa')) return 'costa';
-  if (n.includes('central')) return 'central';
-  return 'sf'; // fallback seguro
-};
-
 type KPI = {
   ventas_brutas: number;
   tickets: number;
-  ticket_promedio: number;
+  ticket_promedio?: number;
   margen_bruto: number;
-  clientes_activos: number;
-  sucursal?: string;
+  clientes_activos?: number;
   sucursal_id?: string;
-  sucursal_nombre?: string;
-};
-
-type SeriesRow = {
-  dia: string;
-  ventas_brutas: number;
-  tickets: number;
-  margen_bruto: number;
-  sucursal?: string;
-  sucursal_id?: string;
-  sucursal_nombre?: string;
-};
-
-type TopProduct = {
-  producto: string;
-  cantidad: number;
-  total: number;
 };
 
 export function Dashboard() {
   const navigate = useNavigate();
   const { sucursales, sucursalSeleccionada, getFilteredSucursalIds } = useAuthOrg();
 
-  // Estado local para filtro de sucursal (independiente del contexto)
   const [selectedSucursalId, setSelectedSucursalId] = useState<string | null>(
     sucursalSeleccionada?.id ? String(sucursalSeleccionada.id) : null
   );
@@ -95,81 +65,53 @@ export function Dashboard() {
   // Datos para gráficos
   const [ventasPorDia, setVentasPorDia] = useState<any[]>([]);
   const [ventasPorSucursal, setVentasPorSucursal] = useState<any[]>([]);
-  const [topProductos, setTopProductos] = useState<TopProduct[]>([]);
 
-  // Sincronización
   const [lastSync, setLastSync] = useState<Date | null>(null);
 
-  // Helpers
   const viewingAll = selectedSucursalId === null;
   const selectedSucursalName = viewingAll
     ? null
     : sucursales.find(s => String(s.id) === selectedSucursalId)?.nombre ?? 'Sucursal';
 
-  // Prepara mapa id→code para traducir IDs a códigos de sucursal
-  const idToCode = new Map<string, string>(
-    sucursales.map(s => [String(s.id), nameToCode(s.nombre)])
-  );
-
-  // Realtime hook
+  // Realtime
   const rt: any = useRealtimeVentas({
     enabled: true,
     debounceMs: 2000,
-    onUpdate: () => {
-      console.log('[Dashboard] Actualización en tiempo real detectada');
-      loadData();
-    },
+    onUpdate: () => loadData(),
   });
-
   let rtConnected = false;
   let rtError: string | null = null;
   let rtLastUpdate: string | Date | null = null;
   let onReconnect: () => void = () => window.location.reload();
-
   if (typeof rt === 'string') {
     rtConnected = rt === 'open';
     rtError = rt === 'error' ? 'Connection error' : null;
   } else if (rt && typeof rt === 'object') {
-    if (typeof rt.connected === 'boolean') rtConnected = rt.connected;
-    if (typeof rt.error === 'string') rtError = rt.error || null;
-    if (rt.lastUpdate) rtLastUpdate = rt.lastUpdate;
-    if (!('connected' in rt) && typeof rt.status === 'string') {
-      rtConnected = rt.status === 'open';
-      if (rt.status === 'error' && !rtError) rtError = 'Connection error';
-    }
-    if (typeof rt.manualReconnect === 'function') {
-      onReconnect = rt.manualReconnect;
-    }
+    // @ts-ignore
+    rtConnected = typeof rt.connected === 'boolean' ? rt.connected : (rt.status === 'open');
+    // @ts-ignore
+    rtError = typeof rt.error === 'string' ? rt.error : (rt.status === 'error' ? 'Connection error' : null);
+    // @ts-ignore
+    rtLastUpdate = rt.lastUpdate ?? null;
+    // @ts-ignore
+    if (typeof rt.manualReconnect === 'function') onReconnect = rt.manualReconnect;
   }
 
-  // Cargar datos del dashboard
   const loadData = useCallback(async () => {
     setLoading(true);
     setError(null);
 
     try {
-      // Traduce selección a CÓDIGOS de sucursal (no IDs)
-      const codesToFilter: string[] = (() => {
-        if (viewingAll) {
-          return getFilteredSucursalIds()
-            .map(String)
-            .map(id => idToCode.get(id))
-            .filter((x): x is string => !!x);
-        }
-        if (selectedSucursalId) {
-          const code = idToCode.get(String(selectedSucursalId));
-          return code ? [code] : [];
-        }
-        return [];
-      })();
+      const idsToFilter = viewingAll
+        ? getFilteredSucursalIds().map(String)
+        : selectedSucursalId
+        ? [String(selectedSucursalId)]
+        : [];
 
-      // 1) KPIs de hoy (vista v_ui_kpis_hoy filtra por 'sucursal')
+      // 1) KPIs de hoy
       let kpisQuery = supabase.from('v_ui_kpis_hoy').select('*');
-      if (!viewingAll && codesToFilter.length === 1) {
-        kpisQuery = kpisQuery.eq('sucursal', codesToFilter[0]);
-      } else if (viewingAll && codesToFilter.length > 0) {
-        kpisQuery = kpisQuery.in('sucursal', codesToFilter);
-      }
+      if (!viewingAll && idsToFilter.length > 0) kpisQuery = kpisQuery.eq('sucursal_id', idsToFilter[0]);
+      else if (viewingAll && idsToFilter.length > 0) kpisQuery = kpisQuery.in('sucursal_id', idsToFilter);
 
       const { data: kpisData, error: kpisError } = await kpisQuery;
       if (kpisError) throw kpisError;
@@ -177,160 +119,95 @@ export function Dashboard() {
       const kpis = (kpisData ?? []) as KPI[];
       const totals = kpis.reduce(
         (acc, row) => ({
-          ventas: acc.ventas + (row.ventas_brutas ?? 0),
-          tickets: acc.tickets + (row.tickets ?? 0),
-          margen: acc.margen + (row.margen_bruto ?? 0),
-          clientes: acc.clientes + (row.clientes_activos ?? 0),
+          ventas: acc.ventas + Number(row.ventas_brutas ?? 0),
+          tickets: acc.tickets + Number(row.tickets ?? 0),
+          margen: acc.margen + Number(row.margen_bruto ?? 0),
+          clientes: acc.clientes + Number(row.clientes_activos ?? 0),
         }),
         { ventas: 0, tickets: 0, margen: 0, clientes: 0 }
       );
-
       setTotalVentas(totals.ventas);
       setTotalTransacciones(totals.tickets);
       setTicketPromedio(totals.tickets > 0 ? totals.ventas / totals.tickets : 0);
       setMargenBruto(totals.margen);
       setClientesActivos(totals.clientes);
 
-      // 2) Serie de ventas últimos 7 días (v_ui_series_14d por 'sucursal')
-      const hoy = new Date();
-      const hace7dias = new Date(hoy);
-      hace7dias.setDate(hace7dias.getDate() - 7);
-
-      const desde = hace7dias.toISOString().split('T')[0];
-      const hasta = hoy.toISOString().split('T')[0];
-
-      let seriesQuery = supabase
-        .from('v_ui_series_14d')
-        .select('*')
-        .gte('dia', desde)
-        .lte('dia', hasta)
-        .order('dia', { ascending: true });
-
-      if (!viewingAll && codesToFilter.length === 1) {
-        seriesQuery = seriesQuery.eq('sucursal', codesToFilter[0]);
-      } else if (viewingAll && codesToFilter.length > 0) {
-        seriesQuery = seriesQuery.in('sucursal', codesToFilter);
-      }
+      // 2) Serie (tolerante: no usamos `dia` si no existe)
+      let seriesQuery = supabase.from('v_ui_series_14d').select('*');
+      if (!viewingAll && idsToFilter.length > 0) seriesQuery = seriesQuery.eq('sucursal_id', idsToFilter[0]);
+      else if (viewingAll && idsToFilter.length > 0) seriesQuery = seriesQuery.in('sucursal_id', idsToFilter);
 
       const { data: seriesData, error: seriesError } = await seriesQuery;
       if (seriesError) throw seriesError;
+      const series = seriesData ?? [];
 
-      const series = (seriesData ?? []) as SeriesRow[];
+      const hasDia = series.length > 0 && Object.prototype.hasOwnProperty.call(series[0], 'dia');
+      if (hasDia) {
+        const map = new Map<string, { dia: string; ventas: number; tickets: number }>();
+        series
+          .filter((r: any) => typeof r.dia === 'string' && r.dia.length > 0)
+          .forEach((r: any) => {
+            const dia = r.dia as string;
+            const entry = map.get(dia) ?? { dia, ventas: 0, tickets: 0 };
+            entry.ventas += Number(r.ventas_brutas ?? 0);
+            entry.tickets += Number(r.tickets ?? 0);
+            map.set(dia, entry);
+          });
+        const arr = Array.from(map.values())
+          .sort((a, b) => a.dia.localeCompare(b.dia))
+          .map(row => ({
+            fecha: new Date(row.dia).toLocaleDateString('es-PA', { month: 'short', day: 'numeric' }),
+            ventas: row.ventas,
+            tickets: row.tickets,
+          }));
+        setVentasPorDia(arr);
+      } else {
+        setVentasPorDia([]); // sin dia -> sin serie
+      }
 
-      // Agrupar por día
-      const ventasPorDiaMap = new Map<string, { dia: string; ventas: number; tickets: number }>();
-      series.forEach(row => {
-        const dia = row.dia;
-        const entry = ventasPorDiaMap.get(dia) ?? { dia, ventas: 0, tickets: 0 };
-        entry.ventas += row.ventas_brutas ?? 0;
-        entry.tickets += row.tickets ?? 0;
-        ventasPorDiaMap.set(dia, entry);
-      });
-
-      const safe = (v?: string) => v ?? '';
-      const ventasPorDiaArray = Array.from(ventasPorDiaMap.values())
-        .sort((a, b) => safe(a.dia).localeCompare(safe(b.dia)))
-        .map(row => ({
-          fecha: new Date(row.dia).toLocaleDateString('es-PA', { month: 'short', day: 'numeric' }),
-          ventas: row.ventas,
-          tickets: row.tickets,
-        }));
-
-      setVentasPorDia(ventasPorDiaArray);
-
-      // 3) Ventas por sucursal (solo si viendo todas)
+      // 3) Ventas por sucursal (cuando viendo todas)
       if (viewingAll) {
-        const ventasPorSucursalMap = new Map<string, { nombre: string; ventas: number }>();
-        series.forEach(row => {
-          const nombre = row.sucursal_nombre ?? row.sucursal ?? 'Sin sucursal';
-          const key = row.sucursal ?? nombre;
-          const entry = ventasPorSucursalMap.get(key) ?? { nombre, ventas: 0 };
-          entry.ventas += row.ventas_brutas ?? 0;
-          ventasPorSucursalMap.set(key, entry);
+        const map = new Map<string, { nombre: string; ventas: number }>();
+        series.forEach((r: any) => {
+          const id = String(r.sucursal_id ?? 'sin-id');
+          const nombre = id; // hasta que expongamos nombre en la vista
+          const entry = map.get(id) ?? { nombre, ventas: 0 };
+          entry.ventas += Number(r.ventas_brutas ?? 0);
+          map.set(id, entry);
         });
-
-        const ventasPorSucursalArray = Array.from(ventasPorSucursalMap.values())
-          .sort((a, b) => b.ventas - a.ventas)
-          .slice(0, 6); // Top 6
-
-        setVentasPorSucursal(ventasPorSucursalArray);
+        const arr = Array.from(map.values()).sort((a, b) => b.ventas - a.ventas).slice(0, 6);
+        setVentasPorSucursal(arr);
       } else {
         setVentasPorSucursal([]);
       }
 
-      // 4) Top productos (si existe) por 'sucursal'
-      try {
-        let topQuery = supabase
-          .from('v_ui_top_productos_mes')
-          .select('*')
-          .order('cantidad', { ascending: false })
-          .limit(5);
-
-        if (!viewingAll && codesToFilter.length === 1) {
-          topQuery = topQuery.eq('sucursal', codesToFilter[0]);
-        } else if (viewingAll && codesToFilter.length > 0) {
-          topQuery = topQuery.in('sucursal', codesToFilter);
-        }
-
-        const { data: topData, error: topError } = await topQuery;
-        if (!topError && topData) {
-          setTopProductos(topData as TopProduct[]);
-        } else {
-          setTopProductos([]);
-        }
-      } catch (e) {
-        console.log('[Dashboard] Top productos no disponible', e);
-        setTopProductos([]);
-      }
-
       setLastSync(new Date());
-    } catch (err) {
+    } catch (err: any) {
       console.error('[Dashboard] Error cargando datos:', err);
-      setError(err instanceof Error ? err.message : 'Error desconocido');
+      setError(err?.message ?? 'Error desconocido');
+      setVentasPorDia([]);
+      setVentasPorSucursal([]);
     } finally {
       setLoading(false);
     }
-  }, [viewingAll, selectedSucursalId, getFilteredSucursalIds, sucursales]);
+  }, [viewingAll, selectedSucursalId, getFilteredSucursalIds]);
 
-  // Cargar datos al montar y cuando cambia el filtro
-  useEffect(() => {
-    loadData();
-  }, [loadData]);
+  useEffect(() => { loadData(); }, [loadData]);
 
-  // Sincronizar con el contexto cuando cambia la sucursal seleccionada
   useEffect(() => {
-    if (sucursalSeleccionada?.id) {
-      setSelectedSucursalId(String(sucursalSeleccionada.id));
-    } else {
-      setSelectedSucursalId(null);
-    }
+    if (sucursalSeleccionada?.id) setSelectedSucursalId(String(sucursalSeleccionada.id));
+    else setSelectedSucursalId(null);
   }, [sucursalSeleccionada]);
 
-  const containerVariants = {
-    hidden: { opacity: 0 },
-    visible: {
-      opacity: 1,
-      transition: { staggerChildren: 0.1 },
-    },
-  };
-
-  const itemVariants = {
-    hidden: { y: 20, opacity: 0 },
-    visible: {
-      y: 0,
-      opacity: 1,
-    },
-  };
+  const containerVariants = { hidden: { opacity: 0 }, visible: { opacity: 1, transition: { staggerChildren: 0.1 } } };
+  const itemVariants = { hidden: { y: 20, opacity: 0 }, visible: { y: 0, opacity: 1 } };
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 dark:from-gray-900 dark:to-gray-800">
       <div className="p-6 lg:p-8 space-y-6">
         {/* Header */}
-        <motion.div
-          initial={{ opacity: 0, y: -20 }}
-          animate={{ opacity: 1, y: 0 }}
-          className="bg-white dark:bg-gray-800 rounded-2xl shadow-lg p-6 border border-gray-100 dark:border-gray-700"
-        >
+        <motion.div initial={{ opacity: 0, y: -20 }} animate={{ opacity: 1, y: 0 }}
+          className="bg-white dark:bg-gray-800 rounded-2xl shadow-lg p-6 border border-gray-100 dark:border-gray-700">
           <div className="flex items-start justify-between gap-4">
             <div className="flex-1">
               <div className="flex items-center gap-4 mb-2">
@@ -343,20 +220,13 @@ export function Dashboard() {
                   compact
                 />
               </div>
-              <p className="text-gray-600 dark:text-gray-400">
-                Resumen general de operaciones en tiempo real
-              </p>
+              <p className="text-gray-600 dark:text-gray-400">Resumen general de operaciones en tiempo real</p>
               <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
-                {viewingAll
-                  ? `Viendo datos de todas las sucursales (${sucursales.length} sucursales)`
-                  : `Viendo únicamente: ${selectedSucursalName}`}
+                {viewingAll ? `Viendo datos de todas las sucursales (${sucursales.length} sucursales)` : `Viendo únicamente: ${selectedSucursalName}`}
               </p>
             </div>
-            <button
-              onClick={loadData}
-              disabled={loading}
-              className="inline-flex items-center gap-2 px-5 py-3 rounded-xl text-white bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-700 hover:to-purple-700 shadow-lg disabled:opacity-50 transition-all"
-            >
+            <button onClick={loadData} disabled={loading}
+              className="inline-flex items-center gap-2 px-5 py-3 rounded-xl text-white bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-700 hover:to-purple-700 shadow-lg disabled:opacity-50">
               <RefreshCw className={`h-5 w-5 ${loading ? 'animate-spin' : ''}`} />
               {loading ? 'Actualizando…' : 'Actualizar'}
             </button>
@@ -371,12 +241,8 @@ export function Dashboard() {
         </motion.div>
 
         {/* Filtro de sucursal */}
-        <motion.div
-          initial={{ opacity: 0, y: -20 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ delay: 0.1 }}
-          className="bg-white dark:bg-gray-800 rounded-2xl shadow-lg p-6 border border-gray-100 dark:border-gray-700"
-        >
+        <motion.div initial={{ opacity: 0, y: -20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.1 }}
+          className="bg-white dark:bg-gray-800 rounded-2xl shadow-lg p-6 border border-gray-100 dark:border-gray-700">
           <div className="flex items-center gap-4">
             <Building2 className="h-5 w-5 text-gray-500 dark:text-gray-400" />
             <select
@@ -386,9 +252,7 @@ export function Dashboard() {
             >
               <option value="">Todas las sucursales</option>
               {sucursales.map((s) => (
-                <option key={String(s.id)} value={String(s.id)}>
-                  {s.nombre}
-                </option>
+                <option key={String(s.id)} value={String(s.id)}>{s.nombre}</option>
               ))}
             </select>
             <div className="px-4 py-2 rounded-lg border dark:border-gray-700 bg-gray-50 dark:bg-gray-900 text-gray-700 dark:text-gray-300 text-sm font-medium">
@@ -397,13 +261,10 @@ export function Dashboard() {
           </div>
         </motion.div>
 
-        {/* Error Alert */}
+        {/* Error */}
         {error && (
-          <motion.div
-            initial={{ opacity: 0, scale: 0.95 }}
-            animate={{ opacity: 1, scale: 1 }}
-            className="bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-700 rounded-xl p-4"
-          >
+          <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }}
+            className="bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-700 rounded-xl p-4">
             <div className="flex items-start gap-3">
               <AlertTriangle className="h-5 w-5 text-red-600 dark:text-red-400 flex-shrink-0 mt-0.5" />
               <div>
@@ -415,76 +276,38 @@ export function Dashboard() {
         )}
 
         {/* KPIs */}
-        <motion.div
-          variants={containerVariants}
-          initial="hidden"
-          animate="visible"
-          className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-6"
-        >
+        <motion.div variants={containerVariants} initial="hidden" animate="visible"
+          className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-6">
           <motion.div variants={itemVariants}>
-            <KPICard
-              title="Ventas Hoy"
-              value={totalVentas}
-              icon={DollarSign}
-              color="bg-gradient-to-br from-green-500 to-emerald-600"
-              prefix="USD "
-              onClick={() => navigate('/ventas')}
-            />
+            <KPICard title="Ventas Hoy" value={totalVentas} icon={DollarSign}
+              color="bg-gradient-to-br from-green-500 to-emerald-600" prefix="USD " onClick={() => navigate('/ventas')} />
           </motion.div>
           <motion.div variants={itemVariants}>
-            <KPICard
-              title="Transacciones"
-              value={totalTransacciones}
-              icon={Receipt}
-              color="bg-gradient-to-br from-blue-500 to-cyan-600"
-              onClick={() => navigate('/ventas')}
-            />
+            <KPICard title="Transacciones" value={totalTransacciones} icon={Receipt}
+              color="bg-gradient-to-br from-blue-500 to-cyan-600" onClick={() => navigate('/ventas')} />
           </motion.div>
           <motion.div variants={itemVariants}>
-            <KPICard
-              title="Ticket Promedio"
-              value={ticketPromedio}
-              icon={TrendingUp}
-              color="bg-gradient-to-br from-purple-500 to-pink-600"
-              prefix="USD "
-            />
+            <KPICard title="Ticket Promedio" value={ticketPromedio} icon={TrendingUp}
+              color="bg-gradient-to-br from-purple-500 to-pink-600" prefix="USD " />
           </motion.div>
           <motion.div variants={itemVariants}>
-            <KPICard
-              title="Margen Bruto"
-              value={margenBruto}
-              icon={PieChart}
-              color="bg-gradient-to-br from-orange-500 to-red-600"
-              prefix="USD "
-            />
+            <KPICard title="Margen Bruto" value={margenBruto} icon={PieChart}
+              color="bg-gradient-to-br from-orange-500 to-red-600" prefix="USD " />
           </motion.div>
           <motion.div variants={itemVariants}>
-            <KPICard
-              title="Clientes Activos"
-              value={clientesActivos}
-              icon={Users}
-              color="bg-gradient-to-br from-indigo-500 to-purple-600"
-              onClick={() => navigate('/clientes')}
-            />
+            <KPICard title="Clientes Activos" value={clientesActivos} icon={Users}
+              color="bg-gradient-to-br from-indigo-500 to-purple-600" onClick={() => navigate('/clientes')} />
           </motion.div>
         </motion.div>
 
-        {/* Charts Grid */}
+        {/* Grids */}
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
           {/* Ventas por día */}
-          <motion.div
-            variants={itemVariants}
-            initial="hidden"
-            animate="visible"
-            className="bg-white dark:bg-gray-800 rounded-2xl shadow-lg border border-gray-100 dark:border-gray-700"
-          >
+          <motion.div variants={itemVariants} initial="hidden" animate="visible"
+            className="bg-white dark:bg-gray-800 rounded-2xl shadow-lg border border-gray-100 dark:border-gray-700">
             <div className="p-6 border-b border-gray-100 dark:border-gray-700">
-              <h3 className="text-xl font-bold text-gray-900 dark:text-white">
-                Ventas últimos 7 días
-              </h3>
-              <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">
-                Evolución diaria de ventas
-              </p>
+              <h3 className="text-xl font-bold text-gray-900 dark:text-white">Ventas últimos 7 días</h3>
+              <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">Evolución diaria (se activa cuando la vista incluya <code>dia</code>)</p>
             </div>
             <div className="p-6 h-80">
               {ventasPorDia.length === 0 ? (
@@ -496,19 +319,8 @@ export function Dashboard() {
                   <BarChart data={ventasPorDia}>
                     <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
                     <XAxis dataKey="fecha" stroke="#6b7280" fontSize={12} />
-                    <YAxis
-                      stroke="#6b7280"
-                      fontSize={12}
-                      tickFormatter={(v) => `$${(v / 1000).toFixed(0)}k`}
-                    />
-                    <Tooltip
-                      formatter={(value: number) => formatCurrencyUSD(value)}
-                      contentStyle={{
-                        backgroundColor: 'rgba(255, 255, 255, 0.95)',
-                        border: '1px solid #e5e7eb',
-                        borderRadius: '8px',
-                      }}
-                    />
+                    <YAxis stroke="#6b7280" fontSize={12} tickFormatter={(v) => `$${(v / 1000).toFixed(0)}k`} />
+                    <Tooltip formatter={(value: number) => formatCurrencyUSD(value)} />
                     <Bar dataKey="ventas" fill="#3b82f6" radius={[8, 8, 0, 0]} />
                   </BarChart>
                 </ResponsiveContainer>
@@ -516,82 +328,31 @@ export function Dashboard() {
             </div>
           </motion.div>
 
-          {/* Ventas por sucursal (solo si viendo todas) */}
-          {viewingAll && ventasPorSucursal.length > 0 && (
-            <motion.div
-              variants={itemVariants}
-              initial="hidden"
-              animate="visible"
-              className="bg-white dark:bg-gray-800 rounded-2xl shadow-lg border border-gray-100 dark:border-gray-700"
-            >
+          {/* Ventas por sucursal */}
+          {viewingAll && (
+            <motion.div variants={itemVariants} initial="hidden" animate="visible"
+              className="bg-white dark:bg-gray-800 rounded-2xl shadow-lg border border-gray-100 dark:border-gray-700">
               <div className="p-6 border-b border-gray-100 dark:border-gray-700">
-                <h3 className="text-xl font-bold text-gray-900 dark:text-white">
-                  Ventas por sucursal
-                </h3>
-                <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">
-                  Distribución últimos 7 días
-                </p>
+                <h3 className="text-xl font-bold text-gray-900 dark:text-white">Ventas por sucursal</h3>
+                <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">Distribución (usa <code>sucursal_id</code>)</p>
               </div>
               <div className="p-6 h-80">
-                <ResponsiveContainer width="100%" height="100%">
-                  <RePieChart>
-                    <Pie
-                      data={ventasPorSucursal}
-                      dataKey="ventas"
-                      nameKey="nombre"
-                      cx="50%"
-                      cy="50%"
-                      outerRadius={100}
-                      label={(entry) => entry.nombre}
-                    >
-                      {ventasPorSucursal.map((_, index) => (
-                        <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
-                      ))}
-                    </Pie>
-                    <Tooltip formatter={(value: number) => formatCurrencyUSD(value)} />
-                    <Legend />
-                  </RePieChart>
-                </ResponsiveContainer>
-              </div>
-            </motion.div>
-          )}
-
-          {/* Top productos */}
-          {topProductos.length > 0 && (
-            <motion.div
-              variants={itemVariants}
-              initial="hidden"
-              animate="visible"
-              className="bg-white dark:bg-gray-800 rounded-2xl shadow-lg border border-gray-100 dark:border-gray-700"
-            >
-              <div className="p-6 border-b border-gray-100 dark:border-gray-700">
-                <h3 className="text-xl font-bold text-gray-900 dark:text-white">
-                  Top Productos
-                </h3>
-                <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">
-                  Más vendidos este mes
-                </p>
-              </div>
-              <div className="p-6">
-                <div className="space-y-4">
-                  {topProductos.map((prod, idx) => (
-                    <div key={idx} className="flex items-center justify-between">
-                      <div className="flex-1">
-                        <p className="font-medium text-gray-900 dark:text-white">
-                          {prod.producto}
-                        </p>
-                        <p className="text-sm text-gray-500 dark:text-gray-400">
-                          {prod.cantidad} unidades
-                        </p>
-                      </div>
-                      <div className="text-right">
-                        <p className="font-bold text-gray-900 dark:text-white">
-                          {formatCurrencyUSD(prod.total)}
-                        </p>
-                      </div>
-                    </div>
-                  ))}
-                </div>
+                {ventasPorSucursal.length === 0 ? (
+                  <div className="h-full flex items-center justify-center text-gray-500 dark:text-gray-400">
+                    {loading ? 'Cargando…' : 'Sin datos disponibles'}
+                  </div>
+                ) : (
+                  <ResponsiveContainer width="100%" height="100%">
+                    <RePieChart>
+                      <Pie data={ventasPorSucursal} dataKey="ventas" nameKey="nombre" cx="50%" cy="50%" outerRadius={100}
+                        label={(entry) => entry.nombre}>
+                        {ventasPorSucursal.map((_, i) => <Cell key={i} fill={COLORS[i % COLORS.length]} />)}
+                      </Pie>
+                      <Tooltip formatter={(value: number) => formatCurrencyUSD(value)} />
+                      <Legend />
+                    </RePieChart>
+                  </ResponsiveContainer>
+                )}
               </div>
             </motion.div>
           )}
