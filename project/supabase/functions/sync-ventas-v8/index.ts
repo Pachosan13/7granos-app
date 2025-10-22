@@ -177,7 +177,24 @@ function j(body: unknown, status = 200) {
     headers: { "Content-Type": "application/json; charset=utf-8" },
   });
 }
-
+// Panamá -05:00 para epoch exacto por día
+function toEpochSeconds(dateYYYYMMDD: string): number {
+  const d = new Date(`${dateYYYYMMDD}T00:00:00-05:00`);
+  return Math.floor(d.getTime() / 1000);
+}
+function toEpochMillis(dateYYYYMMDD: string): number {
+  const d = new Date(`${dateYYYYMMDD}T00:00:00-05:00`);
+  return d.getTime(); // ms
+}
+function replaceTpl(s: string, desde: string, hasta: string) {
+  return s
+    .replaceAll("{desde}", desde)
+    .replaceAll("{hasta}", hasta)
+    .replaceAll("{desde_epoch}", String(toEpochSeconds(desde)))
+    .replaceAll("{hasta_epoch}", String(toEpochSeconds(hasta)))
+    .replaceAll("{desde_epoch_ms}", String(toEpochMillis(desde)))
+    .replaceAll("{hasta_epoch_ms}", String(toEpochMillis(hasta)));
+}
 // ===== helpers =====
 function toNum(v: unknown): number {
   if (v == null) return 0;
