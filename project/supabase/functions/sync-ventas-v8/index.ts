@@ -1,370 +1,248 @@
+// sync-ventas-v8.2 - DISCOVERY build
+// Objetivo: descubrir el endpoint INVU correcto en TU tenant antes de sincronizar definitivamente.
+
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
-import { createClient, SupabaseClient } from "https://esm.sh/@supabase/supabase-js@2";
 
-const VERSION = "sync-ventas-v8.1-2025-10-22-ROBUST+AUTO";
-const SF_UUID = "1918f8f7-9b5d-4f6a-9b53-a953f82b71ad";
+const VERSION = "sync-ventas-v8.2-2025-10-22-DISCOVERY";
 
-type VentaDetalleIn = {
-  idorden?: string | null;
-  total?: number | string | null;
-  subtotal?: number | string | null;
-  itbms?: number | string | null;
-  fecha_cierre?: string | null;
-  fecha?: string | null;
-  created_at?: string | null;
-  estado?: string | null;
-  importe?: number | string | null;
-  monto?: number | string | null;
-  monto_total?: number | string | null;
-  grand_total?: number | string | null;
-};
-
-serve(async (req) => {
-  try {
-    const url = new URL(req.url);
-    const mode = url.searchParams.get("mode") ?? "ping";
-    const sucursal = url.searchParams.get("sucursal") ?? "";
-    const desde = url.searchParams.get("desde") ?? "";
-    const hasta = url.searchParams.get("hasta") ?? "";
-    const source = url.searchParams.get("source") ?? "invu";
-
-    const SUPABASE_URL = Deno.env.get("SUPABASE_URL");
-    const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
-
-    if (mode === "ping") return j({ ok: true, mode, version: VERSION, now: new Date().toISOString() });
-
-    if (mode === "diag") {
-      return j({
-        ok: true, mode, version: VERSION,
-        has_SUPABASE_URL: !!SUPABASE_URL,
-        has_SUPABASE_SERVICE_ROLE_KEY: !!SERVICE_ROLE,
-        has_INVU_BASE_URL: !!Deno.env.get("INVU_BASE_URL"),
-        has_SF_TOKEN: !!Deno.env.get("SF_TOKEN"),
-        has_INVU_SALES_PATH: !!Deno.env.get("INVU_SALES_PATH"),
-        has_INVU_SALES_URL: !!Deno.env.get("INVU_SALES_URL"),
-      });
-    }
-
-    if (!SUPABASE_URL || !SERVICE_ROLE) {
-      return j({ ok: false, version: VERSION, error: "faltan SUPABASE_URL/SUPABASE_SERVICE_ROLE_KEY" }, 500);
-    }
-    const sb = createClient(SUPABASE_URL, SERVICE_ROLE, { auth: { persistSession: false } });
-
-    // probe
-    {
-      const { error: probeErr } = await sb.from("ventas").select("id", { head: true, count: "exact" }).limit(1);
-      if (probeErr) return j({ ok: false, version: VERSION, step: "probe", error: probeErr.message ?? probeErr }, 500);
-    }
-
-    if (mode === "insert") {
-      if (!sucursal || !desde || !hasta) return j({ ok: false, version: VERSION, error: "Faltan parámetros sucursal|desde|hasta" }, 400);
-      if (sucursal !== "sf") return j({ ok: false, version: VERSION, error: "Solo SF tiene token vigente" }, 401);
-      const r = await insertDummyForDay(sb, desde);
-      if (!r.ok) return j({ ...r, version: VERSION }, r.status ?? 500);
-      return j({ ok: true, version: VERSION, mode, note: "Escritura de prueba completada", sucursal, desde, hasta });
-    }
-
-    if (mode === "sync") {
-      if (!sucursal || !desde || !hasta) return j({ ok: false, version: VERSION, error: "Faltan parámetros sucursal|desde|hasta" }, 400);
-      if (sucursal !== "sf") return j({ ok: false, version: VERSION, error: "Solo SF tiene token vigente" }, 401);
-
-      if (source === "dummy") {
-        const days = enumerateDays(desde, hasta);
-        let okCnt = 0;
-        for (const day of days) {
-          const r = await insertDummyForDay(sb, day);
-          if (r.ok) okCnt++;
-        }
-        return j({ ok: true, version: VERSION, mode, note: "SYNC dummy OK", days: days.length, ok: okCnt });
-      }
-
-      // === INVU real: override con auto-permutaciones ===
-      const token = Deno.env.get("SF_TOKEN")!;
-      const override = Deno.env.get("INVU_SALES_URL");
-      if (override) {
-        const candidates = buildOverrideCandidates(override, desde, hasta);
-        const attempts: Array<{ url: string; status: number; preview?: string }> = [];
-
-        for (const u of candidates) {
-          const r = await fetch(u, {
-            headers: {
-              Authorization: `Bearer ${token}`,
-              Accept: "application/json",
-            },
-          });
-          if (r.ok) {
-            const arr = await safeArray(r);
-            const { ventasByDia, detalleRows } = normalizeItems(arr);
-            const upErr = await upsertVentas(sb, ventasByDia);
-            if (upErr) return j({ ok: false, version: VERSION, step: "ventas.upsert", error: upErr }, 500);
-            const detErr = await upsertDetalle(sb, detalleRows);
-            if (detErr) return j({ ok: false, version: VERSION, step: "detalle.upsert", error: detErr }, 500);
-            return j({
-              ok: true, version: VERSION, mode, note: "SYNC INVU SF OK (override/auto)",
-              desde, hasta, ventas_dias: ventasByDia.size, detalle_rows: detalleRows.length, used: u
-            });
-          } else {
-            attempts.push({ url: u, status: r.status, preview: await safePreview(r) });
-            if (r.status !== 404) return j({ ok: false, version: VERSION, step: "invu.fetch.override", attempts }, 502);
-          }
-        }
-        return j({ ok: false, version: VERSION, step: "invu.fetch.override", attempts }, 502);
-      }
-
-      // Fallback por paths conocidos (por si no hay INVU_SALES_URL)
-      const base = Deno.env.get("INVU_BASE_URL")!;
-      const path = Deno.env.get("INVU_SALES_PATH") ?? "/ventas";
-      const items = await fetchInvuAny(base, token, dedupe([path, "/ventas", "/orders", "/GetSales", "/GetInvoices"]), desde, hasta);
-      if ("error" in items) return j({ ok: false, version: VERSION, step: "invu.fetch", ...items }, 502);
-
-      const { ventasByDia, detalleRows } = normalizeItems(items);
-      const upErr = await upsertVentas(sb, ventasByDia);
-      if (upErr) return j({ ok: false, version: VERSION, step: "ventas.upsert", error: upErr }, 500);
-      const detErr = await upsertDetalle(sb, detalleRows);
-      if (detErr) return j({ ok: false, version: VERSION, step: "detalle.upsert", error: detErr }, 500);
-
-      return j({ ok: true, version: VERSION, mode, note: "SYNC INVU SF OK", desde, hasta, ventas_dias: ventasByDia.size, detalle_rows: detalleRows.length });
-    }
-
-    return j({
-      ok: true, version: VERSION, mode,
-      help: {
-        ping: "?mode=ping",
-        diag: "?mode=diag",
-        insert_dummy: "?mode=insert&sucursal=sf&desde=YYYY-MM-DD&hasta=YYYY-MM-DD",
-        sync_invu: "?mode=sync&sucursal=sf&desde=YYYY-MM-DD&hasta=YYYY-MM-DD",
-        sync_dummy: "?mode=sync&sucursal=sf&desde=YYYY-MM-DD&hasta=YYYY-MM-DD&source=dummy"
-      }
-    });
-
-  } catch (e) {
-    return j({ ok: false, version: VERSION, error: String(e) }, 500);
-  }
-});
-
-function j(body: unknown, status = 200) {
-  return new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json; charset=utf-8" } });
+// Helpers
+function j(body: any, status = 200) {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "content-type": "application/json; charset=utf-8" },
+  });
 }
 
-// ===== util num/fecha =====
-function toNum(v: unknown): number {
-  if (v == null) return 0;
-  const n = typeof v === "string" ? Number(v) : (v as number);
-  return Number.isFinite(n) ? Number(n) : 0;
-}
-function toNumFrom(it: Record<string, unknown>, keys: string[]): number {
-  for (const k of keys) if (k in it) return toNum((it as any)[k]);
-  return 0;
-}
-function pickDia(it: VentaDetalleIn): string {
-  const raw = it.fecha_cierre ?? it.fecha ?? it.created_at ?? new Date().toISOString();
-  return raw.slice(0, 10);
-}
-function enumerateDays(from: string, to: string): string[] {
-  const a = new Date(from + "T00:00:00Z");
-  const b = new Date(to + "T00:00:00Z");
-  const out: string[] = [];
-  for (let d = new Date(a); d <= b; d.setUTCDate(d.getUTCDate() + 1)) out.push(d.toISOString().slice(0, 10));
-  return out;
-}
-function stripTrailingSlash(s: string) { return s.endsWith("/") ? s.slice(0, -1) : s; }
-function dedupe<T>(arr: T[]): T[] { return Array.from(new Set(arr)); }
+const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
+const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+const INVU_BASE_URL = Deno.env.get("INVU_BASE_URL") ?? "https://api6.invupos.com/invuApiPos";
+const SF_TOKEN = Deno.env.get("INVU_SF_TOKEN") ?? "";
+const INVU_SALES_PATH = Deno.env.get("INVU_SALES_PATH"); // opcional (legacy)
+const INVU_SALES_URL = Deno.env.get("INVU_SALES_URL");   // opcional (override URL completa)
 
-// Panamá -05:00
-function toEpochSeconds(dateYYYYMMDD: string): number {
-  const d = new Date(`${dateYYYYMMDD}T00:00:00-05:00`);
-  return Math.floor(d.getTime() / 1000);
-}
-function toEpochMillis(dateYYYYMMDD: string): number {
-  const d = new Date(`${dateYYYYMMDD}T00:00:00-05:00`);
-  return d.getTime();
-}
-
-// ===== placeholders robustos =====
-function replaceTpl(s: string, desde: string, hasta: string) {
-  const pairs: Array<[string, string]> = [
-    ["{desde}", desde], ["{hasta}", hasta],
-    ["{desde_epoch}", String(toEpochSeconds(desde))],
-    ["{hasta_epoch}", String(toEpochSeconds(hasta))],
-    ["{desde_epoch_ms}", String(toEpochMillis(desde))],
-    ["{hasta_epoch_ms}", String(toEpochMillis(hasta))],
-    ["%7Bdesde%7D", desde], ["%7Bhasta%7D", hasta],
-    ["%7Bdesde_epoch%7D", String(toEpochSeconds(desde))],
-    ["%7Bhasta_epoch%7D", String(toEpochSeconds(hasta))],
-    ["%7Bdesde_epoch_ms%7D", String(toEpochMillis(desde))],
-    ["%7Bhasta_epoch_ms%7D", String(toEpochMillis(hasta))],
-    ["__DESDE__", desde], ["__HASTA__", hasta],
-    ["__DESDE_EPOCH__", String(toEpochSeconds(desde))],
-    ["__HASTA_EPOCH__", String(toEpochSeconds(hasta))],
-    ["__DESDE_EPOCH_MS__", String(toEpochMillis(desde))],
-    ["__HASTA_EPOCH_MS__", String(toEpochMillis(hasta))],
+// Build headers INVU
+function invuHeaders() {
+  // Ajusta según tu tenant: algunos esperan "Authorization: Bearer", otros "token", otros "invu-token".
+  // Arrancamos probando 3 variantes comunes.
+  return [
+    { name: "Authorization", value: `Bearer ${SF_TOKEN}` },
+    { name: "token", value: SF_TOKEN },
+    { name: "invu-token", value: SF_TOKEN },
   ];
-  let out = s;
-  for (const [k, v] of pairs) out = out.split(k).join(v);
-  return out;
-}
-function needsManualUrl(s: string): boolean {
-  return s.includes("{") || s.includes("%7B");
 }
 
-// ====== AUTOGENERADOR de permutaciones ======
-function buildOverrideCandidates(override: string, desde: string, hasta: string): string[] {
-  const byReplace = replaceTpl(override, desde, hasta);
+// Intenta GET con múltiples headers alternativos; devuelve el primer resultado no-404
+async function tryFetch(url: string) {
+  const candidates = invuHeaders();
+  const attempts: Array<{ header: string; status: number; preview: string }> = [];
 
-  const epochMs = { d: toEpochMillis(desde), h: toEpochMillis(hasta) };
-  const epochS  = { d: toEpochSeconds(desde), h: toEpochSeconds(hasta) };
+  for (const h of candidates) {
+    const res = await fetch(url, { headers: { [h.name]: h.value } });
+    const text = await res.text();
+    attempts.push({
+      header: h.name,
+      status: res.status,
+      preview: text.slice(0, 200),
+    });
+    if (res.status !== 404) {
+      return { ok: true, url, header: h.name, status: res.status, preview: text.slice(0, 500), attempts };
+    }
+  }
+  return { ok: false, url, attempts };
+}
 
-  const base = "https://api6.invupos.com/invuApiPos/index.php";
-  const paths = [
-    "citas/ordenesAllAdv",
-    "citas/totalporfecha",
+// Lista de rutas “probables” (módulo/acción + combinaciones de parámetros) — solo para descubrir.
+function candidateUrls(desdeISO: string, hastaISO: string) {
+  // Épocas en ms y s
+  const d = new Date(`${desdeISO}T00:00:00-05:00`).getTime(); // TZ Panamá
+  const h = new Date(`${hastaISO}T23:59:59-05:00`).getTime();
+  const d_ms = d, h_ms = h;
+  const d_s = Math.floor(d_ms / 1000), h_s = Math.floor(h_ms / 1000);
 
-    // nuevas rutas probables de ventas
+  // Ojo: muchos tenants INVU exponen módulos y nombres distintos.
+  // Vamos a cubrir familias comunes: ventas, citas, reportes, facturas, sales.
+  const families = [
     "ventas/ordenesAllAdv",
-    "ventas/totalporfecha",
     "ventas/porfecha",
     "ventas/ventasdiarias",
-    "ventas/ordenes",
-
-    // reportes/facturas (algunos tenants)
+    "ventas/totalporfecha",
+    "citas/ordenesAllAdv",
+    "citas/totalporfecha",
     "reportes/ventas",
     "facturas/totalporfecha",
-
-    // alias “anglo”
     "sales/GetSales",
     "sales/GetInvoices",
   ];
 
-  const withR = (r: string, qs: Record<string, string | number>) => {
-    const u = new URL(base);
-    u.searchParams.set("r", r);
-    for (const [k, v] of Object.entries(qs)) u.searchParams.set(k, String(v));
-    return u.toString();
-  };
-
-  // Conjuntos de parámetros a probar (orden importa)
-  const paramSets: Array<Record<string, string | number>> = [
-    // EPOCH en ms
-    { fini: epochMs.d, ffin: epochMs.h, tipo: "all", format: "json" },
-    { fini: epochMs.d, ffin: epochMs.h, format: "json" },
-    { ini: epochMs.d,  fin:  epochMs.h, tipo: "all", format: "json" },
-    { ini: epochMs.d,  fin:  epochMs.h, format: "json" },
-    { fechaIni: epochMs.d, fechaFin: epochMs.h, format: "json" },
-
-    // EPOCH en segundos
-    { fini: epochS.d, ffin: epochS.h, tipo: "all", format: "json" },
-    { fini: epochS.d, ffin: epochS.h, format: "json" },
-    { ini: epochS.d,  fin:  epochS.h, tipo: "all", format: "json" },
-    { ini: epochS.d,  fin:  epochS.h, format: "json" },
-    { fechaIni: epochS.d, fechaFin: epochS.h, format: "json" },
-
-    // YYYY-MM-DD (sin epoch): distintas keys usadas por tenants
-    { desde, hasta, format: "json" },
-    { ini: desde, fin: hasta, format: "json" },
-    { fechaIni: desde, fechaFin: hasta, format: "json" },
+  const params = [
+    `fini=${d_ms}&ffin=${h_ms}`,
+    `fini=${d_s}&ffin=${h_s}`,
+    `ini=${d_ms}&fin=${h_ms}`,
+    `ini=${d_s}&fin=${h_s}`,
+    `fechaIni=${d_ms}&fechaFin=${h_ms}`,
+    `fechaIni=${d_s}&fechaFin=${h_s}`,
+    `desde=${desdeISO}&hasta=${hastaISO}`,
+    `ini=${desdeISO}&fin=${hastaISO}`,
+    `fechaIni=${desdeISO}&fechaFin=${hastaISO}`,
   ];
 
-  const cands: string[] = [];
-  // 1) lo que diga el secret (si quedó limpio)
-  if (!needsManualUrl(byReplace)) cands.push(byReplace);
+  const baseR = (r: string) => `${INVU_BASE_URL.replace(/\/+$/, "")}/index.php?r=${encodeURIComponent(r)}`;
 
-  // 2) todas las permutaciones r × params
-  for (const r of paths) {
-    for (const ps of paramSets) cands.push(withR(r, ps));
-  }
-
-  // quitar duplicados conservando orden
-  return Array.from(new Set(cands));
-}
-
-// ================= normalización & DB =================
-function normalizeItems(items: any[]) {
-  const ventasByDia = new Map<string, number>();
-  const detalleRows: any[] = [];
-
-  for (const it of items ?? []) {
-    const diaAgg = typeof it?.fecha === "string" && /^\d{4}-\d{2}-\d{2}/.test(it.fecha);
-    const dia = diaAgg ? String(it.fecha).slice(0, 10) : pickDia(it as VentaDetalleIn);
-    const total = toNumFrom(it, ["total","importe","monto","monto_total","grand_total"]);
-    ventasByDia.set(dia, (ventasByDia.get(dia) ?? 0) + total);
-
-    if (diaAgg) {
-      detalleRows.push({
-        idorden: crypto.randomUUID(), sucursal_id: SF_UUID,
-        fecha_cierre: `${dia}T12:00:00Z`, estado: "completado",
-        subtotal: total, itbms: 0, total,
-      });
-    } else {
-      const subtotal = toNumFrom(it, ["subtotal"]);
-      const itbms = toNumFrom(it, ["itbms"]);
-      const fecha_cierre =
-        (it as VentaDetalleIn).fecha_cierre ??
-        ((it as VentaDetalleIn).fecha ? `${(it as VentaDetalleIn).fecha!.slice(0,10)}T12:00:00Z` : undefined) ??
-        `${dia}T12:00:00Z`;
-
-      detalleRows.push({
-        idorden: (it as VentaDetalleIn).idorden ?? crypto.randomUUID(),
-        sucursal_id: SF_UUID, fecha_cierre,
-        estado: (it as VentaDetalleIn).estado ?? "completado",
-        subtotal: subtotal || total, itbms, total,
-      });
+  const urls: string[] = [];
+  for (const fam of families) {
+    // con y sin &tipo=all / &format=json
+    for (const p of params) {
+      urls.push(`${baseR(fam)}&${p}&tipo=all&format=json`);
+      urls.push(`${baseR(fam)}&${p}&format=json`);
+      urls.push(`${baseR(fam)}&${p}`);
     }
   }
 
-  return { ventasByDia, detalleRows };
-}
-
-async function upsertVentas(sb: SupabaseClient, ventasByDia: Map<string, number>): Promise<string | null> {
-  if (ventasByDia.size === 0) return null;
-  const ventasBulk = Array.from(ventasByDia.entries()).map(([dia, total]) => ({ sucursal_id: SF_UUID, fecha: dia, total }));
-  const { error } = await sb.from("ventas").upsert(ventasBulk, { onConflict: "sucursal_id,fecha", ignoreDuplicates: true });
-  return error ? (error.message ?? String(error)) : null;
-}
-
-async function upsertDetalle(sb: SupabaseClient, detalleRows: any[]): Promise<string | null> {
-  if (detalleRows.length === 0) return null;
-  const { error } = await sb.from("ventas_detalle").upsert(detalleRows, { onConflict: "idorden", ignoreDuplicates: true });
-  if (!error) return null;
-  const chunk = 500;
-  for (let i = 0; i < detalleRows.length; i += chunk) {
-    const part = detalleRows.slice(i, i + chunk);
-    const { error: e2 } = await sb.from("ventas_detalle").upsert(part, { onConflict: "idorden", ignoreDuplicates: true });
-    if (e2) return e2.message ?? String(e2);
+  // Si te habían dado algo como INVU_SALES_PATH (legacy)
+  if (INVU_SALES_PATH && INVU_SALES_PATH.startsWith("/")) {
+    urls.unshift(`${INVU_BASE_URL.replace(/\/+$/, "")}${INVU_SALES_PATH}?desde=${desdeISO}&hasta=${hastaISO}`);
   }
-  return null;
-}
 
-async function fetchInvuAny(
-  base: string, token: string, paths: string[], desde: string, hasta: string
-): Promise<VentaDetalleIn[] | { error: string; attempts: Array<{ path: string; status: number }> }> {
-  const attempts: Array<{ path: string; status: number }> = [];
-  const b = stripTrailingSlash(base);
-  for (const p of paths) {
-    const u = `${b}${p}?desde=${desde}&hasta=${hasta}`;
-    const r = await fetch(u, { headers: { Authorization: `Bearer ${token}`, Accept: "application/json" } });
-    if (r.ok) { try { const j = (await r.json()) as any[]; return Array.isArray(j) ? j : []; } catch { return []; } }
-    attempts.push({ path: p, status: r.status });
-    if (r.status !== 404) break;
+  // Si existe override completo (lo probamos con ms y con s)
+  if (INVU_SALES_URL) {
+    urls.unshift(
+      INVU_SALES_URL
+        .replace("{desde_epoch_ms}", String(d_ms))
+        .replace("{hasta_epoch_ms}", String(h_ms))
+        .replace("{desde_epoch}", String(d_s))
+        .replace("{hasta_epoch}", String(h_s))
+        .replace("{desde}", desdeISO)
+        .replace("{hasta}", hastaISO),
+    );
   }
-  return { error: "No INVU endpoint matched", attempts };
+
+  // Normalizamos “?” / “&”
+  return urls.map(u => u.replace(/\?&/, "?").replace(/&&+/g, "&"));
 }
 
-async function safePreview(r: Response) { try { return (await r.text()).slice(0, 200); } catch { return undefined; } }
-async function safeArray(r: Response): Promise<any[]> {
+serve(async (req) => {
   try {
-    const j = await r.json();
-    if (Array.isArray(j)) return j;
-    if (j && Array.isArray((j as any).data)) return (j as any).data;
-    return [];
-  } catch { return []; }
-}
+    const u = new URL(req.url);
+    const mode = u.searchParams.get("mode") ?? "ping";
+    const sucursal = u.searchParams.get("sucursal") ?? "sf";
+    const desde = u.searchParams.get("desde") ?? "2025-10-03";
+    const hasta = u.searchParams.get("hasta") ?? "2025-10-04";
+    const r = u.searchParams.get("r") ?? ""; // para modo proxy
 
-async function insertDummyForDay(sb: SupabaseClient, dia: string) {
-  const vent = { sucursal_id: SF_UUID, fecha: dia, total: 12.34 };
-  const { error: ev } = await sb.from("ventas").upsert(vent, { onConflict: "sucursal_id,fecha", ignoreDuplicates: true });
-  if (ev) return { ok: false, status: 500, error: ev.message ?? ev };
-  const det = { idorden: crypto.randomUUID(), sucursal_id: SF_UUID, fecha_cierre: `${dia}T12:00:00Z`, estado: "completado", subtotal: 12.34, itbms: 0, total: 12.34 };
-  const { error: ed } = await sb.from("ventas_detalle").upsert(det, { onConflict: "idorden", ignoreDuplicates: true });
-  if (ed) return { ok: false, status: 500, error: ed.message ?? ed };
-  return { ok: true };
-}
+    if (mode === "ping") {
+      return j({ ok: true, mode, version: VERSION, now: new Date().toISOString() });
+    }
+
+    // Diagnóstico rápido de secrets
+    if (mode === "diag") {
+      return j({
+        ok: true,
+        mode,
+        version: VERSION,
+        has_SUPABASE_URL: !!SUPABASE_URL,
+        has_SUPABASE_SERVICE_ROLE_KEY: !!SUPABASE_SERVICE_ROLE_KEY,
+        has_INVU_BASE_URL: !!INVU_BASE_URL,
+        has_SF_TOKEN: !!SF_TOKEN,
+        has_INVU_SALES_PATH: !!INVU_SALES_PATH,
+        has_INVU_SALES_URL: !!INVU_SALES_URL,
+      });
+    }
+
+    // PROXY: te permite probar a mano cualquier r=<modulo/accion>&param=...
+    if (mode === "proxy") {
+      if (!r) return j({ ok: false, version: VERSION, error: "Falta parámetro r=<modulo/accion>" }, 400);
+      const qs = [...u.searchParams.entries()]
+        .filter(([k]) => k !== "mode" && k !== "r")
+        .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`)
+        .join("&");
+      const url = `${INVU_BASE_URL.replace(/\/+$/, "")}/index.php?r=${encodeURIComponent(r)}${qs ? `&${qs}` : ""}`;
+      const probe = await tryFetch(url);
+      return j({ ok: probe.ok, version: VERSION, url, ...probe });
+    }
+
+    // EXPLORE: barrido automático de rutas conocidas con varias combinaciones de parámetros
+    if (mode === "explore") {
+      const urls = candidateUrls(desde, hasta);
+      const results: any[] = [];
+      for (const url of urls) {
+        const res = await tryFetch(url);
+        results.push(res);
+      }
+
+      // Resumen útil: primeras 10 rutas “prometedoras” != 404
+      const promising = results.filter(r => (r as any).ok).slice(0, 10);
+      return j({
+        ok: true,
+        version: VERSION,
+        desde,
+        hasta,
+        tested: results.length,
+        promising: promising.map(p => ({
+          url: (p as any).url,
+          status: (p as any).status,
+          header: (p as any).header,
+          preview: (p as any).preview,
+        })),
+        // Si necesitas ver TODO, quita el comentario:
+        // results
+      });
+    }
+
+    // INSERT de prueba local (sin INVU) — sigue disponible por si necesitas verificar DB
+    if (mode === "insert") {
+      if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
+        return j({ ok: false, version: VERSION, error: "faltan SUPABASE_URL/SUPABASE_SERVICE_ROLE_KEY" }, 500);
+      }
+      if (!sucursal || !desde || !hasta) {
+        return j({ ok: false, version: VERSION, error: "Faltan parámetros sucursal|desde|hasta" }, 400);
+      }
+      if (sucursal !== "sf") {
+        return j({ ok: false, version: VERSION, error: "Solo SF tiene token vigente" }, 401);
+      }
+      // No hacemos writes aquí para no contaminar: esto era del build previo.
+      return j({ ok: true, version: VERSION, mode, note: "v8.2 discovery: insert no-op" });
+    }
+
+    // SYNC real — en v8.2 Discovery NO escribimos a DB; solo descubrimos endpoint y devolvemos cuál sirve.
+    if (mode === "sync") {
+      if (!sucursal || !desde || !hasta) {
+        return j({ ok: false, version: VERSION, error: "Faltan parámetros sucursal|desde|hasta" }, 400);
+      }
+      if (sucursal !== "sf") {
+        return j({ ok: false, version: VERSION, error: "Solo SF tiene token vigente" }, 401);
+      }
+
+      // 1) Si hay override completo, úsalo primero (ms / s / yyyy-mm-dd)
+      const urls = candidateUrls(desde, hasta);
+      const tried: any[] = [];
+      for (const url of urls) {
+        const res = await tryFetch(url);
+        tried.push(res);
+        if ((res as any).ok) {
+          // Éxito de descubrimiento — no guardamos, solo te decimos qué URL funcionó
+          return j({
+            ok: true,
+            version: VERSION,
+            step: "invu.fetch.match",
+            used: { url: (res as any).url, header: (res as any).header, status: (res as any).status },
+            preview: (res as any).preview,
+            note: "Usa este 'used.url' como INVU_SALES_URL (si trae 401/403, valida el header elegido)",
+          });
+        }
+      }
+      // Si nada funcionó:
+      return j({
+        ok: false,
+        version: VERSION,
+        step: "invu.fetch.no-match",
+        message: "No se encontró un endpoint válido en este tenant con los parámetros probados",
+        sample: tried.slice(0, 10), // primeras 10 para no explotar el payload
+      }, 502);
+    }
+
+    // fallback
+    return j({ ok: true, version: VERSION, mode, note: "Nada que hacer" });
+  } catch (e) {
+    return j({ ok: false, version: VERSION, error: String(e) }, 500);
+  }
+});
