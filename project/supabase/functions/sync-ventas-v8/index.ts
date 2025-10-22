@@ -1,8 +1,8 @@
 // supabase/functions/sync-ventas-v8/index.ts
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { createClient, SupabaseClient } from "https://esm.sh/@supabase/supabase-js@2";
 
-const VERSION = "sync-ventas-v8-2025-10-22-EPOCH";
+const VERSION = "sync-ventas-v8-2025-10-22-EPOCH+ROBUST";
 const SF_UUID = "1918f8f7-9b5d-4f6a-9b53-a953f82b71ad"; // San Francisco
 
 type VentaDetalleIn = {
@@ -14,6 +14,11 @@ type VentaDetalleIn = {
   fecha?: string | null;
   created_at?: string | null;
   estado?: string | null;
+  // variantes posibles en INVU
+  importe?: number | string | null;
+  monto?: number | string | null;
+  monto_total?: number | string | null;
+  grand_total?: number | string | null;
 };
 
 serve(async (req) => {
@@ -52,7 +57,7 @@ serve(async (req) => {
 
     const sb = createClient(SUPABASE_URL, SERVICE_ROLE, { auth: { persistSession: false } });
 
-    // Probe conexión (no toca datos)
+    // probe conexión (no toca datos)
     {
       const { error: probeErr } = await sb.from("ventas").select("id", { head: true, count: "exact" }).limit(1);
       if (probeErr) return j({ ok: false, version: VERSION, step: "probe", error: probeErr.message ?? probeErr }, 500);
@@ -83,9 +88,15 @@ serve(async (req) => {
 
       // === INVU real ===
       const token = Deno.env.get("SF_TOKEN")!;
-      const override = Deno.env.get("INVU_SALES_URL"); // URL completa con placeholders
+      const override = Deno.env.get("INVU_SALES_URL"); // URL completa (opcional)
       if (override) {
-        const full = replaceTpl(override, desde, hasta);
+        // 1) intentar con placeholders
+        const fullTry = replaceTpl(override, desde, hasta);
+        // 2) si quedaron llaves sin reemplazar, construimos URL manualmente (ordenesAllAdv o totalporfecha)
+        const full = needsManualUrl(fullTry)
+          ? buildFallbackOverrideUrl(override, desde, hasta)
+          : fullTry;
+
         const r = await fetch(full, { headers: { Authorization: `Bearer ${token}` } });
         if (!r.ok) {
           const preview = await safePreview(r);
@@ -95,15 +106,15 @@ serve(async (req) => {
         const { ventasByDia, detalleRows } = normalizeItems(arr);
         const upErr = await upsertVentas(sb, ventasByDia);
         if (upErr) return j({ ok: false, version: VERSION, step: "ventas.upsert", error: upErr }, 500);
-        const detErr = await insertDetalle(sb, detalleRows);
-        if (detErr) return j({ ok: false, version: VERSION, step: "detalle.insert", error: detErr }, 500);
+        const detErr = await upsertDetalle(sb, detalleRows);
+        if (detErr) return j({ ok: false, version: VERSION, step: "detalle.upsert", error: detErr }, 500);
         return j({
           ok: true, version: VERSION, mode, note: "SYNC INVU SF OK (override)",
           desde, hasta, ventas_dias: ventasByDia.size, detalle_rows: detalleRows.length
         });
       }
 
-      // Fallback antiguo: prueba /ventas | /orders | /GetSales | /GetInvoices
+      // 3) Fallback antiguo (si no hay override) — prueba /ventas | /orders | /GetSales | /GetInvoices
       const base = Deno.env.get("INVU_BASE_URL")!;
       const path = Deno.env.get("INVU_SALES_PATH") ?? "/ventas";
       const items = await fetchInvuAny(base, token, dedupe([path, "/ventas", "/orders", "/GetSales", "/GetInvoices"]), desde, hasta);
@@ -112,8 +123,8 @@ serve(async (req) => {
       const { ventasByDia, detalleRows } = normalizeItems(items);
       const upErr = await upsertVentas(sb, ventasByDia);
       if (upErr) return j({ ok: false, version: VERSION, step: "ventas.upsert", error: upErr }, 500);
-      const detErr = await insertDetalle(sb, detalleRows);
-      if (detErr) return j({ ok: false, version: VERSION, step: "detalle.insert", error: detErr }, 500);
+      const detErr = await upsertDetalle(sb, detalleRows);
+      if (detErr) return j({ ok: false, version: VERSION, step: "detalle.upsert", error: detErr }, 500);
 
       return j({
         ok: true, version: VERSION, mode, note: "SYNC INVU SF OK",
@@ -145,13 +156,20 @@ function j(body: unknown, status = 200) {
   });
 }
 
-// ===== helpers comunes =====
+// ================= helpers comunes =================
 function toNum(v: unknown): number {
   if (v == null) return 0;
   const n = typeof v === "string" ? Number(v) : (v as number);
   return Number.isFinite(n) ? Number(n) : 0;
 }
+function toNumFrom(it: Record<string, unknown>, keys: string[]): number {
+  for (const k of keys) {
+    if (k in it) return toNum((it as any)[k]);
+  }
+  return 0;
+}
 function pickDia(it: VentaDetalleIn): string {
+  // preferimos fecha_cierre, luego fecha, luego created_at; fallback: hoy
   const raw = it.fecha_cierre ?? it.fecha ?? it.created_at ?? new Date().toISOString();
   return raw.slice(0, 10);
 }
@@ -171,16 +189,16 @@ function dedupe<T>(arr: T[]): T[] {
   return Array.from(new Set(arr));
 }
 
-// ===== placeholders & epoch (Panamá -05:00) =====
+// ================= placeholders & epoch (Panamá -05:00) =================
 function toEpochSeconds(dateYYYYMMDD: string): number {
   const d = new Date(`${dateYYYYMMDD}T00:00:00-05:00`);
   return Math.floor(d.getTime() / 1000);
 }
 function toEpochMillis(dateYYYYMMDD: string): number {
   const d = new Date(`${dateYYYYMMDD}T00:00:00-05:00`);
-  return d.getTime();
+  return d.getTime(); // ms
 }
-// Reemplazo robusto: {}, %7B...%7D y tokens legacy
+// reemplazo robusto: {}, %7B...%7D y tokens legacy
 function replaceTpl(s: string, desde: string, hasta: string) {
   const pairs: Array<[string, string]> = [
     ["{desde}", desde],
@@ -208,29 +226,91 @@ function replaceTpl(s: string, desde: string, hasta: string) {
   for (const [k, v] of pairs) out = out.split(k).join(v);
   return out;
 }
+function needsManualUrl(s: string): boolean {
+  // si quedaron llaves sin reemplazar o braces URL-encoded
+  return s.includes("{") || s.includes("%7B");
+}
+function buildFallbackOverrideUrl(override: string, desde: string, hasta: string): string {
+  // soporta ordenesAllAdv y totalporfecha (epoch en MS, formato query)
+  const finiMs = toEpochMillis(desde);
+  const ffinMs = toEpochMillis(hasta);
+  const base = "https://api6.invupos.com/invuApiPos/index.php";
 
-// ===== normalización e inserciones =====
+  if (/ordenesalladv/i.test(override)) {
+    const u = new URL(base);
+    u.searchParams.set("r", "citas/ordenesAllAdv");
+    u.searchParams.set("fini", String(finiMs));
+    u.searchParams.set("ffin", String(ffinMs));
+    u.searchParams.set("tipo", "all");
+    return u.toString();
+  }
+  if (/totalporfecha/i.test(override)) {
+    const u = new URL(base);
+    u.searchParams.set("r", "citas/totalporfecha");
+    u.searchParams.set("fini", String(finiMs));
+    u.searchParams.set("ffin", String(ffinMs));
+    return u.toString();
+  }
+  // último recurso: devolver la versión “replaceTpl”
+  return replaceTpl(override, desde, hasta);
+}
+
+// ================= normalización e inserciones =================
 function normalizeItems(items: any[]) {
+  // items puede ser:
+  // - lista de órdenes con totales por item (preferida)
+  // - lista agregada por fecha (ej: totalporfecha)
   const ventasByDia = new Map<string, number>();
   const detalleRows: any[] = [];
-  for (const it of items) {
-    const dia = pickDia(it);
-    const total = toNum(it.total);
+
+  for (const it of items ?? []) {
+    // detectar si es “agregado por fecha” (ej: { fecha: 'YYYY-MM-DD', total: 123 })
+    const diaAgg = typeof it?.fecha === "string" && /^\d{4}-\d{2}-\d{2}/.test(it.fecha);
+    const dia = diaAgg ? String(it.fecha).slice(0, 10) : pickDia(it as VentaDetalleIn);
+
+    // total robusto
+    const total = diaAgg
+      ? toNumFrom(it, ["total", "importe", "monto", "monto_total", "grand_total"])
+      : toNumFrom(it, ["total", "importe", "monto", "monto_total", "grand_total"]);
+
     ventasByDia.set(dia, (ventasByDia.get(dia) ?? 0) + total);
-    detalleRows.push({
-      idorden: it.idorden ?? crypto.randomUUID(),
-      sucursal_id: SF_UUID,
-      fecha_cierre: it.fecha_cierre ?? `${dia}T12:00:00Z`,
-      estado: it.estado ?? "completado",
-      subtotal: toNum(it.subtotal),
-      itbms: toNum(it.itbms),
-      total,
-    });
+
+    // si el item luce agregado, no tenemos detalle real: creamos uno sintético
+    if (diaAgg) {
+      detalleRows.push({
+        idorden: crypto.randomUUID(),
+        sucursal_id: SF_UUID,
+        fecha_cierre: `${dia}T12:00:00Z`,
+        estado: "completado",
+        subtotal: total,
+        itbms: 0,
+        total,
+      });
+    } else {
+      // item de detalle
+      const subtotal = toNumFrom(it, ["subtotal"]);
+      const itbms = toNumFrom(it, ["itbms"]);
+      const fecha_cierre =
+        (it as VentaDetalleIn).fecha_cierre ??
+        ((it as VentaDetalleIn).fecha ? `${(it as VentaDetalleIn).fecha!.slice(0, 10)}T12:00:00Z` : undefined) ??
+        `${dia}T12:00:00Z`;
+
+      detalleRows.push({
+        idorden: (it as VentaDetalleIn).idorden ?? crypto.randomUUID(),
+        sucursal_id: SF_UUID,
+        fecha_cierre,
+        estado: (it as VentaDetalleIn).estado ?? "completado",
+        subtotal: subtotal || total, // fallback
+        itbms,
+        total,
+      });
+    }
   }
+
   return { ventasByDia, detalleRows };
 }
 
-async function upsertVentas(sb: ReturnType<typeof createClient>, ventasByDia: Map<string, number>): Promise<string | null> {
+async function upsertVentas(sb: SupabaseClient, ventasByDia: Map<string, number>): Promise<string | null> {
   if (ventasByDia.size === 0) return null;
   const ventasBulk = Array.from(ventasByDia.entries()).map(([dia, total]) => ({
     sucursal_id: SF_UUID, fecha: dia, total,
@@ -241,23 +321,25 @@ async function upsertVentas(sb: ReturnType<typeof createClient>, ventasByDia: Ma
   return error ? (error.message ?? String(error)) : null;
 }
 
-async function insertDetalle(sb: ReturnType<typeof createClient>, detalleRows: any[]): Promise<string | null> {
+async function upsertDetalle(sb: SupabaseClient, detalleRows: any[]): Promise<string | null> {
   if (detalleRows.length === 0) return null;
-  const try1 = await sb
+  // usamos upsert por idorden para evitar duplicados
+  const { error } = await sb
     .from("ventas_detalle")
-    .insert(detalleRows, { onConflict: "idorden", ignoreDuplicates: true });
-  if (!try1.error) return null;
+    .upsert(detalleRows, { onConflict: "idorden", ignoreDuplicates: true });
+  if (!error) return null;
 
+  // fallback en chunks si el upsert falla por tamaño
   const chunk = 500;
   for (let i = 0; i < detalleRows.length; i += chunk) {
     const part = detalleRows.slice(i, i + chunk);
-    const { error } = await sb.from("ventas_detalle").insert(part);
-    if (error) return error.message ?? String(error);
+    const { error: e2 } = await sb.from("ventas_detalle").upsert(part, { onConflict: "idorden", ignoreDuplicates: true });
+    if (e2) return e2.message ?? String(e2);
   }
   return null;
 }
 
-// ===== fallback simple a paths antiguos (query ?desde&hasta en texto) =====
+// ================= fallback simple a paths antiguos =================
 async function fetchInvuAny(
   base: string,
   token: string,
@@ -285,6 +367,7 @@ async function fetchInvuAny(
   return { error: "No INVU endpoint matched", attempts };
 }
 
+// ================= utils de respuesta =================
 async function safePreview(r: Response) {
   try { return (await r.text()).slice(0, 200); } catch { return undefined; }
 }
@@ -299,9 +382,10 @@ async function safeArray(r: Response): Promise<any[]> {
   }
 }
 
-// ===== dummy insert para pruebas =====
-async function insertDummyForDay(sb: ReturnType<typeof createClient>, dia: string) {
-  const vent = { sucursal_id: SF_UUID, fecha: dia, total: 12.34, origen: "dummy" };
+// ================= dummy =================
+async function insertDummyForDay(sb: SupabaseClient, dia: string) {
+  // No seteamos "origen" para no chocar con check constraint
+  const vent = { sucursal_id: SF_UUID, fecha: dia, total: 12.34 };
   const { error: ev } = await sb.from("ventas").upsert(vent, { onConflict: "sucursal_id,fecha", ignoreDuplicates: true });
   if (ev) return { ok: false, status: 500, error: ev.message ?? ev };
 
@@ -314,7 +398,7 @@ async function insertDummyForDay(sb: ReturnType<typeof createClient>, dia: strin
     itbms: 0,
     total: 12.34,
   };
-  const { error: ed } = await sb.from("ventas_detalle").insert(det);
+  const { error: ed } = await sb.from("ventas_detalle").upsert(det, { onConflict: "idorden", ignoreDuplicates: true });
   if (ed) return { ok: false, status: 500, error: ed.message ?? ed };
 
   return { ok: true };
