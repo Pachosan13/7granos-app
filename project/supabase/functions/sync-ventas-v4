@@ -1,106 +1,117 @@
 // project/supabase/functions/sync-ventas-v4/index.ts
-// Deno runtime (Supabase Edge Functions)
-
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
-type Params = {
-  sucursal?: string; // 'sf'
-  desde?: string;    // 'YYYY-MM-DD'
-  hasta?: string;    // 'YYYY-MM-DD'
-};
-
-const TEST_WRITE = true; // ✅ ponlo en false si no quieres insertar prueba
+const SF_UUID = "1918f8f7-9b5d-4f6a-9b53-a953f82b71ad";
+const TEST_WRITE = true;
 
 serve(async (req) => {
+  const t0 = Date.now();
   try {
-    const url = new URL(req.url);
-    const q: Params = {
-      sucursal: url.searchParams.get("sucursal") ?? undefined,
-      desde: url.searchParams.get("desde") ?? undefined,
-      hasta: url.searchParams.get("hasta") ?? undefined,
-    };
-
-    // Validaciones mínimas
-    if (!q.desde || !q.hasta) {
-      return json({ ok: false, error: "Parámetros requeridos: desde, hasta" }, 400);
-    }
-    if (!q.sucursal) {
-      return json({ ok: false, error: "Parámetro requerido: sucursal (ej. sf)" }, 400);
+    // Requiere Authorization: Bearer <token>
+    const auth = req.headers.get("authorization") ?? "";
+    if (!auth.toLowerCase().startsWith("bearer ")) {
+      return j({ ok:false, error:"Missing/invalid Authorization header" }, 401);
     }
 
-    // Solo tenemos token vigente para San Francisco
-    if (q.sucursal !== "sf") {
-      return json({ ok: false, error: "Token no vigente para esa sucursal" }, 401);
+    // Params
+    const u = new URL(req.url);
+    const sucursal = u.searchParams.get("sucursal") ?? "";
+    const desde = u.searchParams.get("desde") ?? "";
+    const hasta = u.searchParams.get("hasta") ?? "";
+    if (!sucursal || !desde || !hasta) {
+      return j({ ok:false, error:"Faltan parámetros sucursal|desde|hasta" }, 400);
+    }
+    if (sucursal !== "sf") {
+      return j({ ok:false, error:"Solo SF tiene token vigente" }, 401);
     }
 
-    // Secrets de Supabase
+    // Server client (Service Role)
     const SUPABASE_URL = Deno.env.get("SUPABASE_URL");
-    const SERVICE_ROLE  = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
-
+    const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
     if (!SUPABASE_URL || !SERVICE_ROLE) {
-      return json({ ok: false, error: "Faltan SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY en secrets" }, 500);
+      return j({ ok:false, error:"Faltan SUPABASE_URL/SUPABASE_SERVICE_ROLE_KEY" }, 500);
     }
-
-    // (Opcional) Token INVU SF (si vas a llamar a INVU aquí)
-    const INVU_SF_TOKEN = Deno.env.get("INVU_SF_TOKEN") ?? "";
-
     const sb = createClient(SUPABASE_URL, SERVICE_ROLE, {
       auth: { persistSession: false },
       global: { headers: { "X-Client-Info": "sync-ventas-v4" } },
     });
 
-    // TODO: aquí va tu fetch real a INVU usando INVU_SF_TOKEN
-    // const invuRes = await fetch("https://api6.invupos.com/...", { headers: { Authorization: `Bearer ${INVU_SF_TOKEN}` }});
-    // const data = await invuRes.json();
-
-    // 🔎 Prueba de escritura (confirma permisos/rls/insert)
-    let insertedVentas = 0;
-    let insertedDetalle = 0;
+    let insertedVentas = 0, insertedDetalle = 0;
 
     if (TEST_WRITE) {
-      const SF_UUID = "1918f8f7-9b5d-4f6a-9b53-a953f82b71ad"; // San Francisco
-
-      // Inserta una venta “sanity” con total aleatorio pequeño
+      // Inserta en 'ventas' (todo nullable en tu schema típico)
       const venta = {
         sucursal_id: SF_UUID,
-        fecha: new Date(`${q.desde}T12:00:00`), // mid-day Panamá
+        fecha: desde,            // casteable a date/timestamptz
         total: 12.34,
         estado: "completado",
-        created_at: new Date().toISOString(),
       };
-
       const { error: e1 } = await sb.from("ventas").insert(venta);
-      if (!e1) insertedVentas++;
+      if (e1) {
+        console.error("insert ventas error:", e1);
+        // fallback: usa created_at si 'fecha' diera problema
+        const ventaFallback = {
+          sucursal_id: SF_UUID,
+          total: 12.34,
+          estado: "completado",
+          created_at: new Date().toISOString(),
+        };
+        const { error: e1b } = await sb.from("ventas").insert(ventaFallback);
+        if (e1b) {
+          console.error("insert ventas (fallback) error:", e1b);
+          return j({ ok:false, step:"ventas", error:e1b.message ?? e1b }, 500);
+        }
+      } else {
+        insertedVentas++;
+      }
 
+      // Inserta en 'ventas_detalle' (idorden es NOT NULL)
       const detalle = {
+        idorden: crypto.randomUUID(),     // ✅ obligatorio
         sucursal_id: SF_UUID,
-        fecha_cierre: new Date(`${q.desde}T12:05:00`),
-        idorden: crypto.randomUUID(),
         estado: "completado",
-        created_at: new Date().toISOString(),
-        // agrega más columnas si tu tabla lo requiere (precio, qty, etc.)
+        fecha_cierre: desde,              // si falla, hacemos fallback
+        total: 12.34,
+        itbms: 0,
+        subtotal: 12.34,
       };
-
       const { error: e2 } = await sb.from("ventas_detalle").insert(detalle);
-      if (!e2) insertedDetalle++;
+      if (e2) {
+        console.error("insert detalle error:", e2);
+        const detalleFallback = {
+          idorden: crypto.randomUUID(),
+          sucursal_id: SF_UUID,
+          estado: "completado",
+          created_at: new Date().toISOString(),
+          total: 12.34,
+          itbms: 0,
+          subtotal: 12.34,
+        };
+        const { error: e2b } = await sb.from("ventas_detalle").insert(detalleFallback);
+        if (e2b) {
+          console.error("insert detalle (fallback) error:", e2b);
+          return j({ ok:false, step:"detalle", error:e2b.message ?? e2b }, 500);
+        }
+      } else {
+        insertedDetalle++;
+      }
     }
 
-    return json({
+    return j({
       ok: true,
-      note: TEST_WRITE ? "Escritura de prueba realizada" : "Dry-run (sin escritura)",
-      sucursal: q.sucursal,
-      desde: q.desde,
-      hasta: q.hasta,
-      insertedVentas,
-      insertedDetalle,
+      note: TEST_WRITE ? "Escritura de prueba realizada" : "Dry-run",
+      sucursal, desde, hasta,
+      insertedVentas, insertedDetalle,
+      ms: Date.now() - t0,
     });
   } catch (err) {
-    return json({ ok: false, error: String(err) }, 500);
+    console.error("FATAL:", err);
+    return j({ ok:false, error:String(err) }, 500);
   }
 });
 
-function json(body: unknown, status = 200) {
+function j(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), {
     status,
     headers: { "Content-Type": "application/json; charset=utf-8" },
