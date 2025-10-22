@@ -53,11 +53,11 @@ serve(async (req) => {
 
       // === INSERT en ventas (tu schema NO tiene 'estado')
       const venta = {
-        sucursal_id: SF_UUID, // uuid NOT NULL
-        fecha: desde,         // 'YYYY-MM-DD'  (date NOT NULL)
-        total: 12.34,         // numeric NOT NULL
-        origen: "edge",       // text (opcional, existe en tu tabla)
-      };
+  sucursal_id: SF_UUID,
+  fecha: desde,
+  total: 12.34,
+  origen: "csv" // <- valor permitido por el CHECK
+};
       const { error: e1 } = await sb.from("ventas").insert(venta);
       if (e1) return j({ ok: false, step: "ventas", error: e1.message ?? e1 }, 500);
 
