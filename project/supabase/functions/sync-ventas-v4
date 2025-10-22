@@ -1,0 +1,108 @@
+// project/supabase/functions/sync-ventas-v4/index.ts
+// Deno runtime (Supabase Edge Functions)
+
+import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+
+type Params = {
+  sucursal?: string; // 'sf'
+  desde?: string;    // 'YYYY-MM-DD'
+  hasta?: string;    // 'YYYY-MM-DD'
+};
+
+const TEST_WRITE = true; // ✅ ponlo en false si no quieres insertar prueba
+
+serve(async (req) => {
+  try {
+    const url = new URL(req.url);
+    const q: Params = {
+      sucursal: url.searchParams.get("sucursal") ?? undefined,
+      desde: url.searchParams.get("desde") ?? undefined,
+      hasta: url.searchParams.get("hasta") ?? undefined,
+    };
+
+    // Validaciones mínimas
+    if (!q.desde || !q.hasta) {
+      return json({ ok: false, error: "Parámetros requeridos: desde, hasta" }, 400);
+    }
+    if (!q.sucursal) {
+      return json({ ok: false, error: "Parámetro requerido: sucursal (ej. sf)" }, 400);
+    }
+
+    // Solo tenemos token vigente para San Francisco
+    if (q.sucursal !== "sf") {
+      return json({ ok: false, error: "Token no vigente para esa sucursal" }, 401);
+    }
+
+    // Secrets de Supabase
+    const SUPABASE_URL = Deno.env.get("SUPABASE_URL");
+    const SERVICE_ROLE  = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+
+    if (!SUPABASE_URL || !SERVICE_ROLE) {
+      return json({ ok: false, error: "Faltan SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY en secrets" }, 500);
+    }
+
+    // (Opcional) Token INVU SF (si vas a llamar a INVU aquí)
+    const INVU_SF_TOKEN = Deno.env.get("INVU_SF_TOKEN") ?? "";
+
+    const sb = createClient(SUPABASE_URL, SERVICE_ROLE, {
+      auth: { persistSession: false },
+      global: { headers: { "X-Client-Info": "sync-ventas-v4" } },
+    });
+
+    // TODO: aquí va tu fetch real a INVU usando INVU_SF_TOKEN
+    // const invuRes = await fetch("https://api6.invupos.com/...", { headers: { Authorization: `Bearer ${INVU_SF_TOKEN}` }});
+    // const data = await invuRes.json();
+
+    // 🔎 Prueba de escritura (confirma permisos/rls/insert)
+    let insertedVentas = 0;
+    let insertedDetalle = 0;
+
+    if (TEST_WRITE) {
+      const SF_UUID = "1918f8f7-9b5d-4f6a-9b53-a953f82b71ad"; // San Francisco
+
+      // Inserta una venta “sanity” con total aleatorio pequeño
+      const venta = {
+        sucursal_id: SF_UUID,
+        fecha: new Date(`${q.desde}T12:00:00`), // mid-day Panamá
+        total: 12.34,
+        estado: "completado",
+        created_at: new Date().toISOString(),
+      };
+
+      const { error: e1 } = await sb.from("ventas").insert(venta);
+      if (!e1) insertedVentas++;
+
+      const detalle = {
+        sucursal_id: SF_UUID,
+        fecha_cierre: new Date(`${q.desde}T12:05:00`),
+        idorden: crypto.randomUUID(),
+        estado: "completado",
+        created_at: new Date().toISOString(),
+        // agrega más columnas si tu tabla lo requiere (precio, qty, etc.)
+      };
+
+      const { error: e2 } = await sb.from("ventas_detalle").insert(detalle);
+      if (!e2) insertedDetalle++;
+    }
+
+    return json({
+      ok: true,
+      note: TEST_WRITE ? "Escritura de prueba realizada" : "Dry-run (sin escritura)",
+      sucursal: q.sucursal,
+      desde: q.desde,
+      hasta: q.hasta,
+      insertedVentas,
+      insertedDetalle,
+    });
+  } catch (err) {
+    return json({ ok: false, error: String(err) }, 500);
+  }
+});
+
+function json(body: unknown, status = 200) {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "Content-Type": "application/json; charset=utf-8" },
+  });
+}
