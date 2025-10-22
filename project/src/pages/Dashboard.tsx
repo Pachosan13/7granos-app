@@ -1,5 +1,5 @@
 // src/pages/Dashboard.tsx
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import {
@@ -35,6 +35,17 @@ import { useRealtimeVentas } from '../hooks/useRealtimeVentas';
 
 const COLORS = ['#3b82f6', '#8b5cf6', '#ec4899', '#f59e0b', '#10b981', '#06b6d4'];
 
+// 👇 Helper local: nombre de sucursal → código corto usado por las vistas v_ui_*
+const nameToCode = (nombre?: string) => {
+  const n = (nombre ?? '').toLowerCase();
+  if (n.includes('san francisco')) return 'sf';
+  if (n.includes('museo')) return 'museo';
+  if (n.includes('cangrejo')) return 'cangrejo';
+  if (n.includes('costa')) return 'costa';
+  if (n.includes('central')) return 'central';
+  return 'sf'; // fallback seguro
+};
+
 type KPI = {
   ventas_brutas: number;
   tickets: number;
@@ -51,6 +62,7 @@ type SeriesRow = {
   ventas_brutas: number;
   tickets: number;
   margen_bruto: number;
+  sucursal?: string;
   sucursal_id?: string;
   sucursal_nombre?: string;
 };
@@ -94,6 +106,11 @@ export function Dashboard() {
     ? null
     : sucursales.find(s => String(s.id) === selectedSucursalId)?.nombre ?? 'Sucursal';
 
+  // Prepara mapa id→code para traducir IDs a códigos de sucursal
+  const idToCode = new Map<string, string>(
+    sucursales.map(s => [String(s.id), nameToCode(s.nombre)])
+  );
+
   // Realtime hook
   const rt: any = useRealtimeVentas({
     enabled: true,
@@ -131,26 +148,33 @@ export function Dashboard() {
     setError(null);
 
     try {
-      const idsToFilter = viewingAll
-        ? getFilteredSucursalIds().map(String)
-        : selectedSucursalId
-        ? [String(selectedSucursalId)]
-        : [];
+      // Traduce selección a CÓDIGOS de sucursal (no IDs)
+      const codesToFilter: string[] = (() => {
+        if (viewingAll) {
+          return getFilteredSucursalIds()
+            .map(String)
+            .map(id => idToCode.get(id))
+            .filter((x): x is string => !!x);
+        }
+        if (selectedSucursalId) {
+          const code = idToCode.get(String(selectedSucursalId));
+          return code ? [code] : [];
+        }
+        return [];
+      })();
 
-      // 1. KPIs de hoy
+      // 1) KPIs de hoy (vista v_ui_kpis_hoy filtra por 'sucursal')
       let kpisQuery = supabase.from('v_ui_kpis_hoy').select('*');
-
-      if (!viewingAll && idsToFilter.length > 0) {
-        kpisQuery = kpisQuery.eq('sucursal_id', idsToFilter[0]);
-      } else if (viewingAll && idsToFilter.length > 0) {
-        kpisQuery = kpisQuery.in('sucursal_id', idsToFilter);
+      if (!viewingAll && codesToFilter.length === 1) {
+        kpisQuery = kpisQuery.eq('sucursal', codesToFilter[0]);
+      } else if (viewingAll && codesToFilter.length > 0) {
+        kpisQuery = kpisQuery.in('sucursal', codesToFilter);
       }
 
       const { data: kpisData, error: kpisError } = await kpisQuery;
       if (kpisError) throw kpisError;
 
       const kpis = (kpisData ?? []) as KPI[];
-
       const totals = kpis.reduce(
         (acc, row) => ({
           ventas: acc.ventas + (row.ventas_brutas ?? 0),
@@ -167,7 +191,7 @@ export function Dashboard() {
       setMargenBruto(totals.margen);
       setClientesActivos(totals.clientes);
 
-      // 2. Serie de ventas últimos 7 días
+      // 2) Serie de ventas últimos 7 días (v_ui_series_14d por 'sucursal')
       const hoy = new Date();
       const hace7dias = new Date(hoy);
       hace7dias.setDate(hace7dias.getDate() - 7);
@@ -182,10 +206,10 @@ export function Dashboard() {
         .lte('dia', hasta)
         .order('dia', { ascending: true });
 
-      if (!viewingAll && idsToFilter.length > 0) {
-        seriesQuery = seriesQuery.eq('sucursal_id', idsToFilter[0]);
-      } else if (viewingAll && idsToFilter.length > 0) {
-        seriesQuery = seriesQuery.in('sucursal_id', idsToFilter);
+      if (!viewingAll && codesToFilter.length === 1) {
+        seriesQuery = seriesQuery.eq('sucursal', codesToFilter[0]);
+      } else if (viewingAll && codesToFilter.length > 0) {
+        seriesQuery = seriesQuery.in('sucursal', codesToFilter);
       }
 
       const { data: seriesData, error: seriesError } = await seriesQuery;
@@ -203,8 +227,9 @@ export function Dashboard() {
         ventasPorDiaMap.set(dia, entry);
       });
 
+      const safe = (v?: string) => v ?? '';
       const ventasPorDiaArray = Array.from(ventasPorDiaMap.values())
-        .sort((a, b) => a.dia.localeCompare(b.dia))
+        .sort((a, b) => safe(a.dia).localeCompare(safe(b.dia)))
         .map(row => ({
           fecha: new Date(row.dia).toLocaleDateString('es-PA', { month: 'short', day: 'numeric' }),
           ventas: row.ventas,
@@ -213,27 +238,27 @@ export function Dashboard() {
 
       setVentasPorDia(ventasPorDiaArray);
 
-      // 3. Ventas por sucursal (solo si viendo todas)
+      // 3) Ventas por sucursal (solo si viendo todas)
       if (viewingAll) {
         const ventasPorSucursalMap = new Map<string, { nombre: string; ventas: number }>();
         series.forEach(row => {
-          const sucursalId = row.sucursal_id ?? row.sucursal_nombre ?? 'Sin sucursal';
-          const nombre = row.sucursal_nombre ?? sucursalId;
-          const entry = ventasPorSucursalMap.get(sucursalId) ?? { nombre, ventas: 0 };
+          const nombre = row.sucursal_nombre ?? row.sucursal ?? 'Sin sucursal';
+          const key = row.sucursal ?? nombre;
+          const entry = ventasPorSucursalMap.get(key) ?? { nombre, ventas: 0 };
           entry.ventas += row.ventas_brutas ?? 0;
-          ventasPorSucursalMap.set(sucursalId, entry);
+          ventasPorSucursalMap.set(key, entry);
         });
 
         const ventasPorSucursalArray = Array.from(ventasPorSucursalMap.values())
           .sort((a, b) => b.ventas - a.ventas)
-          .slice(0, 6); // Top 6 sucursales
+          .slice(0, 6); // Top 6
 
         setVentasPorSucursal(ventasPorSucursalArray);
       } else {
         setVentasPorSucursal([]);
       }
 
-      // 4. Top productos (desde v_ui_top_productos_mes si existe)
+      // 4) Top productos (si existe) por 'sucursal'
       try {
         let topQuery = supabase
           .from('v_ui_top_productos_mes')
@@ -241,10 +266,10 @@ export function Dashboard() {
           .order('cantidad', { ascending: false })
           .limit(5);
 
-        if (!viewingAll && idsToFilter.length > 0) {
-          topQuery = topQuery.eq('sucursal_id', idsToFilter[0]);
-        } else if (viewingAll && idsToFilter.length > 0) {
-          topQuery = topQuery.in('sucursal_id', idsToFilter);
+        if (!viewingAll && codesToFilter.length === 1) {
+          topQuery = topQuery.eq('sucursal', codesToFilter[0]);
+        } else if (viewingAll && codesToFilter.length > 0) {
+          topQuery = topQuery.in('sucursal', codesToFilter);
         }
 
         const { data: topData, error: topError } = await topQuery;
@@ -265,7 +290,7 @@ export function Dashboard() {
     } finally {
       setLoading(false);
     }
-  }, [viewingAll, selectedSucursalId, getFilteredSucursalIds]);
+  }, [viewingAll, selectedSucursalId, getFilteredSucursalIds, sucursales]);
 
   // Cargar datos al montar y cuando cambia el filtro
   useEffect(() => {
