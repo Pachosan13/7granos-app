@@ -1,4 +1,4 @@
-// project/src/pages/VentasPage.tsx
+// src/pages/VentasPage.tsx
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { RefreshCw, TrendingUp, DollarSign, Receipt, Building2, Calendar, X } from 'lucide-react';
 import {
@@ -13,23 +13,22 @@ import {
 } from 'recharts';
 import { supabase } from '../lib/supabase';
 import { useAuthOrg } from '../context/AuthOrgContext';
-import { formatCurrencyUSD, formatDateDDMMYYYY } from '../lib/format';
 import { KPICard } from '../components/KPICard';
 import { RealtimeStatusIndicator } from '../components/RealtimeStatusIndicator';
 import { useRealtimeVentas } from '../hooks/useRealtimeVentas';
 import { debugLog, getFunctionsBase } from '../utils/diagnostics';
 
-type SucursalRow = { nombre: string; ventas: number; transacciones: number; ticketPromedio: number; };
-type SyncBranchStat = { name: string; orders: number; sales?: number };
-
-type SerieRowRPC = {
-  dia: string;
-  sucursal: string;
+type SerieRow = {
+  dia: string;                 // 'YYYY-MM-DD'
+  sucursal: string;            // nombre
   ventas: number;
   itbms: number;
   transacciones: number;
   propina: number;
 };
+
+type SucursalRow = { nombre: string; ventas: number; transacciones: number; ticketPromedio: number; };
+type SyncBranchStat = { name: string; orders: number; sales?: number };
 
 function todayYMD(tz = 'America/Panama') {
   const d = new Date(new Date().toLocaleString('en-US', { timeZone: tz }));
@@ -45,116 +44,118 @@ function addDays(ymd: string, days: number) {
   const yy = dt.getUTCFullYear(); const mm = String(dt.getUTCMonth() + 1).padStart(2, '0'); const dd = String(dt.getUTCDate()).padStart(2, '0');
   return `${yy}-${mm}-${dd}`;
 }
+function formatCurrencyUSD(n: number) {
+  return (n ?? 0).toLocaleString('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 2 });
+}
+function formatDateDDMMYYYY(ymd: string) {
+  const [y, m, d] = ymd.split('-');
+  return `${d}/${m}/${y}`;
+}
 
 export function VentasPage() {
-  const { sucursales } = useAuthOrg(); // solo para mostrar conteo general en el header
+  const { sucursales, sucursalSeleccionada } = useAuthOrg();
   const functionsBase = useMemo(() => getFunctionsBase(), []);
 
-  // Filtros
+  // Rango por defecto: últimos 7 días
   const hoy = useMemo(() => todayYMD(), []);
   const [desde, setDesde] = useState(addDays(hoy, -7));
   const [hasta, setHasta] = useState(hoy);
-  const [branch, setBranch] = useState<string>('__ALL__'); // filtro por nombre de sucursal
 
-  // UI state
+  // Filtro de sucursal (por ID)
+  const [selectedSucursalId, setSelectedSucursalId] = useState<string | null>(
+    sucursalSeleccionada?.id ? String(sucursalSeleccionada.id) : null
+  );
+  const viewingAll = selectedSucursalId === null;
+  const selectedSucursalName =
+    viewingAll ? null : (sucursales.find(s => String(s.id) === selectedSucursalId)?.nombre ?? null);
+
+  // Estado UI
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
-
-  // KPIs
   const [totalVentas, setTotalVentas] = useState(0);
   const [totalTransacciones, setTotalTransacciones] = useState(0);
   const [totalITBMS, setTotalITBMS] = useState(0);
-
-  // Datos
   const [rows, setRows] = useState<SucursalRow[]>([]);
   const [seriesData, setSeriesData] = useState<any[]>([]);
-
-  // Banner sync
+  const [showDebug, setShowDebug] = useState(false);
+  const [debugInfo, setDebugInfo] = useState<any>(null);
   const [syncBanner, setSyncBanner] = useState<{
     when: string; stats: SyncBranchStat[]; visible: boolean; kind?: 'ok' | 'warn'; message?: string;
   } | null>(null);
 
-  // Debug
-  const [showDebug, setShowDebug] = useState(false);
-  const [debugInfo, setDebugInfo] = useState<any>(null);
+  const headerNote = viewingAll
+    ? `Viendo datos de todas las sucursales (${sucursales.length} sucursales)`
+    : `Viendo únicamente: ${selectedSucursalName ?? 'Sucursal'}`;
 
-  const headerNote = `Viendo datos de ${branch === '__ALL__' ? `todas las sucursales (${sucursales.length})` : branch}`;
-
-  // Carga desde la RPC (14 días; la UI permite rango libre, pero usamos tu función consolidada)
+  // ====== CARGA PRINCIPAL DESDE RPC ======
   const loadData = useCallback(async () => {
     setLoading(true);
     try {
-      const { data, error } = await supabase
-        .rpc<SerieRowRPC>('rpc_ui_series_14d', { desde, hasta });
-
+      // Llamamos a la RPC (ya probada por cURL)
+      const { data, error } = await supabase.rpc<SerieRow>('rpc_ui_series_14d', {
+        desde, hasta,
+      });
       if (error) throw error;
-      const base: SerieRowRPC[] = Array.isArray(data) ? data : [];
 
-      // Filtrado por sucursal (nombre exacto)
-      const filtered = branch === '__ALL__' ? base : base.filter(r => r.sucursal === branch);
+      // Filtrado por sucursal (la RPC devuelve nombre; hacemos match por nombre)
+      const filtered: SerieRow[] = (data ?? []).filter(row =>
+        viewingAll ? true : (selectedSucursalName ? row.sucursal === selectedSucursalName : true)
+      );
 
-      // Serie (agrupado por día)
-      const seriesByDay = new Map<string, { dia: string; fecha: string; ventas: number; tickets: number }>();
+      // Serie para el gráfico (sumamos ventas/tickets por día)
+      const byDay = new Map<string, { dia: string; fecha: string; ventas: number; tickets: number }>();
       for (const r of filtered) {
-        const cur = seriesByDay.get(r.dia) ?? { dia: r.dia, fecha: formatDateDDMMYYYY(r.dia), ventas: 0, tickets: 0 };
-        cur.ventas += Number(r.ventas || 0);
-        cur.tickets += Number(r.transacciones || 0);
-        seriesByDay.set(r.dia, cur);
+        const cur = byDay.get(r.dia) ?? { dia: r.dia, fecha: formatDateDDMMYYYY(r.dia), ventas: 0, tickets: 0 };
+        cur.ventas += Number(r.ventas ?? 0);
+        cur.tickets += Number(r.transacciones ?? 0);
+        byDay.set(r.dia, cur);
       }
-      const series = Array.from(seriesByDay.values()).sort((a, b) => a.dia.localeCompare(b.dia));
-      setSeriesData(series);
+      const serie = Array.from(byDay.values()).sort((a, b) => a.dia.localeCompare(b.dia));
+      setSeriesData(serie);
 
       // Tabla por sucursal
       const bySucursal = new Map<string, { nombre: string; ventas: number; transacciones: number }>();
       for (const r of filtered) {
         const cur = bySucursal.get(r.sucursal) ?? { nombre: r.sucursal, ventas: 0, transacciones: 0 };
-        cur.ventas += Number(r.ventas || 0);
-        cur.transacciones += Number(r.transacciones || 0);
+        cur.ventas += Number(r.ventas ?? 0);
+        cur.transacciones += Number(r.transacciones ?? 0);
         bySucursal.set(r.sucursal, cur);
       }
-      setRows(
-        Array.from(bySucursal.values())
-          .map(e => ({
-            nombre: e.nombre,
-            ventas: e.ventas,
-            transacciones: e.transacciones,
-            ticketPromedio: e.transacciones > 0 ? e.ventas / e.transacciones : 0,
-          }))
-          .sort((a, b) => b.ventas - a.ventas)
-      );
+      const rowsList = Array.from(bySucursal.values())
+        .map(e => ({ ...e, ticketPromedio: e.transacciones > 0 ? e.ventas / e.transacciones : 0 }))
+        .sort((a, b) => b.ventas - a.ventas);
+      setRows(rowsList);
 
-      // Totales
-      const totals = filtered.reduce(
-        (acc, r) => ({
-          ventas: acc.ventas + Number(r.ventas || 0),
-          tickets: acc.tickets + Number(r.transacciones || 0),
-          itbms: acc.itbms + Number(r.itbms || 0),
-        }),
-        { ventas: 0, tickets: 0, itbms: 0 }
-      );
-      setTotalVentas(totals.ventas);
-      setTotalTransacciones(totals.tickets);
-      setTotalITBMS(totals.itbms);
+      // KPIs (totales del período)
+      let sumVentas = 0, sumTickets = 0, sumITBMS = 0;
+      for (const r of filtered) {
+        sumVentas += Number(r.ventas ?? 0);
+        sumTickets += Number(r.transacciones ?? 0);
+        sumITBMS += Number(r.itbms ?? 0);
+      }
+      setTotalVentas(sumVentas);
+      setTotalTransacciones(sumTickets);
+      setTotalITBMS(sumITBMS);
 
       setDebugInfo({
-        filtro: { desde, hasta, branch },
-        rowsIn: base.length,
-        rowsAfterFilter: filtered.length,
+        filtro: { desde, hasta, viewingAll, selectedSucursalId, selectedSucursalName },
+        rowsCount: filtered.length,
         sample: filtered[0] ?? null,
+        seriePreview: serie.slice(0, 3),
       });
-      setSyncBanner(prev => (prev && prev.kind === 'warn' ? null : prev));
-    } catch (e: any) {
+    } catch (e) {
       debugLog('[VentasPage] loadData error:', e);
       setRows([]); setSeriesData([]); setTotalVentas(0); setTotalTransacciones(0); setTotalITBMS(0);
-      setDebugInfo({ error: String(e?.message || e) });
+      setDebugInfo({ error: String(e) });
     } finally {
       setLoading(false);
     }
-  }, [desde, hasta, branch]);
+  }, [desde, hasta, viewingAll, selectedSucursalId, selectedSucursalName]);
 
-  // Sync (deja igual, solo recarga luego)
+  // ====== SYNC (igual que antes) ======
   const handleSync = useCallback(async () => {
-    if (!functionsBase) {
+    const base = functionsBase;
+    if (!base) {
       setSyncBanner({ when: new Date().toISOString(), stats: [], visible: true, kind: 'warn', message: 'Edge Function no configurada (revisa VITE_SUPABASE_FUNCTIONS_BASE).' });
       return;
     }
@@ -163,9 +164,9 @@ export function VentasPage() {
       const hoySync = hoy;
       const query = `?desde=${hoySync}&hasta=${hoySync}`;
       const endpoints = [
-        `${functionsBase}/sync-ventas-detalle${query}`,
-        `${functionsBase}/sync-ventas-v4${query}`,
-        `${functionsBase}/sync-ventas${query}`,
+        `${base}/sync-ventas-detalle${query}`,
+        `${base}/sync-ventas-v4${query}`,
+        `${base}/sync-ventas${query}`,
       ];
       const invoke = async (url: string) => {
         const run = async (retry: boolean): Promise<Response> => {
@@ -206,7 +207,7 @@ export function VentasPage() {
             sales: typeof b.sales === 'number' ? b.sales : undefined,
           }));
         }
-      } catch { /* ignore parse */ }
+      } catch { /* ignore */ }
       if (bannerStats.length > 0) {
         setSyncBanner({ when, stats: bannerStats, visible: true, kind: 'ok' });
         setTimeout(() => setSyncBanner(s => (s ? { ...s, visible: false } : s)), 12000);
@@ -223,10 +224,10 @@ export function VentasPage() {
     }
   }, [functionsBase, hoy, loadData]);
 
-  // Realtime -> recarga (puedes desactivarlo si prefieres)
+  // Realtime (siempre recargar al evento)
   const rt: any = useRealtimeVentas({
     enabled: true, debounceMs: 1500,
-    onUpdate: () => { debugLog('[VentasPage] actualización en tiempo real detectada'); loadData(); },
+    onUpdate: () => { debugLog('[VentasPage] realtime update'); loadData(); },
   });
   let rtConnected = false as boolean; let rtError: string | null = null; let rtLastUpdate: string | Date | null = null;
   let onReconnect: () => void = () => window.location.reload();
@@ -243,13 +244,15 @@ export function VentasPage() {
   }
 
   useEffect(() => { loadData(); }, [loadData]);
-
-  // Opciones del dropdown a partir de lo cargado
-  const branchOptions = useMemo(() => {
-    const set = new Set<string>();
-    rows.forEach(r => set.add(r.nombre));
-    return ['__ALL__', ...Array.from(set).sort()];
-  }, [rows]);
+  useEffect(() => {
+    const handler = () => { debugLog('[VentasPage] evento debug:refetch-all'); loadData(); };
+    window.addEventListener('debug:refetch-all', handler);
+    return () => window.removeEventListener('debug:refetch-all', handler);
+  }, [loadData]);
+  useEffect(() => {
+    if (sucursalSeleccionada?.id) setSelectedSucursalId(String(sucursalSeleccionada.id));
+    else setSelectedSucursalId(null);
+  }, [sucursalSeleccionada]);
 
   const bannerClass =
     syncBanner?.kind === 'warn'
@@ -276,33 +279,6 @@ export function VentasPage() {
               {syncing ? 'Sincronizando…' : 'Sincronizar ahora'}
             </button>
           </div>
-
-          {/* Banner de Sync / Avisos */}
-          {syncBanner?.visible && (
-            <div className={`mt-4 border rounded-xl p-4 ${bannerClass}`}>
-              <div className="flex items-start justify-between">
-                <div>
-                  <div className="font-semibold">
-                    {syncBanner.kind === 'warn' ? 'Aviso' : `INVU OK (${syncBanner.when})`}
-                  </div>
-                  <div className="text-sm mt-1">
-                    {syncBanner.message ? (
-                      <span>{syncBanner.message}</span>
-                    ) : (
-                      syncBanner.stats.map((s) => (
-                        <span key={s.name} className="mr-3">
-                          <b>{s.name}</b>: {s.orders} órdenes{typeof s.sales === 'number' ? ` · ${formatCurrencyUSD(s.sales)}` : ''}
-                        </span>
-                      ))
-                    )}
-                  </div>
-                </div>
-                <button onClick={() => setSyncBanner(b => (b ? { ...b, visible: false } : b))} className="hover:opacity-70" aria-label="Cerrar banner">
-                  <X className="h-5 w-5" />
-                </button>
-              </div>
-            </div>
-          )}
         </div>
 
         {/* Filtros */}
@@ -325,19 +301,18 @@ export function VentasPage() {
               <label className="block text-sm text-gray-600 dark:text-gray-400 mb-1">Sucursal</label>
               <div className="flex gap-2">
                 <select
-                  value={branch}
-                  onChange={(e) => setBranch(e.target.value)}
+                  value={viewingAll ? '' : String(selectedSucursalId ?? '')}
+                  onChange={(e) => setSelectedSucursalId(e.target.value ? String(e.target.value) : null)}
                   className="flex-1 px-3 py-2 rounded-lg border dark:border-gray-700 bg-white dark:bg-gray-900 text-gray-900 dark:text-gray-100"
                 >
-                  {branchOptions.map(opt => (
-                    <option key={opt} value={opt}>
-                      {opt === '__ALL__' ? 'Todas las sucursales' : opt}
-                    </option>
+                  <option value="">Todas las sucursales</option>
+                  {sucursales.map((s) => (
+                    <option key={String(s.id)} value={String(s.id)}>{s.nombre}</option>
                   ))}
                 </select>
                 <div className="inline-flex items-center px-3 rounded-lg border dark:border-gray-700 bg-gray-50 dark:bg-gray-900 text-gray-700 dark:text-gray-300">
                   <Building2 className="h-4 w-4 mr-2" />
-                  {branch === '__ALL__' ? 'Todas' : 'Individual'}
+                  {viewingAll ? 'Todas' : 'Individual'}
                 </div>
               </div>
             </div>
@@ -366,18 +341,18 @@ export function VentasPage() {
             color="bg-gradient-to-br from-blue-500 to-cyan-600" trend={8} />
         </div>
 
-        {/* Serie 14 días */}
+        {/* Serie (14 días o rango elegido) */}
         <div className="bg-white dark:bg-gray-800 rounded-2xl shadow-lg border border-gray-100 dark:border-gray-700">
           <div className="p-6 border-b border-gray-100 dark:border-gray-700 flex items-center justify-between">
             <div>
-              <h3 className="text-xl font-bold text-gray-900 dark:text-white">Serie de ventas (14 días)</h3>
-              <p className="text-sm text-gray-500 dark:text-gray-400">Fuente: rpc_ui_series_14d</p>
+              <h3 className="text-xl font-bold text-gray-900 dark:text-white">Serie de ventas</h3>
+              <p className="text-sm text-gray-500 dark:text-gray-400">Fuente: RPC rpc_ui_series_14d</p>
             </div>
           </div>
           <div className="h-80 px-6 pb-6">
             {seriesData.length === 0 ? (
               <div className="h-full flex items-center justify-center text-gray-500 dark:text-gray-400 text-sm">
-                {loading ? 'Cargando…' : 'Sin datos en el rango seleccionado.'}
+                {loading ? 'Cargando…' : 'Sin datos en el período seleccionado.'}
               </div>
             ) : (
               <ResponsiveContainer width="100%" height="100%">
