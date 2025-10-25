@@ -1,15 +1,17 @@
 import { BrowserRouter, Routes, Route } from 'react-router-dom';
-import { Layout } from './components/Layout';
-import { Dashboard } from './pages/Dashboard';
-import { VentasPage } from './pages/VentasPage';
-import { Periodos } from './pages/payroll/Periodos';
-import { AdminLayout } from './pages/admin/AdminLayout';
-import AdminHealth from './pages/admin/Health';
-import AdminHealthInvu from './pages/admin/HealthInvu';
+
+// Estos módulos deben venir como default:
+import Layout from './components/Layout';
+import Dashboard from './pages/Dashboard';
+import VentasPage from './pages/VentasPage';
+import AdminLayout from './pages/admin/AdminLayout';
 import CapturaComprasPage from './pages/compras/CapturaComprasPage';
-import { ProtectedRoute } from './components/ProtectedRoute';
-import { Contabilidad } from './pages/Contabilidad';
-import { IniciarSesion } from './pages/Auth/IniciarSesion';
+import ProtectedRoute from './components/ProtectedRoute';
+import Contabilidad from './pages/Contabilidad';
+import IniciarSesion from './pages/Auth/IniciarSesion';
+
+// Este sí es nombrado (lo dejas igual)
+import { Periodos } from './pages/payroll/Periodos';
 
 export const App = () => (
   <BrowserRouter basename={import.meta.env.BASE_URL}>
@@ -28,8 +30,6 @@ export const App = () => (
                 <Route path="/ventas" element={<VentasPage />} />
                 <Route path="/payroll/*" element={<Periodos />} />
                 <Route path="/contabilidad" element={<Contabilidad />} />
-                <Route path="/admin/health" element={<AdminHealth />} />
-                <Route path="/admin/health-invu" element={<AdminHealthInvu />} />
                 <Route path="/admin/*" element={<AdminLayout />} />
                 <Route path="/compras/captura" element={<CapturaComprasPage />} />
               </Routes>
