@@ -1,30 +1,51 @@
-import { withCors } from "../_shared/cors.ts";
+// supabase/functions/invu-attendance/index.ts
+// Consulta INVU empleados/movimientos por rango y sucursal.
+// ?branch=sf&date=YYYY-MM-DD  (America/Panama)  o  ?branch=sf&fini=epoch&ffin=epoch
+// Lee INVU_TOKENS_JSON y usa header `authorization` (SIN "Bearer").
+
+const CORS_HEADERS = {
+  "access-control-allow-origin": "*",
+  "access-control-allow-methods": "GET,POST,OPTIONS",
+  "access-control-allow-headers": "authorization, x-client-info, apikey, content-type",
+};
+
+function withCors(handler: (req: Request) => Promise<Response> | Response) {
+  return async (req: Request) => {
+    if (req.method === "OPTIONS") {
+      return new Response(null, { status: 204, headers: CORS_HEADERS });
+    }
+    const res = await handler(req);
+    const h = new Headers(res.headers);
+    Object.entries(CORS_HEADERS).forEach(([k, v]) => h.set(k, v));
+    return new Response(res.body, { status: res.status, headers: h });
+  };
+}
+
+const BASE_URL = "https://api6.invupos.com/invuApiPos/index.php";
 
 type Branch = "sf" | "museo" | "cangrejo" | "costa" | "central";
-
-const MOVS_URL = "https://api6.invupos.com/invuApiPos/index.php";
+type TokenRec = { token: string; expires_utc?: string };
+type TokenMap = Record<string, TokenRec>;
 
 function normBranch(b: string | null): Branch {
   const v = (b ?? "").toLowerCase().trim();
-  if (["sf","museo","cangrejo","costa","central"].includes(v)) return v as Branch;
+  if (["sf", "museo", "cangrejo", "costa", "central"].includes(v)) return v as Branch;
   throw new Error("Missing or invalid branch");
 }
 
-function mapToken(branch: Branch): string | null {
-  const m: Record<Branch, string | undefined> = {
-    sf: Deno.env.get("SF_TOKEN"),
-    museo: Deno.env.get("MUSEO_TOKEN"),
-    cangrejo: Deno.env.get("CANGREJO_TOKEN"),
-    costa: Deno.env.get("COSTA_TOKEN"),
-    central: Deno.env.get("CENTRAL_TOKEN"),
-  };
-  return m[branch] ?? null;
+function loadTokens(): TokenMap {
+  const raw = Deno.env.get("INVU_TOKENS_JSON") ?? "{}";
+  try { return JSON.parse(raw); }
+  catch (e) { throw new Error(`INVU_TOKENS_JSON inválido: ${e}`); }
+}
+
+function tokenFor(branch: Branch): string | null {
+  return loadTokens()[branch]?.token ?? null;
 }
 
 function parseRange(q: URLSearchParams) {
   const date = q.get("date");
   if (date) {
-    // Panamá UTC-5
     const fini = Math.floor(new Date(`${date}T00:00:00-05:00`).getTime() / 1000);
     const ffin = Math.floor(new Date(`${date}T23:59:59-05:00`).getTime() / 1000);
     return { fini, ffin };
@@ -37,75 +58,65 @@ function parseRange(q: URLSearchParams) {
   return { fini, ffin };
 }
 
-async function fetchWithTimeout(url: string, opts: RequestInit, ms = 10000): Promise<Response> {
-  const ctl = new AbortController();
-  const t = setTimeout(() => ctl.abort(), ms);
-  try {
-    return await fetch(url, { ...opts, signal: ctl.signal });
-  } finally {
-    clearTimeout(t);
-  }
-}
-
-async function hitInvu(inv_url: string, token: string, retries = 1): Promise<{resp: Response; body: any}> {
-  let lastErr: any = null;
-  for (let i = 0; i <= retries; i++) {
-    try {
-      const resp = await fetchWithTimeout(inv_url, { headers: { Authorization: token } }, 10000);
-      const body = await resp.json().catch(() => ({}));
-      return { resp, body };
-    } catch (e) {
-      lastErr = e;
-      if (i < retries) continue;
-    }
-  }
-  throw lastErr ?? new Error("fetch failed");
+async function hitInvu(url: string, token: string) {
+  const resp = await fetch(url, {
+    headers: { authorization: token, accept: "application/json" }, // sin "Bearer"
+  });
+  const ctype = resp.headers.get("content-type") ?? "";
+  const body = ctype.includes("application/json")
+    ? await resp.json().catch(() => ({}))
+    : await resp.text().catch(() => "");
+  return { resp, body };
 }
 
 function json(status: number, obj: unknown) {
   return new Response(JSON.stringify(obj), {
     status,
-    headers: { "Content-Type": "application/json" },
+    headers: { "content-type": "application/json" },
   });
 }
 
-Deno.serve(withCors(async (req) => {
-  const started = Date.now();
-  try {
-    const url = new URL(req.url);
-    const q = url.searchParams;
-    const branch = normBranch(q.get("branch"));
-    const { fini, ffin } = parseRange(q);
+Deno.serve(
+  withCors(async (req) => {
+    const started = Date.now();
+    try {
+      const url = new URL(req.url);
+      const q = url.searchParams;
 
-    const token = mapToken(branch);
-    if (!token) return json(401, { ok:false, error:"Missing token", branch });
+      const branch = normBranch(q.get("branch"));
+      const { fini, ffin } = parseRange(q);
 
-    const inv_url = `${MOVS_URL}?r=empleados/movimientos/fini/${fini}/ffin/${ffin}`;
+      const token = tokenFor(branch);
+      if (!token) return json(401, { ok: false, error: "Missing token", branch });
 
-    const { resp, body } = await hitInvu(inv_url, token, 1);
-    const elapsedMs = Date.now() - started;
+      const invuUrl = `${BASE_URL}?r=empleados/movimientos/fini/${fini}/ffin/${ffin}`;
+      const { resp, body } = await hitInvu(invuUrl, token);
+      const elapsedMs = Date.now() - started;
 
-    // INVU a veces responde 200 con {error:true,...}
-    const invError = body?.error === true || (resp.status >= 400 && resp.status < 600);
-    if (invError) {
-      return json(resp.status || 502, {
-        ok: false,
-        status: resp.status || 502,
-        error: "INVU fetch failed",
-        branch, fini, ffin, inv_url,
-        elapsedMs,
-        detail: body,
-      });
+      const status = resp.status || 502;
+      const wrap = typeof body === "string" ? {} : (body as any);
+
+      // Normaliza: {data:[...]}, {employees:[...]}, o array plano
+      const data = Array.isArray(wrap?.data)
+        ? wrap.data
+        : Array.isArray(wrap?.employees)
+        ? wrap.employees
+        : Array.isArray(body)
+        ? (body as any)
+        : [];
+
+      const invError = (wrap as any)?.error === true || (status >= 400 && status < 600);
+      if (invError) {
+        return json(status, {
+          ok: false, status, error: "INVU fetch failed",
+          branch, fini, ffin, invuUrl, elapsedMs, detail: body,
+        });
+      }
+
+      return json(200, { ok: true, branch, fini, ffin, count: data.length, data, elapsedMs });
+    } catch (e: any) {
+      const elapsedMs = Date.now() - started;
+      return json(504, { ok: false, status: 504, error: String(e?.message || e), elapsedMs });
     }
-
-    const data = Array.isArray(body?.data) ? body.data : (Array.isArray(body) ? body : []);
-    return json(200, { ok: true, branch, fini, ffin, count: data.length, data, elapsedMs });
-
-  } catch (e: any) {
-    const elapsedMs = Date.now() - started;
-    const msg = String(e?.name || "").includes("AbortError")
-      ? "upstream timeout"
-      : (e?.message ?? "unknown");
-    return json(504, { ok:false, status:504, error: msg, elapsedMs });
-  }
-}));
+  })
+);
