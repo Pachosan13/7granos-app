@@ -22,6 +22,15 @@ import { debugLog, getFunctionsBase } from '../utils/diagnostics';
 type SucursalRow = { nombre: string; ventas: number; transacciones: number; ticketPromedio: number; };
 type SyncBranchStat = { name: string; orders: number; sales?: number };
 
+type SerieRowRPC = {
+  dia: string;
+  sucursal: string;
+  ventas: number;
+  itbms: number;
+  transacciones: number;
+  propina: number;
+};
+
 function todayYMD(tz = 'America/Panama') {
   const d = new Date(new Date().toLocaleString('en-US', { timeZone: tz }));
   const y = d.getFullYear();
@@ -38,158 +47,110 @@ function addDays(ymd: string, days: number) {
 }
 
 export function VentasPage() {
-  const { sucursales, sucursalSeleccionada, getFilteredSucursalIds } = useAuthOrg();
+  const { sucursales } = useAuthOrg(); // solo para mostrar conteo general en el header
   const functionsBase = useMemo(() => getFunctionsBase(), []);
 
-  // Filtros (mantén los inputs aunque no filtremos por fecha en la query por ahora)
+  // Filtros
   const hoy = useMemo(() => todayYMD(), []);
   const [desde, setDesde] = useState(addDays(hoy, -7));
   const [hasta, setHasta] = useState(hoy);
+  const [branch, setBranch] = useState<string>('__ALL__'); // filtro por nombre de sucursal
 
-  const [selectedSucursalId, setSelectedSucursalId] = useState<string | null>(
-    sucursalSeleccionada?.id ? String(sucursalSeleccionada.id) : null
-  );
-
+  // UI state
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
 
+  // KPIs
   const [totalVentas, setTotalVentas] = useState(0);
   const [totalTransacciones, setTotalTransacciones] = useState(0);
   const [totalITBMS, setTotalITBMS] = useState(0);
 
+  // Datos
   const [rows, setRows] = useState<SucursalRow[]>([]);
   const [seriesData, setSeriesData] = useState<any[]>([]);
 
+  // Banner sync
   const [syncBanner, setSyncBanner] = useState<{
     when: string; stats: SyncBranchStat[]; visible: boolean; kind?: 'ok' | 'warn'; message?: string;
   } | null>(null);
 
+  // Debug
   const [showDebug, setShowDebug] = useState(false);
   const [debugInfo, setDebugInfo] = useState<any>(null);
 
-  const viewingAll = selectedSucursalId === null;
-  const selectedSucursalName = viewingAll ? null : (sucursales.find(s => String(s.id) === selectedSucursalId)?.nombre ?? 'Sucursal');
-  const headerNote = viewingAll
-    ? `Viendo datos de todas las sucursales (${sucursales.length} sucursales)`
-    : `Viendo únicamente: ${selectedSucursalName}`;
+  const headerNote = `Viendo datos de ${branch === '__ALL__' ? `todas las sucursales (${sucursales.length})` : branch}`;
 
-  // Carga desde DB (sin filtros por `dia`, tolerante)
+  // Carga desde la RPC (14 días; la UI permite rango libre, pero usamos tu función consolidada)
   const loadData = useCallback(async () => {
     setLoading(true);
     try {
-      const ids = viewingAll
-        ? getFilteredSucursalIds().map(String)
-        : (selectedSucursalId ? [String(selectedSucursalId)] : []);
+      const { data, error } = await supabase
+        .rpc<SerieRowRPC>('rpc_ui_series_14d', { desde, hasta });
 
-      let seriesQuery = supabase.from('v_ui_series_14d').select('*');
-      if (!viewingAll && ids.length > 0) seriesQuery = seriesQuery.eq('sucursal_id', ids[0]);
-      else if (viewingAll && ids.length > 0) seriesQuery = seriesQuery.in('sucursal_id', ids);
+      if (error) throw error;
+      const base: SerieRowRPC[] = Array.isArray(data) ? data : [];
 
-      const { data: rawSeries, error: seriesError } = await seriesQuery;
-      if (seriesError) throw seriesError;
+      // Filtrado por sucursal (nombre exacto)
+      const filtered = branch === '__ALL__' ? base : base.filter(r => r.sucursal === branch);
 
-      const hasDia = rawSeries && rawSeries.length > 0 && Object.prototype.hasOwnProperty.call(rawSeries[0], 'dia');
-
-      const normalizedSeries = (rawSeries ?? []).map((row: Record<string, any>) => {
-        const sucursalId = row.sucursal_id != null ? String(row.sucursal_id) : null;
-        const nombre = sucursalId ? sucursalId : 'Sin sucursal'; // temporal hasta exponer nombre
-        const ventas = Number(row.ventas_brutas ?? 0);
-        const margen = Number(row.margen_bruto ?? 0);
-        const tickets = Number(row.tickets ?? 0);
-        const lineas = Number(row.lineas ?? 0);
-        const cogs = Number(row.cogs ?? 0);
-        const itbms = Number(row.itbms ?? 0);
-
-        return {
-          dia: hasDia ? row.dia : null,
-          fecha: hasDia && row.dia ? formatDateDDMMYYYY(row.dia) : '',
-          ventas, margen, tickets, lineas, cogs, itbms,
-          sucursal_id: sucursalId,
-          sucursal_nombre: nombre,
-        };
-      });
-
-      if (hasDia) {
-        const seriesByDayMap = new Map<string, { dia: string; fecha: string; ventas: number; margen: number; tickets: number }>();
-        normalizedSeries
-          .filter(r => typeof r.dia === 'string' && r.dia)
-          .forEach(row => {
-            const entry = seriesByDayMap.get(row.dia!) ?? { dia: row.dia!, fecha: row.fecha, ventas: 0, margen: 0, tickets: 0 };
-            entry.ventas += row.ventas;
-            entry.margen += row.margen;
-            entry.tickets += row.tickets;
-            seriesByDayMap.set(row.dia!, entry);
-          });
-        const seriesForChart = Array.from(seriesByDayMap.values()).sort((a, b) => a.dia.localeCompare(b.dia));
-        setSeriesData(seriesForChart);
-      } else {
-        setSeriesData([]); // sin dia -> sin serie
+      // Serie (agrupado por día)
+      const seriesByDay = new Map<string, { dia: string; fecha: string; ventas: number; tickets: number }>();
+      for (const r of filtered) {
+        const cur = seriesByDay.get(r.dia) ?? { dia: r.dia, fecha: formatDateDDMMYYYY(r.dia), ventas: 0, tickets: 0 };
+        cur.ventas += Number(r.ventas || 0);
+        cur.tickets += Number(r.transacciones || 0);
+        seriesByDay.set(r.dia, cur);
       }
+      const series = Array.from(seriesByDay.values()).sort((a, b) => a.dia.localeCompare(b.dia));
+      setSeriesData(series);
 
       // Tabla por sucursal
-      const sucursalMap = new Map<string, { nombre: string; ventas: number; transacciones: number }>();
-      normalizedSeries.forEach(row => {
-        const key = row.sucursal_id ?? row.sucursal_nombre ?? 'sin-id';
-        const entry = sucursalMap.get(key) ?? { nombre: row.sucursal_nombre, ventas: 0, transacciones: 0 };
-        entry.ventas += row.ventas;
-        entry.transacciones += row.tickets;
-        sucursalMap.set(key, entry);
-      });
-      const rowsList: SucursalRow[] = Array.from(sucursalMap.values())
-        .map(e => ({ nombre: e.nombre, ventas: e.ventas, transacciones: e.transacciones, ticketPromedio: e.transacciones > 0 ? e.ventas / e.transacciones : 0 }))
-        .sort((a, b) => b.ventas - a.ventas);
-      setRows(rowsList);
+      const bySucursal = new Map<string, { nombre: string; ventas: number; transacciones: number }>();
+      for (const r of filtered) {
+        const cur = bySucursal.get(r.sucursal) ?? { nombre: r.sucursal, ventas: 0, transacciones: 0 };
+        cur.ventas += Number(r.ventas || 0);
+        cur.transacciones += Number(r.transacciones || 0);
+        bySucursal.set(r.sucursal, cur);
+      }
+      setRows(
+        Array.from(bySucursal.values())
+          .map(e => ({
+            nombre: e.nombre,
+            ventas: e.ventas,
+            transacciones: e.transacciones,
+            ticketPromedio: e.transacciones > 0 ? e.ventas / e.transacciones : 0,
+          }))
+          .sort((a, b) => b.ventas - a.ventas)
+      );
 
-      // Totales (de la serie) y si incluye hoy, intenta KPIs hoy
-      const totalsFromSeries = normalizedSeries.reduce(
-        (acc, r) => ({ ventas: acc.ventas + r.ventas, tickets: acc.tickets + r.tickets, itbms: acc.itbms + r.itbms }),
+      // Totales
+      const totals = filtered.reduce(
+        (acc, r) => ({
+          ventas: acc.ventas + Number(r.ventas || 0),
+          tickets: acc.tickets + Number(r.transacciones || 0),
+          itbms: acc.itbms + Number(r.itbms || 0),
+        }),
         { ventas: 0, tickets: 0, itbms: 0 }
       );
-      let totals = totalsFromSeries;
-
-      const incluyeHoy = desde <= hoy && hasta >= hoy;
-      if (incluyeHoy) {
-        const { data: kpisHoy } = await supabase.from('v_ui_kpis_hoy').select('*');
-        if (kpisHoy && Array.isArray(kpisHoy)) {
-          const filtered = viewingAll
-            ? kpisHoy
-            : kpisHoy.filter((row: any) => {
-                const rowId = row.sucursal_id != null ? String(row.sucursal_id) : row.sucursal;
-                return !selectedSucursalId || rowId === selectedSucursalId;
-              });
-          if (filtered.length > 0) {
-            totals = filtered.reduce(
-              (acc: any, row: any) => ({
-                ventas: acc.ventas + Number(row.ventas_brutas ?? 0),
-                tickets: acc.tickets + Number(row.tickets ?? 0),
-                itbms: acc.itbms + Number(row.itbms ?? 0),
-              }),
-              { ventas: 0, tickets: 0, itbms: 0 }
-            );
-          }
-        }
-      }
-
       setTotalVentas(totals.ventas);
       setTotalTransacciones(totals.tickets);
       setTotalITBMS(totals.itbms);
 
       setDebugInfo({
-        filtro: { desde, hasta, viewingAll, selectedSucursalId, selectedSucursalName, ids },
-        seriesCount: normalizedSeries.length,
-        seriesSample: normalizedSeries[0] ?? null,
-        totals,
+        filtro: { desde, hasta, branch },
+        rowsIn: base.length,
+        rowsAfterFilter: filtered.length,
+        sample: filtered[0] ?? null,
       });
-
       setSyncBanner(prev => (prev && prev.kind === 'warn' ? null : prev));
-    } catch (e) {
+    } catch (e: any) {
       debugLog('[VentasPage] loadData error:', e);
       setRows([]); setSeriesData([]); setTotalVentas(0); setTotalTransacciones(0); setTotalITBMS(0);
-      setDebugInfo({ error: String(e) });
+      setDebugInfo({ error: String(e?.message || e) });
     } finally {
       setLoading(false);
     }
-  }, [desde, hasta, viewingAll, selectedSucursalId, selectedSucursalName, getFilteredSucursalIds, hoy]);
+  }, [desde, hasta, branch]);
 
   // Sync (deja igual, solo recarga luego)
   const handleSync = useCallback(async () => {
@@ -262,7 +223,7 @@ export function VentasPage() {
     }
   }, [functionsBase, hoy, loadData]);
 
-  // Realtime -> recarga
+  // Realtime -> recarga (puedes desactivarlo si prefieres)
   const rt: any = useRealtimeVentas({
     enabled: true, debounceMs: 1500,
     onUpdate: () => { debugLog('[VentasPage] actualización en tiempo real detectada'); loadData(); },
@@ -283,16 +244,12 @@ export function VentasPage() {
 
   useEffect(() => { loadData(); }, [loadData]);
 
-  useEffect(() => {
-    const handler = () => { debugLog('[VentasPage] evento debug:refetch-all recibido'); loadData(); };
-    window.addEventListener('debug:refetch-all', handler);
-    return () => window.removeEventListener('debug:refetch-all', handler);
-  }, [loadData]);
-
-  useEffect(() => {
-    if (sucursalSeleccionada?.id) setSelectedSucursalId(String(sucursalSeleccionada.id));
-    else setSelectedSucursalId(null);
-  }, [sucursalSeleccionada]);
+  // Opciones del dropdown a partir de lo cargado
+  const branchOptions = useMemo(() => {
+    const set = new Set<string>();
+    rows.forEach(r => set.add(r.nombre));
+    return ['__ALL__', ...Array.from(set).sort()];
+  }, [rows]);
 
   const bannerClass =
     syncBanner?.kind === 'warn'
@@ -348,7 +305,7 @@ export function VentasPage() {
           )}
         </div>
 
-        {/* Filtros (a futuro activarán el date-range real) */}
+        {/* Filtros */}
         <div className="bg-white dark:bg-gray-800 rounded-2xl shadow-lg p-6 border border-gray-100 dark:border-gray-700">
           <h3 className="text-lg font-semibold text-gray-900 dark:text-white mb-4 flex items-center gap-2">
             <Calendar className="h-5 w-5" /> Filtros
@@ -368,18 +325,19 @@ export function VentasPage() {
               <label className="block text-sm text-gray-600 dark:text-gray-400 mb-1">Sucursal</label>
               <div className="flex gap-2">
                 <select
-                  value={viewingAll ? '' : String(selectedSucursalId ?? '')}
-                  onChange={(e) => setSelectedSucursalId(e.target.value ? String(e.target.value) : null)}
+                  value={branch}
+                  onChange={(e) => setBranch(e.target.value)}
                   className="flex-1 px-3 py-2 rounded-lg border dark:border-gray-700 bg-white dark:bg-gray-900 text-gray-900 dark:text-gray-100"
                 >
-                  <option value="">Todas las sucursales</option>
-                  {sucursales.map((s) => (
-                    <option key={String(s.id)} value={String(s.id)}>{s.nombre}</option>
+                  {branchOptions.map(opt => (
+                    <option key={opt} value={opt}>
+                      {opt === '__ALL__' ? 'Todas las sucursales' : opt}
+                    </option>
                   ))}
                 </select>
                 <div className="inline-flex items-center px-3 rounded-lg border dark:border-gray-700 bg-gray-50 dark:bg-gray-900 text-gray-700 dark:text-gray-300">
                   <Building2 className="h-4 w-4 mr-2" />
-                  {viewingAll ? 'Todas' : 'Individual'}
+                  {branch === '__ALL__' ? 'Todas' : 'Individual'}
                 </div>
               </div>
             </div>
@@ -408,12 +366,12 @@ export function VentasPage() {
             color="bg-gradient-to-br from-blue-500 to-cyan-600" trend={8} />
         </div>
 
-        {/* Serie 14 días (se activa cuando exista `dia`) */}
+        {/* Serie 14 días */}
         <div className="bg-white dark:bg-gray-800 rounded-2xl shadow-lg border border-gray-100 dark:border-gray-700">
           <div className="p-6 border-b border-gray-100 dark:border-gray-700 flex items-center justify-between">
             <div>
               <h3 className="text-xl font-bold text-gray-900 dark:text-white">Serie de ventas (14 días)</h3>
-              <p className="text-sm text-gray-500 dark:text-gray-400">Fuente: vista v_ui_series_14d</p>
+              <p className="text-sm text-gray-500 dark:text-gray-400">Fuente: rpc_ui_series_14d</p>
             </div>
           </div>
           <div className="h-80 px-6 pb-6">
@@ -480,3 +438,5 @@ export function VentasPage() {
     </div>
   );
 }
+
+export default VentasPage;
