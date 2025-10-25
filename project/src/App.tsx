@@ -1,21 +1,49 @@
 import { BrowserRouter, Routes, Route } from 'react-router-dom';
-import { Layout } from './components/Layout';
-import { Dashboard } from './pages/Dashboard';
-import { VentasPage } from './pages/VentasPage';
+
+// ⛔️ Antes: import { Layout } from './components/Layout';
+// ✅ Ahora:
+import Layout from './components/Layout';
+
+// ⛔️ Antes: import { Dashboard } from './pages/Dashboard';
+// ✅ Ahora:
+import Dashboard from './pages/Dashboard';
+
+// ⛔️ Antes: import { VentasPage } from './pages/VentasPage';
+// ✅ Ahora:
+import VentasPage from './pages/VentasPage';
+
+// ⛔️ Antes: import { Periodos } from './pages/payroll/Periodos';
+// ✅ Este sí es nombrado — se queda igual:
 import { Periodos } from './pages/payroll/Periodos';
-import { AdminLayout } from './pages/admin/AdminLayout';
+
+// ⛔️ Antes: import { AdminLayout } from './pages/admin/AdminLayout';
+// ✅ Revisa si AdminLayout es default o named export.
+// La mayoría de implementaciones lo exportan default:
+import AdminLayout from './pages/admin/AdminLayout';
+
+// ⛔️ Antes: import CapturaComprasPage from './pages/compras/CapturaComprasPage';
+// ✅ Este ya está correcto, se queda igual.
 import CapturaComprasPage from './pages/compras/CapturaComprasPage';
-import { ProtectedRoute } from './components/ProtectedRoute';
-import { Contabilidad } from './pages/Contabilidad';
-import { IniciarSesion } from './pages/Auth/IniciarSesion';
+
+// ⛔️ Antes: import { ProtectedRoute } from './components/ProtectedRoute';
+// ✅ Si el archivo hace export default ProtectedRoute, cambia así:
+import ProtectedRoute from './components/ProtectedRoute';
+
+// ⛔️ Antes: import { Contabilidad } from './pages/Contabilidad';
+// ✅ Casi seguro es default, cambia así:
+import Contabilidad from './pages/Contabilidad';
+
+// ⛔️ Antes: import { IniciarSesion } from './pages/Auth/IniciarSesion';
+// ✅ Igual, casi siempre default:
+import IniciarSesion from './pages/Auth/IniciarSesion';
 
 export const App = () => (
   <BrowserRouter basename={import.meta.env.BASE_URL}>
     <Routes>
-      {/* Public route */}
+      {/* Ruta pública */}
       <Route path="/login" element={<IniciarSesion />} />
 
-      {/* Protected routes */}
+      {/* Rutas protegidas */}
       <Route
         path="/*"
         element={
