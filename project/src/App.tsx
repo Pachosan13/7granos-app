@@ -1,9 +1,9 @@
 import { BrowserRouter, Routes, Route } from 'react-router-dom';
 
 // Estos módulos deben venir como default:
-import Layout from './components/Layout';
-import Dashboard from './pages/Dashboard';
-import VentasPage from './pages/VentasPage';
+import { Layout } from './components/Layout';
+import { Dashboard } from './pages/Dashboard';
+import { VentasPage } from './pages/VentasPage';
 import AdminLayout from './pages/admin/AdminLayout';
 import CapturaComprasPage from './pages/compras/CapturaComprasPage';
 import { ProtectedRoute } from './components/ProtectedRoute';
