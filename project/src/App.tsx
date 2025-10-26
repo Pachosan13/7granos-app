@@ -1,49 +1,27 @@
 import { BrowserRouter, Routes, Route } from 'react-router-dom';
 
-// ⛔️ Antes: import { Layout } from './components/Layout';
-// ✅ Ahora:
-import Layout from './components/Layout';
+// ✅ TODOS como named imports:
+import { Layout } from './components/Layout';
+import { Dashboard } from './pages/Dashboard';
+import { VentasPage } from './pages/VentasPage';
+import { AdminLayout } from './pages/admin/AdminLayout';
+import { CapturaComprasPage } from './pages/compras/CapturaComprasPage';
+import { ProtectedRoute } from './components/ProtectedRoute';
+import { Contabilidad } from './pages/Contabilidad';
+import { IniciarSesion } from './pages/Auth/IniciarSesion';
 
-// ⛔️ Antes: import { Dashboard } from './pages/Dashboard';
-// ✅ Ahora:
-import Dashboard from './pages/Dashboard';
-
-// ⛔️ Antes: import { VentasPage } from './pages/VentasPage';
-// ✅ Ahora:
-import VentasPage from './pages/VentasPage';
-
-// ⛔️ Antes: import { Periodos } from './pages/payroll/Periodos';
-// ✅ Este sí es nombrado — se queda igual:
-import { Periodos } from './pages/payroll/Periodos';
-
-// ⛔️ Antes: import { AdminLayout } from './pages/admin/AdminLayout';
-// ✅ Revisa si AdminLayout es default o named export.
-// La mayoría de implementaciones lo exportan default:
-import AdminLayout from './pages/admin/AdminLayout';
-
-// ⛔️ Antes: import CapturaComprasPage from './pages/compras/CapturaComprasPage';
-// ✅ Este ya está correcto, se queda igual.
-import CapturaComprasPage from './pages/compras/CapturaComprasPage';
-
-// ⛔️ Antes: import { ProtectedRoute } from './components/ProtectedRoute';
-// ✅ Si el archivo hace export default ProtectedRoute, cambia así:
-import ProtectedRoute from './components/ProtectedRoute';
-
-// ⛔️ Antes: import { Contabilidad } from './pages/Contabilidad';
-// ✅ Casi seguro es default, cambia así:
-import Contabilidad from './pages/Contabilidad';
-
-// ⛔️ Antes: import { IniciarSesion } from './pages/Auth/IniciarSesion';
-// ✅ Igual, casi siempre default:
-import IniciarSesion from './pages/Auth/IniciarSesion';
+// Payroll (UI read-only, detrás de feature flags)
+import { PeriodsPage as Periodos } from './pages/payroll/PeriodsPage';
+import { EmployeesPage } from './pages/payroll/EmployeesPage';
+import { AttendancePage } from './pages/payroll/AttendancePage';
 
 export const App = () => (
   <BrowserRouter basename={import.meta.env.BASE_URL}>
     <Routes>
-      {/* Ruta pública */}
+      {/* Pública */}
       <Route path="/login" element={<IniciarSesion />} />
 
-      {/* Rutas protegidas */}
+      {/* Protegidas */}
       <Route
         path="/*"
         element={
@@ -52,10 +30,20 @@ export const App = () => (
               <Routes>
                 <Route path="/" element={<Dashboard />} />
                 <Route path="/ventas" element={<VentasPage />} />
-                <Route path="/payroll/*" element={<Periodos />} />
                 <Route path="/contabilidad" element={<Contabilidad />} />
                 <Route path="/admin/*" element={<AdminLayout />} />
                 <Route path="/compras/captura" element={<CapturaComprasPage />} />
+
+                {/* Payroll (solo si hay flags en true) */}
+                {import.meta.env.VITE_FF_PAYROLL_PERIODS === 'true' && (
+                  <Route path="/payroll" element={<Periodos />} />
+                )}
+                {import.meta.env.VITE_FF_PAYROLL_EMPLOYEES === 'true' && (
+                  <Route path="/payroll/empleados" element={<EmployeesPage />} />
+                )}
+                {import.meta.env.VITE_FF_PAYROLL_MARCACIONES === 'true' && (
+                  <Route path="/payroll/marcaciones" element={<AttendancePage />} />
+                )}
               </Routes>
             </Layout>
           </ProtectedRoute>
