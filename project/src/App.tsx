@@ -41,8 +41,8 @@ export const App = () => (
                 {import.meta.env.VITE_FF_PAYROLL_EMPLOYEES === 'true' && (
                   <Route path="/payroll/empleados" element={<EmployeesPage />} />
                 )}
-{import.meta.env.VITE_FF_PAYROLL_MARCACIONES === 'true' && (
-  <Route path="/payroll/marcaciones" element={<AttendancePage />} />
+                {import.meta.env.VITE_FF_PAYROLL_MARCACIONES === 'true' && (
+                  <Route path="/payroll/marcaciones" element={<AttendancePage />} />
 )}
               </Routes>
             </Layout>
