@@ -6,7 +6,7 @@ import Dashboard from './pages/Dashboard';
 import VentasPage from './pages/VentasPage';
 import AdminLayout from './pages/admin/AdminLayout';
 import CapturaComprasPage from './pages/compras/CapturaComprasPage';
-import ProtectedRoute from './components/ProtectedRoute';
+import { ProtectedRoute } from './components/ProtectedRoute';
 import Contabilidad from './pages/Contabilidad';
 import { IniciarSesion } from './pages/Auth/IniciarSesion';
 
