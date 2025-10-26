@@ -11,7 +11,7 @@ import { Contabilidad } from './pages/Contabilidad';
 import { IniciarSesion } from './pages/Auth/IniciarSesion';
 
 // Payroll (UI read-only, detrás de feature flags)
-import { Periodos as Periodos } from './pages/payroll/Periodos';
++ import { Periodos } from './pages/payroll/Periodos';
 import { EmployeesPage } from './pages/payroll/EmployeesPage';
 import { AttendancePage } from './pages/payroll/AttendancePage';
 
