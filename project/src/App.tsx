@@ -1,6 +1,6 @@
 import { BrowserRouter, Routes, Route } from 'react-router-dom';
 
-// ✅ TODOS como named imports:
+// ✅ Todos como named imports
 import { Layout } from './components/Layout';
 import { Dashboard } from './pages/Dashboard';
 import { VentasPage } from './pages/VentasPage';
@@ -10,10 +10,10 @@ import { ProtectedRoute } from './components/ProtectedRoute';
 import { Contabilidad } from './pages/Contabilidad';
 import { IniciarSesion } from './pages/Auth/IniciarSesion';
 
-// Payroll (UI read-only, detrás de feature flags)
+// ✅ Payroll (UI read-only, detrás de feature flags)
 import { Periodos } from './pages/payroll/Periodos';
-import { EmpleadosPage } from './pages/importar/Empleados';
-import { AttendancePage } from './pages/payroll/AttendancePage';
+import { EmpleadosPage } from './pages/importar/Empleados'; // <- usamos el real
+import { AttendancePage } from './pages/payroll/AttendancePage'; // <- placeholder real
 
 export const App = () => (
   <BrowserRouter basename={import.meta.env.BASE_URL}>
@@ -34,7 +34,7 @@ export const App = () => (
                 <Route path="/admin/*" element={<AdminLayout />} />
                 <Route path="/compras/captura" element={<CapturaComprasPage />} />
 
-                {/* Payroll (solo si hay flags en true) */}
+                {/* Payroll (solo si hay flags activadas) */}
                 {import.meta.env.VITE_FF_PAYROLL_PERIODS === 'true' && (
                   <Route path="/payroll" element={<Periodos />} />
                 )}
@@ -43,7 +43,7 @@ export const App = () => (
                 )}
                 {import.meta.env.VITE_FF_PAYROLL_MARCACIONES === 'true' && (
                   <Route path="/payroll/marcaciones" element={<AttendancePage />} />
-)}
+                )}
               </Routes>
             </Layout>
           </ProtectedRoute>
