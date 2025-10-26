@@ -12,7 +12,7 @@ import { IniciarSesion } from './pages/Auth/IniciarSesion';
 
 // Payroll (UI read-only, detrás de feature flags)
 import { Periodos } from './pages/payroll/Periodos';
-import { EmployeesPage } from './pages/payroll/Empleados';
+import { EmpleadosPage } from './pages/importar/Empleados';
 import { AttendancePage } from './pages/payroll/AttendancePage';
 
 export const App = () => (
