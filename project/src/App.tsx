@@ -8,7 +8,7 @@ import AdminLayout from './pages/admin/AdminLayout';
 import CapturaComprasPage from './pages/compras/CapturaComprasPage';
 import ProtectedRoute from './components/ProtectedRoute';
 import Contabilidad from './pages/Contabilidad';
-import IniciarSesion from './pages/Auth/IniciarSesion';
+import { IniciarSesion } from './pages/Auth/IniciarSesion';
 
 // Este sí es nombrado (lo dejas igual)
 import { Periodos } from './pages/payroll/Periodos';
