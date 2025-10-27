@@ -4,28 +4,33 @@ on:
   push:
     branches: [ main ]
 
-# Cambia esto si tu app NO está en la raíz:
-# e.g. "app", "frontend", "project"
-env:
-  APP_PATH: "."
-
 jobs:
   build:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: ${{ env.APP_PATH }}
     steps:
       - uses: actions/checkout@v4
 
+      # 1) Detecta carpeta de la app (donde esté el primer package.json)
+      - name: Detect APP_PATH
+        id: detect
+        shell: bash
+        run: |
+          set -e
+          APP_PATH="$(git ls-files **/package.json | head -n1 | xargs dirname || true)"
+          if [ -z "$APP_PATH" ]; then
+            echo "No se encontró package.json"; exit 1
+          fi
+          echo "APP_PATH=$APP_PATH" >> $GITHUB_ENV
+          echo "App path: $APP_PATH"
+
+      # 2) Node sin cache (evita el error de 'paths not resolved')
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
-          cache: 'npm'
-          cache-dependency-path: ${{ env.APP_PATH }}/package-lock.json
 
-      # Instala: si hay package-lock usa ci; si no, usa install
-      - name: Install deps (ci or install)
+      # 3) Instala deps (usa ci si hay lockfile; si no, install)
+      - name: Install deps
+        working-directory: ${{ env.APP_PATH }}
         run: |
           if [ -f package-lock.json ]; then
             npm ci
@@ -33,12 +38,21 @@ jobs:
             npm install
           fi
 
-      # No bloquees por ahora typecheck/lint (que Codex lo vaya poniendo en verde)
-      - run: npm run typecheck || true
-      - run: npm run lint || true
+      # 4) Typecheck/Lint no bloqueantes (para ir poniendo en verde con Codex)
+      - name: Typecheck (non-blocking)
+        working-directory: ${{ env.APP_PATH }}
+        run: npm run typecheck || true
 
-      # Build tolerante:
-      # --if-present evita fallo si no hay script build
-      # CI=false evita fail de CRA por warnings
+      - name: Lint (non-blocking)
+        working-directory: ${{ env.APP_PATH }}
+        run: npm run lint || true
+
+      # 5) Build tolerante (si no hay script build, no falla; CRA Warnings no rompen)
       - name: Build
-        run: CI=false npm run build --if-present
+        working-directory: ${{ env.APP_PATH }}
+        run: |
+          if npm pkg get scripts.build | grep -qv null; then
+            CI=false npm run build
+          else
+            echo "No build script; skipping"
+          fi
