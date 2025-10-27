@@ -1,6 +1,6 @@
 import { createContext, useContext, useState, useEffect, ReactNode, useMemo } from 'react';
 import { User } from '@supabase/supabase-js';
-import { supabase } from '../lib/supabase';
+import { supabase, isSupabaseConfigured } from '../lib/supabase';
 import { getMyProfile, getMyBranches, UserProfile, Sucursal } from '../lib/org';
 
 type ViewMode = 'all' | 'single';
@@ -77,6 +77,54 @@ export const AuthOrgProvider = ({ children }: AuthOrgProviderProps) => {
       try {
         setLoading(true);
         setError(null);
+
+        if (!isSupabaseConfigured) {
+          console.warn('Supabase no está configurado. Activando modo demo local.');
+
+          const now = new Date().toISOString();
+          const offlineUser: User = {
+            id: 'offline-user',
+            aud: 'authenticated',
+            role: 'authenticated',
+            email: 'demo@7granos.app',
+            phone: '',
+            app_metadata: {},
+            user_metadata: {},
+            created_at: now,
+            confirmed_at: now,
+            email_confirmed_at: now,
+            phone_confirmed_at: null,
+            last_sign_in_at: now,
+            updated_at: now,
+            identities: [],
+            factors: [],
+          } as User;
+
+          const offlineProfile: UserProfile = {
+            user_id: offlineUser.id,
+            rol: 'admin',
+            created_at: now,
+          };
+
+          const offlineSucursales: Sucursal[] = [
+            { id: 'sucursal-centro', nombre: 'Sucursal Centro', activa: true },
+            { id: 'sucursal-norte', nombre: 'Sucursal Norte', activa: true },
+          ];
+
+          const savedViewMode = (localStorage.getItem(STORAGE_KEY) as ViewMode | null) || 'all';
+
+          if (mounted) {
+            setUser(offlineUser);
+            setProfile(offlineProfile);
+            setSucursales(offlineSucursales);
+            setViewModeState(savedViewMode);
+            setSucursalSeleccionada(savedViewMode === 'single' ? offlineSucursales[0] : null);
+            setLoading(false);
+            setError(null);
+          }
+
+          return;
+        }
 
         // Get current user session
         const { data: { session }, error: sessionError } = await supabase.auth.getSession();
