@@ -38,6 +38,7 @@ function addDays(ymd: string, days: number) {
 }
 
 export default function Dashboard() {
+<<<<<<< HEAD
   // org/context
   const { sucursales = [], sucursalSeleccionada } = useAuthOrg();
 
@@ -46,6 +47,9 @@ export default function Dashboard() {
     () => sucursales.map((s) => String(s.id)),
     [sucursales]
   );
+=======
+  const { sucursales, sucursalSeleccionada, getFilteredSucursalIds } = useAuthOrg();
+>>>>>>> 38328c2 (fix: default imports (Dashboard, CapturaComprasPage) + payroll routes)
   const functionsBase = useMemo(() => getFunctionsBase(), []);
 
   // filtros
@@ -301,3 +305,4 @@ export default function Dashboard() {
     </div>
   );
 }
+
