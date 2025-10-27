@@ -1,8 +1,8 @@
 import { BrowserRouter, Routes, Route } from 'react-router-dom';
 
-// ✅ Todos como named imports
+// ✅ Todos como named imports (salvo Dashboard, que va como default)
 import { Layout } from './components/Layout';
-import { Dashboard } from './pages/Dashboard';
+import Dashboard from './pages/Dashboard';                 // ⬅️ default import
 import { VentasPage } from './pages/VentasPage';
 import { AdminLayout } from './pages/admin/AdminLayout';
 import { CapturaComprasPage } from './pages/compras/CapturaComprasPage';
@@ -10,10 +10,10 @@ import { ProtectedRoute } from './components/ProtectedRoute';
 import { Contabilidad } from './pages/Contabilidad';
 import { IniciarSesion } from './pages/Auth/IniciarSesion';
 
-// ✅ Payroll (UI read-only, detrás de feature flags)
+// Payroll (UI read-only, detrás de feature flags)
 import { Periodos } from './pages/payroll/Periodos';
 import { EmpleadosPage } from './pages/importar/Empleados';
-import { AttendancePage } from './payroll/AttendancePage';
+import { AttendancePage } from './payroll/AttendancePage';  // ruta REAL
 
 export const App = () => (
   <BrowserRouter basename={import.meta.env.BASE_URL}>
