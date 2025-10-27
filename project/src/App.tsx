@@ -83,6 +83,7 @@ export const App = () => (
             <Layout>
               <Routes>
                 <Route path="/" element={<Dashboard />} />
+                <Route path="/dashboard" element={<Dashboard />} />
                 <Route path="/ventas" element={<VentasPage />} />
                 <Route path="/contabilidad" element={<Contabilidad />} />
 
@@ -95,7 +96,10 @@ export const App = () => (
 
                 {/* Payroll (no se oculta a menos que flag sea 'false') */}
                 {ff(import.meta.env.VITE_FF_PAYROLL_PERIODS) && (
-                  <Route path="/payroll" element={<Periodos />} />
+                  <>
+                    <Route path="/payroll" element={<Periodos />} />
+                    <Route path="/payroll/periodos" element={<Periodos />} />
+                  </>
                 )}
                 {ff(import.meta.env.VITE_FF_PAYROLL_EMPLOYEES) && (
                   <Route path="/payroll/empleados" element={<EmpleadosPage />} />
