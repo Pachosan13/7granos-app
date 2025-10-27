@@ -282,14 +282,7 @@ export default function DashboardInner() {
                   stroke="#2563eb"
                   strokeWidth={2}
                 />
-                <Bar
-                  yAxisId="right"
-                  dataKey="tickets"
-                  name="Tickets"
-                  fill="#10b981"
-                  opacity={0.8}
-                  barSize={22}
-                />
+                <Bar yAxisId="right" dataKey="tickets" name="Tickets" fill="#10b981" opacity={0.8} barSize={22} />
               </ComposedChart>
             </ResponsiveContainer>
           )}
