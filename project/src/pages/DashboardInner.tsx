@@ -38,11 +38,10 @@ function addDays(ymd: string, days: number) {
 }
 
 /* ========= dependencias (deben declararse ANTES de usarlas) ========= */
-const supabase = (SupaMod as any).supabase ?? SupaMod.default;
+const supabase = (SupaMod as any).supabase;
 
 const useAuthOrg =
   (AuthOrgMod as any).useAuthOrg ??
-  AuthOrgMod.default ??
   (() => {
     console.warn('useAuthOrg no encontrado; devolviendo stub');
     return { sucursales: [], sucursalSeleccionada: null, getFilteredSucursalIds: () => [] };
@@ -50,16 +49,7 @@ const useAuthOrg =
 
 const KPICard =
   (KPICardMod as any).KPICard ??
-  KPICardMod.default ??
-  (({ title, value, prefix }: any) => (
-    <div className="rounded-xl border p-4">
-      <div className="text-sm text-slate-500">{title}</div>
-      <div className="text-2xl font-semibold">
-        {prefix ?? ''}
-        {typeof value === 'number' ? value.toLocaleString() : String(value ?? '—')}
-      </div>
-    </div>
-  ));
+  (({ title, value, prefix }: any) => ( ... ));
 
 /* ========= componente ========= */
 export default function DashboardInner() {
