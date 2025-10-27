@@ -1,12 +1,12 @@
 import { BrowserRouter, Routes, Route } from 'react-router-dom';
 
 // Defaults
-import Layout from './components/Layout';
+import { Layout } from './components/Layout';
 import Dashboard from './pages/Dashboard';
 import VentasPage from './pages/VentasPage';
 import AdminLayout from './pages/admin/AdminLayout';
 import CapturaComprasPage from './pages/compras/CapturaComprasPage';
-import Contabilidad from './pages/Contabilidad';
+import { Contabilidad } from './pages/Contabilidad';
 
 // Named
 import { ProtectedRoute } from './components/ProtectedRoute';
