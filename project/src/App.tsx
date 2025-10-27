@@ -10,6 +10,15 @@ import { ProtectedRoute } from './components/ProtectedRoute';
 import { Contabilidad } from './pages/Contabilidad';
 import { IniciarSesion } from './pages/Auth/IniciarSesion';
 
+console.log({
+  Layout: typeof Layout,
+  Dashboard: typeof Dashboard,
+  VentasPage: typeof VentasPage,
+  Periodos: typeof Periodos,
+  AdminLayout: typeof AdminLayout,
+  CapturaComprasPage: typeof CapturaComprasPage
+});
+
 // Payroll (UI read-only, detrás de feature flags)
 import { Periodos } from './pages/payroll/Periodos';
 import { EmpleadosPage } from './pages/importar/Empleados';
