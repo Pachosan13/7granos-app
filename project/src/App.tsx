@@ -1,21 +1,20 @@
 import { BrowserRouter, Routes, Route } from 'react-router-dom';
 
-// ✅ Defaults
+// Defaults
 import Layout from './components/Layout';
 import Dashboard from './pages/Dashboard';
 import VentasPage from './pages/VentasPage';
 import AdminLayout from './pages/admin/AdminLayout';
 import CapturaComprasPage from './pages/compras/CapturaComprasPage';
 
-// ✅ Named (estos 3 van con llaves)
+// Named
 import { ProtectedRoute } from './components/ProtectedRoute';
 import { Contabilidad } from './pages/Contabilidad';
 import { IniciarSesion } from './pages/Auth/IniciarSesion';
 
-// ✅ Payroll (named)
 import { Periodos } from './pages/payroll/Periodos';
 import { EmpleadosPage } from './pages/importar/Empleados';
-import { AttendancePage } from './payroll/AttendancePage'; // ruta real
+import { AttendancePage } from './payroll/AttendancePage';
 
 export const App = () => (
   <BrowserRouter basename={import.meta.env.BASE_URL}>
