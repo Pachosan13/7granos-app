@@ -5,7 +5,14 @@ import { useAuthOrg } from '../context/AuthOrgContext';
 import { KPICard } from '../components/KPICard';
 import { formatCurrencyUSD, formatDateDDMMYYYY } from '../lib/format';
 import {
-  ResponsiveContainer, ComposedChart, Area, CartesianGrid, XAxis, YAxis, Tooltip, Bar,
+  ResponsiveContainer,
+  ComposedChart,
+  Area,
+  CartesianGrid,
+  XAxis,
+  YAxis,
+  Tooltip,
+  Bar,
 } from 'recharts';
 import { debugLog, getFunctionsBase } from '../utils/diagnostics';
 
@@ -18,6 +25,7 @@ function todayYMD(tz = 'America/Panama') {
   const day = String(d.getDate()).padStart(2, '0');
   return `${y}-${m}-${day}`;
 }
+
 function addDays(ymd: string, days: number) {
   const [y, m, d] = ymd.split('-').map(Number);
   const dt = new Date(Date.UTC(y, m - 1, d, 12, 0, 0));
@@ -28,13 +36,16 @@ function addDays(ymd: string, days: number) {
   return `${yy}-${mm}-${dd}`;
 }
 
-export function Dashboard() {
-  return (
-    <div className="p-8">
-      <h1 className="text-2xl font-semibold">Dashboard</h1>
-    </div>
+export default function Dashboard() {
+  // org/context
+  const { sucursales = [], sucursalSeleccionada } = useAuthOrg();
+
+  // utilidades dependientes del estado
+  const getFilteredSucursalIds = useCallback(
+    () => sucursales.map((s) => String(s.id)),
+    [sucursales]
   );
-}
+  const functionsBase = useMemo(() => getFunctionsBase(), []);
 
   // filtros
   const hoy = useMemo(() => todayYMD(), []);
@@ -47,7 +58,7 @@ export function Dashboard() {
   const viewingAll = selectedSucursalId === null;
   const selectedSucursalName = viewingAll
     ? null
-    : (sucursales.find(s => String(s.id) === selectedSucursalId)?.nombre ?? 'Sucursal');
+    : sucursales.find((s) => String(s.id) === selectedSucursalId)?.nombre ?? 'Sucursal';
 
   // estado UI
   const [loading, setLoading] = useState(true);
@@ -61,7 +72,7 @@ export function Dashboard() {
   const [margenBruto, setMargenBruto] = useState(0);
   const [clientesActivos, setClientesActivos] = useState(0); // placeholder
 
-  // Serie (últimos 7 días) desde la RPC ya usada en Ventas
+  // Serie (últimos 7 días)
   const [serie, setSerie] = useState<SerieRow[]>([]);
 
   const cargarDatos = useCallback(async () => {
@@ -69,8 +80,10 @@ export function Dashboard() {
     try {
       // 1) KPIs de hoy por sucursal
       const ids = viewingAll
-        ? getFilteredSucursalIds().map(String)
-        : (selectedSucursalId ? [String(selectedSucursalId)] : []);
+        ? getFilteredSucursalIds()
+        : selectedSucursalId
+          ? [String(selectedSucursalId)]
+          : [];
 
       let q = supabase.from('v_ui_kpis_hoy').select('*');
       if (!viewingAll && ids.length > 0) q = q.eq('sucursal_id', ids[0]);
@@ -79,14 +92,12 @@ export function Dashboard() {
       const { data: kpis, error: kpisErr } = await q;
       if (kpisErr) throw kpisErr;
 
-      // sumo por si hay varias sucursales
       const tot = (kpis ?? []).reduce(
         (acc: any, r: any) => {
           acc.ventas += Number(r.ventas_brutas ?? 0);
           acc.tickets += Number(r.tickets ?? 0);
           acc.margen += Number(r.margen_bruto ?? 0);
-          // clientes activos: si luego tienes una vista real, sustitúyelo
-          acc.clientes += 0;
+          acc.clientes += 0; // reemplazar cuando exista métrica real
           return acc;
         },
         { ventas: 0, tickets: 0, margen: 0, clientes: 0 }
@@ -97,24 +108,22 @@ export function Dashboard() {
       setMargenBruto(tot.margen);
       setClientesActivos(tot.clientes);
 
-      // 2) Serie últimos 7 días (RPC)
-      const { data: serieRpc, error: serieErr } = await supabase
-        .rpc('rpc_ui_series_14d', { desde: desde, hasta: hasta });
+      // 2) Serie (RPC)
+      const { data: serieRpc, error: serieErr } = await supabase.rpc('rpc_ui_series_14d', {
+        desde,
+        hasta,
+      });
       if (serieErr) throw serieErr;
 
-      // si el usuario escogió 1 sucursal, filtro por nombre
-      const serieFiltrada = (serieRpc ?? [])
-        .filter((r: any) =>
-          viewingAll
-            ? true
-            : (selectedSucursalName ? r.sucursal === selectedSucursalName : true)
-        );
+      const serieFiltrada = (serieRpc ?? []).filter((r: any) =>
+        viewingAll ? true : selectedSucursalName ? r.sucursal === selectedSucursalName : true
+      );
 
-      // agrego por día para el gráfico
       const map = new Map<string, { dia: string; fecha: string; ventas: number; tickets: number }>();
       for (const r of serieFiltrada) {
         const key = r.dia;
-        if (!map.has(key)) map.set(key, { dia: key, fecha: formatDateDDMMYYYY(key), ventas: 0, tickets: 0 });
+        if (!map.has(key))
+          map.set(key, { dia: key, fecha: formatDateDDMMYYYY(key), ventas: 0, tickets: 0 });
         const e = map.get(key)!;
         e.ventas += Number(r.ventas ?? 0);
         e.tickets += Number(r.transacciones ?? 0);
@@ -129,15 +138,25 @@ export function Dashboard() {
       });
     } catch (e) {
       debugLog('[Tablero] cargarDatos error', e);
-      setVentasHoy(0); setTicketsHoy(0); setTicketPromedio(0); setMargenBruto(0); setClientesActivos(0);
+      setVentasHoy(0);
+      setTicketsHoy(0);
+      setTicketPromedio(0);
+      setMargenBruto(0);
+      setClientesActivos(0);
       setSerie([]);
       setDebugInfo({ error: String(e) });
     } finally {
       setLoading(false);
     }
-  }, [desde, hasta, viewingAll, selectedSucursalId, selectedSucursalName, getFilteredSucursalIds]);
+  }, [
+    desde,
+    hasta,
+    viewingAll,
+    selectedSucursalId,
+    selectedSucursalName,
+    getFilteredSucursalIds,
+  ]);
 
-  // Sync rápido (solo invoca la misma edge que Ventas; hoy→hoy)
   const handleSync = useCallback(async () => {
     if (!functionsBase) return;
     setSyncing(true);
@@ -153,7 +172,10 @@ export function Dashboard() {
     }
   }, [functionsBase, hoy, cargarDatos]);
 
-  useEffect(() => { cargarDatos(); }, [cargarDatos]);
+  useEffect(() => {
+    cargarDatos();
+  }, [cargarDatos]);
+
   useEffect(() => {
     if (sucursalSeleccionada?.id) setSelectedSucursalId(String(sucursalSeleccionada.id));
     else setSelectedSucursalId(null);
@@ -167,13 +189,21 @@ export function Dashboard() {
           <div className="flex-1 grid grid-cols-1 md:grid-cols-3 gap-4 w-full">
             <div>
               <label className="block text-sm text-gray-600 dark:text-gray-400 mb-1">Desde</label>
-              <input type="date" value={desde} onChange={(e) => setDesde(e.target.value)}
-                     className="w-full px-3 py-2 rounded-lg border dark:border-gray-700 bg-white dark:bg-gray-900"/>
+              <input
+                type="date"
+                value={desde}
+                onChange={(e) => setDesde(e.target.value)}
+                className="w-full px-3 py-2 rounded-lg border dark:border-gray-700 bg-white dark:bg-gray-900"
+              />
             </div>
             <div>
               <label className="block text-sm text-gray-600 dark:text-gray-400 mb-1">Hasta</label>
-              <input type="date" value={hasta} onChange={(e) => setHasta(e.target.value)}
-                     className="w-full px-3 py-2 rounded-lg border dark:border-gray-700 bg-white dark:bg-gray-900"/>
+              <input
+                type="date"
+                value={hasta}
+                onChange={(e) => setHasta(e.target.value)}
+                className="w-full px-3 py-2 rounded-lg border dark:border-gray-700 bg-white dark:bg-gray-900"
+              />
             </div>
             <div>
               <label className="block text-sm text-gray-600 dark:text-gray-400 mb-1">Sucursal</label>
@@ -185,7 +215,9 @@ export function Dashboard() {
                 >
                   <option value="">Todas las sucursales</option>
                   {sucursales.map((s) => (
-                    <option key={String(s.id)} value={String(s.id)}>{s.nombre}</option>
+                    <option key={String(s.id)} value={String(s.id)}>
+                      {s.nombre}
+                    </option>
                   ))}
                 </select>
                 <div className="inline-flex items-center px-3 rounded-lg border dark:border-gray-700 bg-gray-50 dark:bg-gray-900 text-gray-700 dark:text-gray-300">
@@ -195,8 +227,11 @@ export function Dashboard() {
               </div>
             </div>
           </div>
-          <button onClick={handleSync} disabled={syncing}
-                  className="inline-flex items-center gap-2 px-5 py-3 rounded-xl text-white bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-700 hover:to-purple-700 shadow-lg disabled:opacity-50">
+          <button
+            onClick={handleSync}
+            disabled={syncing}
+            className="inline-flex items-center gap-2 px-5 py-3 rounded-xl text-white bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-700 hover:to-purple-700 shadow-lg disabled:opacity-50"
+          >
             <RefreshCw className={`h-5 w-5 ${syncing ? 'animate-spin' : ''}`} />
             {syncing ? 'Sincronizando…' : 'Sincronizar ahora'}
           </button>
@@ -228,14 +263,29 @@ export function Dashboard() {
               <ComposedChart data={serie} margin={{ top: 20, right: 20, left: 0, bottom: 0 }}>
                 <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
                 <XAxis dataKey="fecha" stroke="#6b7280" fontSize={12} minTickGap={16} />
-                <YAxis yAxisId="left" stroke="#6b7280" fontSize={12}
-                       tickFormatter={(v: number) => formatCurrencyUSD(v)} width={90} />
+                <YAxis
+                  yAxisId="left"
+                  stroke="#6b7280"
+                  fontSize={12}
+                  tickFormatter={(v: number) => formatCurrencyUSD(v)}
+                  width={90}
+                />
                 <YAxis yAxisId="right" orientation="right" stroke="#6b7280" fontSize={12} width={70} />
                 <Tooltip
-                  formatter={(v: number, name) => (name === 'Ventas' ? formatCurrencyUSD(v) : v.toLocaleString())}
+                  formatter={(v: number, name) =>
+                    name === 'Ventas' ? formatCurrencyUSD(v) : v.toLocaleString()
+                  }
                   labelFormatter={(label) => `Día: ${label}`}
                 />
-                <Area yAxisId="left" type="monotone" dataKey="ventas" name="Ventas" fill="#3b82f6" stroke="#2563eb" strokeWidth={2} />
+                <Area
+                  yAxisId="left"
+                  type="monotone"
+                  dataKey="ventas"
+                  name="Ventas"
+                  fill="#3b82f6"
+                  stroke="#2563eb"
+                  strokeWidth={2}
+                />
                 <Bar yAxisId="right" dataKey="tickets" name="Tickets" fill="#10b981" opacity={0.8} barSize={22} />
               </ComposedChart>
             </ResponsiveContainer>
@@ -244,7 +294,9 @@ export function Dashboard() {
       </div>
 
       {/* Debug */}
-      <pre className="text-xs text-gray-500 dark:text-gray-400">{debugInfo ? JSON.stringify(debugInfo, null, 2) : null}</pre>
+      <pre className="text-xs text-gray-500 dark:text-gray-400">
+        {debugInfo ? JSON.stringify(debugInfo, null, 2) : null}
+      </pre>
     </div>
   );
 }
