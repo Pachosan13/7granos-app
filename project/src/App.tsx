@@ -12,8 +12,8 @@ import { IniciarSesion } from './pages/Auth/IniciarSesion';
 
 // ✅ Payroll (UI read-only, detrás de feature flags)
 import { Periodos } from './pages/payroll/Periodos';
-import { EmpleadosPage } from './pages/importar/Empleados';   // usamos el real
-import { AttendancePage } from './payroll/AttendancePage';     // ruta REAL según tu repo
+import { EmpleadosPage } from './pages/importar/Empleados';
+import { AttendancePage } from './payroll/AttendancePage';
 
 export const App = () => (
   <BrowserRouter basename={import.meta.env.BASE_URL}>
