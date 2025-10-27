@@ -1,3 +1,4 @@
+// src/pages/payroll/Calcular.tsx
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ArrowLeft,
@@ -18,7 +19,6 @@ import { formatDateDDMMYYYY } from '../../lib/format';
 type Sucursal = { id: string; nombre: string };
 const useAuthOrg =
   (AuthOrgMod as any).useAuthOrg ??
-  AuthOrgMod.default ??
   (() => ({
     sucursales: [] as Sucursal[],
     sucursalSeleccionada: null as Sucursal | null,
@@ -157,18 +157,31 @@ export default function Calcular() {
     navigate('/payroll');
   }
 
-  /* ── UI ────────────────────────────────────────────────────────────────── */
-  return (
-    <div className="p-6 space-y-6">
-      {/* HEADER ─────────────────────────────────────────────────────────── */}
-      <div className="flex items-center justify-between">
-        <button
-          onClick={() => navigate('/payroll')}
-          className="inline-flex items-center gap-2 px-4 py-2 rounded-xl border bg-white hover:bg-gray-50 shadow"
-        >
-          <ArrowLeft className="h-4 w-4" />
-          <span>Volver a períodos</span>
-        </button>
+  /* ── Header reutilizable: back + link fijo ─────────────────────────────── */
+  const BackBar: React.FC = () => {
+    const goBack = () => {
+      if (window.history.length > 1) window.history.back();
+      else navigate('/payroll');
+    };
+    return (
+      <div className="mb-6 flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <button
+            onClick={goBack}
+            className="inline-flex items-center gap-2 px-4 py-2 rounded-xl border bg-white hover:bg-gray-50 shadow"
+            title="Volver"
+          >
+            <ArrowLeft className="h-4 w-4" />
+            <span>Volver</span>
+          </button>
+          <a
+            href="/payroll"
+            className="ml-2 text-sm text-slate-600 hover:text-slate-900 underline"
+            title="Ir a Periodos"
+          >
+            Ir a Periodos
+          </a>
+        </div>
 
         <div className="flex items-center gap-2">
           <div className="inline-flex items-center px-3 py-2 rounded-lg border bg-gray-50 text-gray-700">
@@ -193,8 +206,16 @@ export default function Calcular() {
           )}
         </div>
       </div>
+    );
+  };
 
-      {/* ESTADOS ─────────────────────────────────────────────────────────── */}
+  /* ── UI ────────────────────────────────────────────────────────────────── */
+  return (
+    <div className="p-6 space-y-6">
+      {/* HEADER */}
+      <BackBar />
+
+      {/* ESTADOS */}
       {loading ? (
         <div className="bg-white rounded-2xl shadow p-8 text-center">
           <Loader2 className="animate-spin h-8 w-8 text-accent mx-auto mb-3" />
@@ -213,7 +234,7 @@ export default function Calcular() {
         </div>
       ) : (
         <>
-          {/* ── Resumen del período ───────────────────────────────────────── */}
+          {/* ── Resumen del período */}
           <div className="bg-white rounded-2xl shadow p-6 border">
             <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
               <div>
@@ -252,7 +273,7 @@ export default function Calcular() {
             </div>
           </div>
 
-          {/* ── Detalle de empleados ─────────────────────────────────────── */}
+          {/* ── Detalle de empleados */}
           <div className="bg-white rounded-2xl shadow p-6 border">
             <h3 className="text-xl font-semibold mb-4">Empleados del período</h3>
 
@@ -288,7 +309,7 @@ export default function Calcular() {
             )}
           </div>
 
-          {/* ── Resumen final ─────────────────────────────────────────────── */}
+          {/* └─ Resumen final */}
           {resumen && (
             <div className="bg-white rounded-2xl shadow p-6 border">
               <h3 className="text-xl font-semibold mb-4">Resumen de totales</h3>
