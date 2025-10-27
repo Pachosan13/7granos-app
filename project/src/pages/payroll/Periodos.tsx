@@ -1,9 +1,19 @@
+// src/pages/payroll/Periodos.tsx
 import { useEffect, useMemo, useState } from 'react';
 import { Plus, Calendar, Eye, Trash2, AlertCircle } from 'lucide-react';
-import { useAuthOrg } from '../../context/AuthOrgContext';
 import { MonthYearPicker } from '../../lib/ui/MonthYearPicker';
 import { supabase } from '../../lib/supabase';
 import { formatDateDDMMYYYY } from '../../lib/format';
+import * as AuthOrgMod from '../../context/AuthOrgContext';
+
+/** ────────────────────────────────────────────────────────────────────────────
+ * Resolver robusto del contexto (default o named)
+ * ────────────────────────────────────────────────────────────────────────────
+ */
+const useAuthOrg =
+  (AuthOrgMod as any).useAuthOrg ??
+  AuthOrgMod.default ??
+  (() => ({ sucursalSeleccionada: null }));
 
 /** ────────────────────────────────────────────────────────────────────────────
  *  Tipos
@@ -63,7 +73,7 @@ function useQueryParam(name: string) {
  *  Componente
  *  ────────────────────────────────────────────────────────────────────────────
  */
-export const Periodos = () => {
+export default function Periodos() {
   /** ⚠️ El contexto debe exponer (idealmente) el setter.
    *  Si no lo expone, hacemos fallback a reload tras guardar en localStorage.
    */
@@ -495,4 +505,4 @@ export const Periodos = () => {
       )}
     </div>
   );
-};
+}
