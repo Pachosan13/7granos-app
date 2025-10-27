@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Building2, RefreshCw } from 'lucide-react';
 import * as SupaMod from '../lib/supabase';
 import * as AuthOrgMod from '../context/AuthOrgContext';
@@ -18,6 +18,7 @@ import { debugLog, getFunctionsBase } from '../utils/diagnostics';
 
 type SerieRow = { dia: string; fecha: string; ventas: number; tickets: number };
 
+/* ========= helpers de fecha ========= */
 function todayYMD(tz = 'America/Panama') {
   const d = new Date(new Date().toLocaleString('en-US', { timeZone: tz }));
   const y = d.getFullYear();
@@ -36,6 +37,31 @@ function addDays(ymd: string, days: number) {
   return `${yy}-${mm}-${dd}`;
 }
 
+/* ========= dependencias (deben declararse ANTES de usarlas) ========= */
+const supabase = (SupaMod as any).supabase ?? SupaMod.default;
+
+const useAuthOrg =
+  (AuthOrgMod as any).useAuthOrg ??
+  AuthOrgMod.default ??
+  (() => {
+    console.warn('useAuthOrg no encontrado; devolviendo stub');
+    return { sucursales: [], sucursalSeleccionada: null, getFilteredSucursalIds: () => [] };
+  });
+
+const KPICard =
+  (KPICardMod as any).KPICard ??
+  KPICardMod.default ??
+  (({ title, value, prefix }: any) => (
+    <div className="rounded-xl border p-4">
+      <div className="text-sm text-slate-500">{title}</div>
+      <div className="text-2xl font-semibold">
+        {prefix ?? ''}
+        {typeof value === 'number' ? value.toLocaleString() : String(value ?? '—')}
+      </div>
+    </div>
+  ));
+
+/* ========= componente ========= */
 export default function DashboardInner() {
   const { sucursales, sucursalSeleccionada, getFilteredSucursalIds } = useAuthOrg();
   const functionsBase = useMemo(() => getFunctionsBase(), []);
@@ -51,7 +77,7 @@ export default function DashboardInner() {
   const viewingAll = selectedSucursalId === null;
   const selectedSucursalName = viewingAll
     ? null
-    : sucursales.find((s) => String(s.id) === selectedSucursalId)?.nombre ?? 'Sucursal';
+    : sucursales.find((s: any) => String(s.id) === selectedSucursalId)?.nombre ?? 'Sucursal';
 
   // estado UI
   const [loading, setLoading] = useState(true);
@@ -150,28 +176,6 @@ export default function DashboardInner() {
     getFilteredSucursalIds,
   ]);
 
-  const supabase = (SupaMod as any).supabase ?? SupaMod.default;
-const useAuthOrg =
-  (AuthOrgMod as any).useAuthOrg ??
-  AuthOrgMod.default ??
-  (() => {
-    console.warn('useAuthOrg no encontrado; devolviendo stub');
-    return { sucursales: [], sucursalSeleccionada: null, getFilteredSucursalIds: () => [] };
-  });
-
-const KPICard =
-  (KPICardMod as any).KPICard ??
-  KPICardMod.default ??
-  (({ title, value, prefix }: any) => (
-    <div className="rounded-xl border p-4">
-      <div className="text-sm text-slate-500">{title}</div>
-      <div className="text-2xl font-semibold">
-        {prefix ?? ''}
-        {typeof value === 'number' ? value.toLocaleString() : String(value ?? '—')}
-      </div>
-    </div>
-  ));
-
   const handleSync = useCallback(async () => {
     const base = getFunctionsBase();
     if (!base) return;
@@ -231,7 +235,7 @@ const KPICard =
                   className="flex-1 px-3 py-2 rounded-lg border dark:border-gray-700 bg-white dark:bg-gray-900"
                 >
                   <option value="">Todas las sucursales</option>
-                  {sucursales.map((s) => (
+                  {sucursales.map((s: any) => (
                     <option key={String(s.id)} value={String(s.id)}>
                       {s.nombre}
                     </option>
@@ -247,7 +251,7 @@ const KPICard =
           <button
             onClick={handleSync}
             disabled={syncing}
-            className="inline-flex items-center gap-2 px-5 py-3 rounded-xl text-white bg-gradient-to-r from-blue-600 to purple-600 hover:from-blue-700 hover:to-purple-700 shadow-lg disabled:opacity-50"
+            className="inline-flex items-center gap-2 px-5 py-3 rounded-xl text-white bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-700 hover:to-purple-700 shadow-lg disabled:opacity-50"
           >
             <RefreshCw className={`h-5 w-5 ${syncing ? 'animate-spin' : ''}`} />
             {syncing ? 'Sincronizando…' : 'Sincronizar ahora'}
