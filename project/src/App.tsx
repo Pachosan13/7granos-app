@@ -2,7 +2,7 @@ import { BrowserRouter, Routes, Route } from 'react-router-dom';
 
 // ✅ Todos como named imports (salvo Dashboard, que va como default)
 import { Layout } from './components/Layout';
-import Dashboard from './pages/Dashboard';                 // <-- default import
+import Dashboard from './pages/Dashboard';
 import { VentasPage } from './pages/VentasPage';
 import { AdminLayout } from './pages/admin/AdminLayout';
 import { CapturaComprasPage } from './pages/compras/CapturaComprasPage';
