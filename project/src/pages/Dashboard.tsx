@@ -28,9 +28,13 @@ function addDays(ymd: string, days: number) {
   return `${yy}-${mm}-${dd}`;
 }
 
-export default function TableroPage() {
-  const { sucursales, sucursalSeleccionada, getFilteredSucursalIds } = useAuthOrg();
-  const functionsBase = useMemo(() => getFunctionsBase(), []);
+export function Dashboard() {
+  return (
+    <div className="p-8">
+      <h1 className="text-2xl font-semibold">Dashboard</h1>
+    </div>
+  );
+}
 
   // filtros
   const hoy = useMemo(() => todayYMD(), []);
