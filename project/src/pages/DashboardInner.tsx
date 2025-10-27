@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Building2, RefreshCw } from 'lucide-react';
 import * as SupaMod from '../lib/supabase';
 import * as AuthOrgMod from '../context/AuthOrgContext';
@@ -18,7 +18,7 @@ import { debugLog, getFunctionsBase } from '../utils/diagnostics';
 
 type SerieRow = { dia: string; fecha: string; ventas: number; tickets: number };
 
-/* ========= helpers de fecha ========= */
+/** Helpers de fecha */
 function todayYMD(tz = 'America/Panama') {
   const d = new Date(new Date().toLocaleString('en-US', { timeZone: tz }));
   const y = d.getFullYear();
@@ -37,9 +37,8 @@ function addDays(ymd: string, days: number) {
   return `${yy}-${mm}-${dd}`;
 }
 
-/* ========= dependencias (deben declararse ANTES de usarlas) ========= */
+/** Resolvers únicos (sin .default) */
 const supabase = (SupaMod as any).supabase;
-
 const useAuthOrg =
   (AuthOrgMod as any).useAuthOrg ??
   (() => {
@@ -49,9 +48,17 @@ const useAuthOrg =
 
 const KPICard =
   (KPICardMod as any).KPICard ??
-  (({ title, value, prefix }: any) => ( ... ));
+  (({ title, value, prefix }: any) => (
+    <div className="rounded-xl border p-4">
+      <div className="text-sm text-slate-500">{title}</div>
+      <div className="text-2xl font-semibold">
+        {prefix ?? ''}
+        {typeof value === 'number' ? value.toLocaleString() : String(value ?? '—')}
+      </div>
+    </div>
+  ));
 
-/* ========= componente ========= */
+/** ========= componente ========= */
 export default function DashboardInner() {
   const { sucursales, sucursalSeleccionada, getFilteredSucursalIds } = useAuthOrg();
   const functionsBase = useMemo(() => getFunctionsBase(), []);
@@ -106,7 +113,7 @@ export default function DashboardInner() {
           acc.ventas += Number(r.ventas_brutas ?? 0);
           acc.tickets += Number(r.tickets ?? 0);
           acc.margen += Number(r.margen_bruto ?? 0);
-          acc.clientes += 0; // reemplazar cuando exista métrica real
+          acc.clientes += 0;
           return acc;
         },
         { ventas: 0, tickets: 0, margen: 0, clientes: 0 }
@@ -167,7 +174,7 @@ export default function DashboardInner() {
   ]);
 
   const handleSync = useCallback(async () => {
-    const base = getFunctionsBase();
+    const base = functionsBase;
     if (!base) return;
     setSyncing(true);
     try {
@@ -181,7 +188,7 @@ export default function DashboardInner() {
     } finally {
       setSyncing(false);
     }
-  }, [cargarDatos]);
+  }, [functionsBase, cargarDatos]);
 
   useEffect(() => {
     cargarDatos();
@@ -284,7 +291,7 @@ export default function DashboardInner() {
                 <YAxis yAxisId="right" orientation="right" stroke="#6b7280" fontSize={12} width={70} />
                 <Tooltip
                   formatter={(v: number, name) =>
-                    name === 'Ventas' ? formatCurrencyUSD(v) : v.toLocaleString()
+                    name === 'Ventas' ? formatCurrencyUSD(v) : (v as number).toLocaleString()
                   }
                   labelFormatter={(label) => `Día: ${label}`}
                 />
