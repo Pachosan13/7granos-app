@@ -1,4 +1,3 @@
-// src/pages/Dashboard.tsx
 import React, { Component, Suspense } from 'react';
 
 /** ErrorBoundary: evita que un error dentro de Dashboard tumbe toda la app */
