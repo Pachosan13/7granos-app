@@ -1,9 +1,8 @@
-// src/pages/DashboardInner.tsx
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Building2, RefreshCw } from 'lucide-react';
-import { supabase } from '../lib/supabase';
-import { useAuthOrg } from '../context/AuthOrgContext';
-import { KPICard } from '../components/KPICard';
+import * as SupaMod from '../lib/supabase';
+import * as AuthOrgMod from '../context/AuthOrgContext';
+import * as KPICardMod from '../components/KPICard';
 import { formatCurrencyUSD, formatDateDDMMYYYY } from '../lib/format';
 import {
   ResponsiveContainer,
@@ -150,6 +149,28 @@ export default function DashboardInner() {
     selectedSucursalName,
     getFilteredSucursalIds,
   ]);
+
+  const supabase = (SupaMod as any).supabase ?? SupaMod.default;
+const useAuthOrg =
+  (AuthOrgMod as any).useAuthOrg ??
+  AuthOrgMod.default ??
+  (() => {
+    console.warn('useAuthOrg no encontrado; devolviendo stub');
+    return { sucursales: [], sucursalSeleccionada: null, getFilteredSucursalIds: () => [] };
+  });
+
+const KPICard =
+  (KPICardMod as any).KPICard ??
+  KPICardMod.default ??
+  (({ title, value, prefix }: any) => (
+    <div className="rounded-xl border p-4">
+      <div className="text-sm text-slate-500">{title}</div>
+      <div className="text-2xl font-semibold">
+        {prefix ?? ''}
+        {typeof value === 'number' ? value.toLocaleString() : String(value ?? '—')}
+      </div>
+    </div>
+  ));
 
   const handleSync = useCallback(async () => {
     const base = getFunctionsBase();
