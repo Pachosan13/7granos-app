@@ -1,28 +1,34 @@
 import { BrowserRouter, Routes, Route } from 'react-router-dom';
 
-// ✅ Todos como named imports (salvo Dashboard, que va como default)
-import { Layout } from './components/Layout';
+// ✅ Defaults
+import Layout from './components/Layout';
 import Dashboard from './pages/Dashboard';
-import { VentasPage } from './pages/VentasPage';
-import { AdminLayout } from './pages/admin/AdminLayout';
+import VentasPage from './pages/VentasPage';
+import AdminLayout from './pages/admin/AdminLayout';
 import CapturaComprasPage from './pages/compras/CapturaComprasPage';
-import { ProtectedRoute } from './components/ProtectedRoute';
-import { Contabilidad } from './pages/Contabilidad';
-import { IniciarSesion } from './pages/Auth/IniciarSesion';
+import ProtectedRoute from './components/ProtectedRoute';
+import Contabilidad from './pages/Contabilidad';
+import IniciarSesion from './pages/Auth/IniciarSesion';
 
-console.log({
-  Layout: typeof Layout,
-  Dashboard: typeof Dashboard,
-  VentasPage: typeof VentasPage,
-  Periodos: typeof Periodos,
-  AdminLayout: typeof AdminLayout,
-  CapturaComprasPage: typeof CapturaComprasPage
-});
-
-// Payroll (UI read-only, detrás de feature flags)
+// ✅ Named
 import { Periodos } from './pages/payroll/Periodos';
 import { EmpleadosPage } from './pages/importar/Empleados';
-import { AttendancePage } from './payroll/AttendancePage'; // <-- ruta real
+import { AttendancePage } from './payroll/AttendancePage'; // ruta real
+
+// (opcional) Diagnóstico: ver si algo viene undefined
+// console.log({
+//   Layout: typeof Layout,
+//   Dashboard: typeof Dashboard,
+//   VentasPage: typeof VentasPage,
+//   Periodos: typeof Periodos,
+//   AdminLayout: typeof AdminLayout,
+//   CapturaComprasPage: typeof CapturaComprasPage,
+//   ProtectedRoute: typeof ProtectedRoute,
+//   Contabilidad: typeof Contabilidad,
+//   IniciarSesion: typeof IniciarSesion,
+//   EmpleadosPage: typeof EmpleadosPage,
+//   AttendancePage: typeof AttendancePage,
+// });
 
 export const App = () => (
   <BrowserRouter basename={import.meta.env.BASE_URL}>
