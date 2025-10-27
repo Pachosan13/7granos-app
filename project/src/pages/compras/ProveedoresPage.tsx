@@ -7,8 +7,7 @@ import * as AuthOrgMod from '../../context/AuthOrgContext';
 /** Resolver robusto del contexto (default o named) */
 const useAuthOrg =
   (AuthOrgMod as any).useAuthOrg ??
-  AuthOrgMod.default ??
-  (() => ({ sucursalSeleccionada: null, orgActual: null }));
+  (() => ({ sucursalSeleccionada: null, sucursales: [] }));
 
 type Proveedor = {
   id: string;
