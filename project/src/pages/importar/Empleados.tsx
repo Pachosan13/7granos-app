@@ -19,8 +19,6 @@ export const EmpleadosPage = () => {
   const [success, setSuccess] = useState('');
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-export { EmpleadosPage as EmployeesPage } from '../importar/Empleados';
-
   // Drag & Drop handlers
   const handleDrag = (e: React.DragEvent) => {
     e.preventDefault();
