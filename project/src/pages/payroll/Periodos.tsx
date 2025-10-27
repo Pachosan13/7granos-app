@@ -12,7 +12,6 @@ import * as AuthOrgMod from '../../context/AuthOrgContext';
  */
 const useAuthOrg =
   (AuthOrgMod as any).useAuthOrg ??
-  AuthOrgMod.default ??
   (() => ({ sucursalSeleccionada: null }));
 
 /** ────────────────────────────────────────────────────────────────────────────
