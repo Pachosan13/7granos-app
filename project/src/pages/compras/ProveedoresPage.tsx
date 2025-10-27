@@ -1,13 +1,18 @@
 // src/pages/compras/ProveedoresPage.tsx
 import { useEffect, useMemo, useState } from 'react';
-import { supabase } from '../../lib/supabase';
+import * as SupaMod from '../../lib/supabase';
 import { Plus, Edit3, Check, X, Search, RefreshCw } from 'lucide-react';
 import * as AuthOrgMod from '../../context/AuthOrgContext';
 
-/** Resolver robusto del contexto (default o named) */
+/** ───────────────────────────────────────────────────────────────
+ * Resolver robusto del contexto (sin .default)
+ * ───────────────────────────────────────────────────────────────
+ */
+const supabase = (SupaMod as any).supabase;
+
 const useAuthOrg =
   (AuthOrgMod as any).useAuthOrg ??
-  (() => ({ sucursalSeleccionada: null, sucursales: [] }));
+  (() => ({ sucursalSeleccionada: null, orgActual: null, sucursales: [] }));
 
 type Proveedor = {
   id: string;
@@ -19,7 +24,7 @@ type Proveedor = {
 };
 
 export default function ProveedoresPage() {
-  const { sucursalSeleccionada, orgActual } = useAuthOrg?.() ?? {};
+  const { sucursalSeleccionada, orgActual } = useAuthOrg();
 
   const [rows, setRows] = useState<Proveedor[]>([]);
   const [loading, setLoading] = useState(true);
@@ -102,7 +107,7 @@ export default function ProveedoresPage() {
   const filtered = useMemo(() => {
     const t = q.trim().toLowerCase();
     if (!t) return rows;
-    return rows.filter(p =>
+    return rows.filter((p) =>
       (p.nombre || '').toLowerCase().includes(t) ||
       (p.ruc || '').toLowerCase().includes(t) ||
       (p.contacto?.tel || '').toLowerCase().includes(t) ||
@@ -117,7 +122,7 @@ export default function ProveedoresPage() {
       const payload: any = {
         nombre: nombre.trim(),
         ruc: ruc.trim() || null,
-        contacto: (tel || email) ? { tel: tel || null, email: email || null } : null,
+        contacto: tel || email ? { tel: tel || null, email: email || null } : null,
         activo,
       };
 
@@ -152,7 +157,7 @@ export default function ProveedoresPage() {
       .update({ activo: !p.activo })
       .eq('id', p.id);
     if (!error)
-      setRows(rows.map(r => (r.id === p.id ? { ...r, activo: !p.activo } : r)));
+      setRows(rows.map((r) => (r.id === p.id ? { ...r, activo: !p.activo } : r)));
   };
 
   /** ── Render ───────────────────────────────────────────────────────────── */
@@ -174,7 +179,7 @@ export default function ProveedoresPage() {
           <input
             placeholder="Buscar por nombre, RUC, teléfono o email…"
             value={q}
-            onChange={e => setQ(e.target.value)}
+            onChange={(e) => setQ(e.target.value)}
             className="w-full pl-8 pr-3 py-2 border rounded-lg focus:ring-2 focus:ring-accent/40"
           />
         </div>
@@ -211,24 +216,20 @@ export default function ProveedoresPage() {
                 </td>
               </tr>
             ) : (
-              filtered.map(p => (
+              filtered.map((p) => (
                 <tr key={p.id} className="border-t hover:bg-accent/5 transition">
                   <td className="p-3">{p.nombre}</td>
                   <td className="p-3">{p.ruc || '—'}</td>
                   <td className="p-3">
                     {p.contacto?.tel || p.contacto?.email
-                      ? [p.contacto?.tel, p.contacto?.email]
-                          .filter(Boolean)
-                          .join(' · ')
+                      ? [p.contacto?.tel, p.contacto?.email].filter(Boolean).join(' · ')
                       : '—'}
                   </td>
                   <td className="p-3">
                     <span
                       onClick={() => toggleActivo(p)}
                       className={`inline-block px-2 py-0.5 rounded cursor-pointer text-xs ${
-                        p.activo
-                          ? 'bg-green-100 text-green-700'
-                          : 'bg-slate-100 text-slate-500'
+                        p.activo ? 'bg-green-100 text-green-700' : 'bg-slate-100 text-slate-500'
                       }`}
                       title="Click para activar/desactivar"
                     >
@@ -263,7 +264,7 @@ export default function ProveedoresPage() {
                 <label className="text-xs text-slate-600">Nombre *</label>
                 <input
                   value={nombre}
-                  onChange={e => setNombre(e.target.value)}
+                  onChange={(e) => setNombre(e.target.value)}
                   className="w-full border rounded px-2 py-1"
                 />
               </div>
@@ -271,7 +272,7 @@ export default function ProveedoresPage() {
                 <label className="text-xs text-slate-600">RUC</label>
                 <input
                   value={ruc}
-                  onChange={e => setRuc(e.target.value)}
+                  onChange={(e) => setRuc(e.target.value)}
                   className="w-full border rounded px-2 py-1"
                 />
               </div>
@@ -279,7 +280,7 @@ export default function ProveedoresPage() {
                 <label className="text-xs text-slate-600">Teléfono</label>
                 <input
                   value={tel}
-                  onChange={e => setTel(e.target.value)}
+                  onChange={(e) => setTel(e.target.value)}
                   className="w-full border rounded px-2 py-1"
                 />
               </div>
@@ -287,7 +288,7 @@ export default function ProveedoresPage() {
                 <label className="text-xs text-slate-600">Email</label>
                 <input
                   value={email}
-                  onChange={e => setEmail(e.target.value)}
+                  onChange={(e) => setEmail(e.target.value)}
                   className="w-full border rounded px-2 py-1"
                 />
               </div>
@@ -295,7 +296,7 @@ export default function ProveedoresPage() {
                 <input
                   type="checkbox"
                   checked={activo}
-                  onChange={e => setActivo(e.target.checked)}
+                  onChange={(e) => setActivo(e.target.checked)}
                 />
                 <span className="text-sm">Activo</span>
               </label>
