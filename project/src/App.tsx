@@ -1,7 +1,8 @@
-import React, { Component, ComponentType } from 'react';
+// src/App.tsx
+import React, { ComponentType } from 'react';
 import { BrowserRouter, Routes, Route } from 'react-router-dom';
 
-/** ------- Utils ------- **/
+/** Util para elegir default o named sin romper */
 function pick<T extends ComponentType<any>>(
   mod: Record<string, any>,
   pref: Array<keyof typeof mod>,
@@ -11,82 +12,38 @@ function pick<T extends ComponentType<any>>(
     const v = (mod as any)[k as string];
     if (typeof v === 'function') return v as T;
   }
-  console.error(`❌ ${name} undefined. Module keys:`, Object.keys(mod));
+  console.warn(`❌ ${name} undefined. Module keys:`, Object.keys(mod));
   const Fallback: ComponentType<any> = () => (
-    <div style={{ padding: 24, color: '#b91c1c' }}>
-      <strong>Componente faltante:</strong> {name}
+    <div style={{ padding: 24 }}>
+      <h3 style={{ marginTop: 0 }}>Vista no disponible: {name}</h3>
+      <p>El módulo no exporta el componente esperado. Revisa default/named export.</p>
     </div>
   );
   return Fallback as T;
 }
 
-class RouteErrorBoundary extends Component<{ name: string }, { error?: any }> {
-  constructor(props: { name: string }) {
-    super(props);
-    this.state = { error: undefined };
-  }
-  static getDerivedStateFromError(error: any) {
-    return { error };
-  }
-  componentDidCatch(error: any, info: any) {
-    console.error(`💥 Error renderizando ${this.props.name}`, error, info);
-  }
-  render() {
-    if (this.state.error) {
-      return (
-        <div style={{ padding: 24, background: '#fde68a', borderRadius: 8 }}>
-          <h3 style={{ color: '#b91c1c', margin: 0 }}>
-            Error al renderizar: {this.props.name}
-          </h3>
-          <pre style={{ whiteSpace: 'pre-wrap' }}>
-            {(this.state.error && String(this.state.error)) || 'Unknown'}
-          </pre>
-        </div>
-      );
-    }
-    return this.props.children as any;
-  }
-}
+/** Helper de feature flags: solo oculta si es 'false' explícito */
+const ff = (v: string | undefined) => (v ?? '').toLowerCase() !== 'false';
 
-function safeElement(Comp: ComponentType<any>, name: string, props?: any) {
-  return (
-    <RouteErrorBoundary name={name}>
-      <Comp {...props} />
-    </RouteErrorBoundary>
-  );
-}
-
-/** ------- Imports como namespace (robustos) ------- **/
+/** Imports robustos en modo namespace */
 import * as LayoutMod from './components/Layout';
 import * as DashboardMod from './pages/Dashboard';
 import * as VentasPageMod from './pages/VentasPage';
 import * as AdminLayoutMod from './pages/admin/AdminLayout';
 import * as CapturaComprasPageMod from './pages/compras/CapturaComprasPage';
-
 import * as ProtectedRouteMod from './components/ProtectedRoute';
 import * as ContabilidadMod from './pages/Contabilidad';
 import * as IniciarSesionMod from './pages/Auth/IniciarSesion';
 
+// Payroll
 import * as PeriodosMod from './pages/payroll/Periodos';
 import * as EmpleadosPageMod from './pages/importar/Empleados';
 import * as AttendancePageMod from './payroll/AttendancePage';
 
-/** ------- Log de keys para ver exports reales ------- **/
-console.log('🔎 Module keys:', {
-  Layout: Object.keys(LayoutMod),
-  Dashboard: Object.keys(DashboardMod),
-  VentasPage: Object.keys(VentasPageMod),
-  AdminLayout: Object.keys(AdminLayoutMod),
-  CapturaComprasPage: Object.keys(CapturaComprasPageMod),
-  ProtectedRoute: Object.keys(ProtectedRouteMod),
-  Contabilidad: Object.keys(ContabilidadMod),
-  IniciarSesion: Object.keys(IniciarSesionMod),
-  Periodos: Object.keys(PeriodosMod),
-  EmpleadosPage: Object.keys(EmpleadosPageMod),
-  AttendancePage: Object.keys(AttendancePageMod),
-});
+// ⚠️ Proveedores: si tu proyecto usa otro nombre/ruta, igual caerá en fallback seguro
+import * as ProveedoresPageMod from './pages/compras/ProveedoresPage';
 
-/** ------- Resolve default/named ------- **/
+/** Resolver componentes (default/named) */
 const Layout = pick(LayoutMod, ['default', 'Layout'], 'Layout');
 const Dashboard = pick(DashboardMod, ['default', 'Dashboard'], 'Dashboard');
 const VentasPage = pick(VentasPageMod, ['default', 'VentasPage'], 'VentasPage');
@@ -96,82 +53,63 @@ const CapturaComprasPage = pick(
   ['default', 'CapturaComprasPage'],
   'CapturaComprasPage'
 );
+const ProtectedRoute = pick(ProtectedRouteMod, ['default', 'ProtectedRoute'], 'ProtectedRoute');
+const Contabilidad = pick(ContabilidadMod, ['default', 'Contabilidad'], 'Contabilidad');
+const IniciarSesion = pick(IniciarSesionMod, ['default', 'IniciarSesion'], 'IniciarSesion');
 
-const ProtectedRoute = pick(
-  ProtectedRouteMod,
-  ['default', 'ProtectedRoute'],
-  'ProtectedRoute'
-);
-const Contabilidad = pick(
-  ContabilidadMod,
-  ['default', 'Contabilidad'],
-  'Contabilidad'
-);
-const IniciarSesion = pick(
-  IniciarSesionMod,
-  ['default', 'IniciarSesion'],
-  'IniciarSesion'
-);
+// Payroll (no ocultes si no hay variable; solo si es 'false')
+const Periodos = pick(PeriodosMod, ['default', 'Periodos'], 'Periodos');
+const EmpleadosPage = pick(EmpleadosPageMod, ['default', 'EmpleadosPage'], 'EmpleadosPage');
+const AttendancePage = pick(AttendancePageMod, ['default', 'AttendancePage'], 'AttendancePage');
 
-const Periodos = pick(PeriodosMod, ['Periodos', 'default'], 'Periodos');
-const EmpleadosPage = pick(
-  EmpleadosPageMod,
-  ['EmpleadosPage', 'default'],
-  'EmpleadosPage'
-);
-const AttendancePage = pick(
-  AttendancePageMod,
-  ['AttendancePage', 'default'],
-  'AttendancePage'
+// Proveedores
+const ProveedoresPage = pick(
+  ProveedoresPageMod,
+  ['default', 'ProveedoresPage', 'Proveedores'],
+  'ProveedoresPage'
 );
 
-/** ------- App ------- **/
 export const App = () => (
   <BrowserRouter basename={import.meta.env.BASE_URL}>
     <Routes>
-      {/* Pública */}
-      <Route path="/login" element={safeElement(IniciarSesion, 'IniciarSesion')} />
+      {/* Ruta pública */}
+      <Route path="/login" element={<IniciarSesion />} />
 
-      {/* Protegidas */}
+      {/* Rutas protegidas */}
       <Route
         path="/*"
-        element={safeElement(ProtectedRoute, 'ProtectedRoute', {
-          children: safeElement(Layout, 'Layout', {
-            children: (
+        element={
+          <ProtectedRoute>
+            <Layout>
               <Routes>
-                <Route path="/" element={safeElement(Dashboard, 'Dashboard')} />
-                <Route path="/ventas" element={safeElement(VentasPage, 'VentasPage')} />
-                <Route
-                  path="/contabilidad"
-                  element={safeElement(Contabilidad, 'Contabilidad')}
-                />
-                <Route path="/admin/*" element={safeElement(AdminLayout, 'AdminLayout')} />
-                <Route
-                  path="/compras/captura"
-                  element={safeElement(CapturaComprasPage, 'CapturaComprasPage')}
-                />
+                <Route path="/" element={<Dashboard />} />
+                <Route path="/ventas" element={<VentasPage />} />
+                <Route path="/contabilidad" element={<Contabilidad />} />
 
-                {/* Payroll (feature flags) */}
-                {import.meta.env.VITE_FF_PAYROLL_PERIODS === 'true' && (
-                  <Route path="/payroll" element={safeElement(Periodos, 'Periodos')} />
+                {/* Compras */}
+                <Route path="/compras/captura" element={<CapturaComprasPage />} />
+                <Route path="/compras/proveedores" element={<ProveedoresPage />} />
+
+                {/* Administración (si ya la usabas así) */}
+                <Route path="/admin/*" element={<AdminLayout />} />
+
+                {/* Payroll (no se oculta a menos que flag sea 'false') */}
+                {ff(import.meta.env.VITE_FF_PAYROLL_PERIODS) && (
+                  <Route path="/payroll" element={<Periodos />} />
                 )}
-                {import.meta.env.VITE_FF_PAYROLL_EMPLOYEES === 'true' && (
-                  <Route
-                    path="/payroll/empleados"
-                    element={safeElement(EmpleadosPage, 'EmpleadosPage')}
-                  />
+                {ff(import.meta.env.VITE_FF_PAYROLL_EMPLOYEES) && (
+                  <Route path="/payroll/empleados" element={<EmpleadosPage />} />
                 )}
-                {import.meta.env.VITE_FF_PAYROLL_MARCACIONES === 'true' && (
-                  <Route
-                    path="/payroll/marcaciones"
-                    element={safeElement(AttendancePage, 'AttendancePage')}
-                  />
+                {ff(import.meta.env.VITE_FF_PAYROLL_MARCACIONES) && (
+                  <Route path="/payroll/marcaciones" element={<AttendancePage />} />
                 )}
               </Routes>
-            ),
-          }),
-        })}
+            </Layout>
+          </ProtectedRoute>
+        }
       />
     </Routes>
   </BrowserRouter>
 );
+
+export default App;
