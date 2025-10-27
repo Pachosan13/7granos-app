@@ -1,15 +1,21 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { ArrowLeft, Building2, Play, RefreshCw } from 'lucide-react';
+import {
+  ArrowLeft,
+  Building2,
+  RefreshCw,
+  PlayCircle,
+  AlertCircle,
+  Loader2,
+} from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import * as AuthOrgMod from '../../context/AuthOrgContext';
 import { supabase } from '../../lib/supabase';
 import { formatDateDDMMYYYY } from '../../lib/format';
 
 /* ────────────────────────────────────────────────────────────────────────────
-   Contexto (resuelve default/named y provee fallback seguro)
+   Contexto seguro
 --------------------------------------------------------------------------- */
 type Sucursal = { id: string; nombre: string };
-
 const useAuthOrg =
   (AuthOrgMod as any).useAuthOrg ??
   AuthOrgMod.default ??
@@ -20,24 +26,23 @@ const useAuthOrg =
   }));
 
 /* ────────────────────────────────────────────────────────────────────────────
-   Tipos
+   Tipos y helpers
 --------------------------------------------------------------------------- */
 type EstadoPeriodo = 'borrador' | 'calculado' | 'aprobado' | 'pagado';
-
-type Periodo = {
+interface Periodo {
   id: string;
   sucursal_id: string;
-  periodo_mes: number; // 1..12
-  periodo_ano: number; // YYYY
-  fecha_inicio: string; // ISO date
-  fecha_fin: string;    // ISO date
+  periodo_mes: number;
+  periodo_ano: number;
+  fecha_inicio: string;
+  fecha_fin: string;
   estado: EstadoPeriodo;
   created_at: string;
-};
+}
 
 const MESES = [
-  'Enero','Febrero','Marzo','Abril','Mayo','Junio',
-  'Julio','Agosto','Septiembre','Octubre','Noviembre','Diciembre',
+  'Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio',
+  'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre',
 ];
 
 const ESTADOS_LABELS: Record<EstadoPeriodo, string> = {
@@ -53,9 +58,6 @@ const ESTADOS_COLORS: Record<EstadoPeriodo, string> = {
   pagado: 'bg-purple-100 text-purple-800',
 };
 
-/* ────────────────────────────────────────────────────────────────────────────
-   Helpers
---------------------------------------------------------------------------- */
 function getQueryParam(name: string): string | null {
   if (typeof window === 'undefined') return null;
   const url = new URL(window.location.href);
@@ -63,19 +65,21 @@ function getQueryParam(name: string): string | null {
 }
 
 /* ────────────────────────────────────────────────────────────────────────────
-   Componente
+   Componente principal
 --------------------------------------------------------------------------- */
 export default function Calcular() {
   const navigate = useNavigate();
   const { sucursales, sucursalSeleccionada, setSucursalSeleccionada } = useAuthOrg();
-
   const periodoId = useMemo(() => getQueryParam('periodo'), []);
+
   const [periodo, setPeriodo] = useState<Periodo | null>(null);
   const [loading, setLoading] = useState(true);
-  const [calculando, setCalculando] = useState(false);
   const [error, setError] = useState('');
+  const [calculando, setCalculando] = useState(false);
+  const [detalle, setDetalle] = useState<any[]>([]);
+  const [resumen, setResumen] = useState<any>(null);
 
-  /* Cargar datos del período */
+  /* ── Cargar período y detalle ─────────────────────────────────────────── */
   const loadPeriodo = useCallback(async () => {
     try {
       if (!periodoId) {
@@ -86,18 +90,34 @@ export default function Calcular() {
       setLoading(true);
       setError('');
 
-      const { data, error } = await supabase
+      const { data: pData, error: pErr } = await supabase
         .from('hr_periodo')
         .select('*')
         .eq('id', periodoId)
         .single();
 
-      if (error) throw error;
-      setPeriodo(data as Periodo);
+      if (pErr) throw pErr;
+      setPeriodo(pData as Periodo);
+
+      // Intentar cargar empleados o líneas si existen
+      const { data: detData, error: detErr } = await supabase
+        .from('hr_periodo_detalle')
+        .select('*')
+        .eq('periodo_id', periodoId);
+      if (detErr && detErr.code !== '42P01') throw detErr;
+
+      setDetalle(detData || []);
+
+      // Cargar resumen si existe vista
+      const { data: resumenData } = await supabase
+        .from('v_ui_resumen_planilla')
+        .select('*')
+        .eq('periodo_id', periodoId)
+        .maybeSingle();
+      setResumen(resumenData ?? null);
     } catch (e: any) {
       console.error('[Calcular] loadPeriodo error', e);
-      setError(e?.message ?? 'Error cargando el período');
-      setPeriodo(null);
+      setError(e?.message ?? 'Error cargando período');
     } finally {
       setLoading(false);
     }
@@ -105,7 +125,28 @@ export default function Calcular() {
 
   useEffect(() => void loadPeriodo(), [loadPeriodo]);
 
-  /* Cambiar sucursal desde el header y volver a la lista */
+  /* ── Calcular planilla (RPC) ───────────────────────────────────────────── */
+  const handleCalcular = useCallback(async () => {
+    try {
+      if (!periodo) return;
+      setCalculando(true);
+      setError('');
+
+      // Si existe una RPC real, reemplaza aquí:
+      // const { error } = await supabase.rpc('rpc_hr_calcular_periodo', { p_periodo_id: periodo.id });
+      // if (error) throw error;
+
+      await new Promise((r) => setTimeout(r, 800)); // Simulación
+      await loadPeriodo();
+    } catch (e: any) {
+      console.error('[Calcular] calcular error', e);
+      setError(e?.message ?? 'Error al calcular');
+    } finally {
+      setCalculando(false);
+    }
+  }, [periodo, loadPeriodo]);
+
+  /* ── Cambio de sucursal ───────────────────────────────────────────────── */
   function handleChangeSucursal(e: React.ChangeEvent<HTMLSelectElement>) {
     const newId = e.target.value;
     const nueva = sucursales.find((s) => String(s.id) === String(newId));
@@ -116,33 +157,10 @@ export default function Calcular() {
     navigate('/payroll');
   }
 
-  /* Acción Calcular (placeholder seguro) */
-  const handleCalcular = useCallback(async () => {
-    try {
-      if (!periodo) return;
-      setCalculando(true);
-      setError('');
-
-      // 🔒 Mantengo esto como placeholder seguro.
-      // Si ya tienes una RPC, reemplaza por:
-      // const { error } = await supabase.rpc('rpc_hr_calcular_periodo', { p_periodo_id: periodo.id });
-      // if (error) throw error;
-
-      // Simular un "recalcular": por ahora solo refrescamos el período.
-      await new Promise((r) => setTimeout(r, 600));
-      await loadPeriodo();
-    } catch (e: any) {
-      console.error('[Calcular] calcular error', e);
-      setError(e?.message ?? 'Error al calcular');
-    } finally {
-      setCalculando(false);
-    }
-  }, [periodo, loadPeriodo]);
-
-  /* UI */
+  /* ── UI ────────────────────────────────────────────────────────────────── */
   return (
     <div className="p-6 space-y-6">
-      {/* Header: volver + selector sucursal */}
+      {/* HEADER ─────────────────────────────────────────────────────────── */}
       <div className="flex items-center justify-between">
         <button
           onClick={() => navigate('/payroll')}
@@ -176,16 +194,16 @@ export default function Calcular() {
         </div>
       </div>
 
-      {/* Estado de carga / error */}
+      {/* ESTADOS ─────────────────────────────────────────────────────────── */}
       {loading ? (
         <div className="bg-white rounded-2xl shadow p-8 text-center">
-          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-gray-700 mx-auto mb-3"></div>
+          <Loader2 className="animate-spin h-8 w-8 text-accent mx-auto mb-3" />
           <p>Cargando período…</p>
         </div>
       ) : error ? (
         <div className="bg-red-50 border-l-4 border-red-500 rounded-xl p-4">
           <div className="flex items-center gap-2 text-red-700">
-            <RefreshCw className="h-4 w-4" />
+            <AlertCircle className="h-5 w-5" />
             <span className="font-medium">{error}</span>
           </div>
         </div>
@@ -195,7 +213,7 @@ export default function Calcular() {
         </div>
       ) : (
         <>
-          {/* Resumen del período */}
+          {/* ── Resumen del período ───────────────────────────────────────── */}
           <div className="bg-white rounded-2xl shadow p-6 border">
             <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
               <div>
@@ -206,7 +224,9 @@ export default function Calcular() {
                   {formatDateDDMMYYYY(periodo.fecha_inicio)} — {formatDateDDMMYYYY(periodo.fecha_fin)}
                 </p>
                 <div className="mt-2">
-                  <span className={`px-3 py-1 rounded-full text-xs font-medium ${ESTADOS_COLORS[periodo.estado]}`}>
+                  <span
+                    className={`px-3 py-1 rounded-full text-xs font-medium ${ESTADOS_COLORS[periodo.estado]}`}
+                  >
                     {ESTADOS_LABELS[periodo.estado]}
                   </span>
                 </div>
@@ -218,20 +238,86 @@ export default function Calcular() {
                   disabled={calculando}
                   className="inline-flex items-center gap-2 px-5 py-3 rounded-xl text-white bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-700 hover:to-purple-700 shadow disabled:opacity-50"
                 >
-                  <Play className={`h-5 w-5 ${calculando ? 'animate-spin' : ''}`} />
+                  <PlayCircle className={`h-5 w-5 ${calculando ? 'animate-spin' : ''}`} />
                   {calculando ? 'Calculando…' : 'Calcular planilla'}
+                </button>
+                <button
+                  onClick={loadPeriodo}
+                  className="inline-flex items-center gap-2 px-5 py-3 rounded-xl border hover:bg-gray-50 shadow"
+                >
+                  <RefreshCw className="h-4 w-4" />
+                  Refrescar
                 </button>
               </div>
             </div>
           </div>
 
-          {/* Contenido específico del cálculo */}
+          {/* ── Detalle de empleados ─────────────────────────────────────── */}
           <div className="bg-white rounded-2xl shadow p-6 border">
-            {/* Aquí va tu tabla de empleados, conceptos, totales, etc. */}
-            <p className="text-gray-600">
-              Aquí aparecerá el detalle de la planilla (empleados, conceptos y totales) para el período seleccionado.
-            </p>
+            <h3 className="text-xl font-semibold mb-4">Empleados del período</h3>
+
+            {detalle.length === 0 ? (
+              <p className="text-gray-500">No hay registros de detalle para este período.</p>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="min-w-full text-sm">
+                  <thead className="bg-gray-100 text-gray-700">
+                    <tr>
+                      <th className="px-4 py-2 text-left">Empleado</th>
+                      <th className="px-4 py-2 text-right">Salario</th>
+                      <th className="px-4 py-2 text-right">Horas</th>
+                      <th className="px-4 py-2 text-right">Total</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {detalle.map((row: any, i) => (
+                      <tr key={i} className="border-b">
+                        <td className="px-4 py-2">{row.empleado_nombre ?? row.empleado_id}</td>
+                        <td className="px-4 py-2 text-right">
+                          {Number(row.salario_base ?? 0).toLocaleString('en-US', { minimumFractionDigits: 2 })}
+                        </td>
+                        <td className="px-4 py-2 text-right">{row.horas ?? '—'}</td>
+                        <td className="px-4 py-2 text-right font-semibold">
+                          {Number(row.total ?? 0).toLocaleString('en-US', { minimumFractionDigits: 2 })}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
           </div>
+
+          {/* ── Resumen final ─────────────────────────────────────────────── */}
+          {resumen && (
+            <div className="bg-white rounded-2xl shadow p-6 border">
+              <h3 className="text-xl font-semibold mb-4">Resumen de totales</h3>
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-6">
+                <div>
+                  <div className="text-gray-500 text-sm">Empleados</div>
+                  <div className="text-lg font-semibold">{resumen.total_empleados ?? '—'}</div>
+                </div>
+                <div>
+                  <div className="text-gray-500 text-sm">Salarios</div>
+                  <div className="text-lg font-semibold">
+                    ${Number(resumen.total_salarios ?? 0).toLocaleString('en-US', { minimumFractionDigits: 2 })}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-gray-500 text-sm">Deducciones</div>
+                  <div className="text-lg font-semibold">
+                    ${Number(resumen.total_deducciones ?? 0).toLocaleString('en-US', { minimumFractionDigits: 2 })}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-gray-500 text-sm">Total Neto</div>
+                  <div className="text-lg font-semibold">
+                    ${Number(resumen.total_neto ?? 0).toLocaleString('en-US', { minimumFractionDigits: 2 })}
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
         </>
       )}
     </div>
