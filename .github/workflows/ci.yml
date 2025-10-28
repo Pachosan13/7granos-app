@@ -83,6 +83,10 @@ jobs:
           else
             echo "found=false" >> $GITHUB_OUTPUT
           fi
+          
+      - name: Install Playwright browsers
+        working-directory: ${{ env.APP_PATH }}
+        run: npx playwright install --with-deps
 
       - name: Install Playwright
         if: steps.has_pw.outputs.found == 'true'
