@@ -7,11 +7,14 @@ import {
   Loader2,
   PlayCircle,
   RefreshCw,
+  Users,
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import * as AuthOrgMod from '../../context/AuthOrgContext';
 import { supabase, shouldUseDemoMode } from '../../lib/supabase';
 import { formatDateDDMMYYYY } from '../../lib/format';
+import { functionsBase } from '../../lib/functionsBase';
+import { ToastContainer, ToastItem, createToast, dismissToast } from '../../components/Toast';
 
 /* ────────────────────────────────────────────────────────────────────────────
    Contexto seguro
@@ -22,6 +25,8 @@ type UseAuthOrgResult = {
   sucursales: Sucursal[];
   sucursalSeleccionada: Sucursal | null;
   setSucursalSeleccionada: (sucursal: Sucursal | null) => void;
+  isAdmin?: boolean;
+  viewMode?: string;
 };
 
 type AuthOrgModule = {
@@ -40,6 +45,8 @@ const useAuthOrg =
     setSucursalSeleccionada: (sucursal: Sucursal | null) => {
       void sucursal;
     },
+    isAdmin: true,
+    viewMode: 'preview',
   }));
 
 /* ────────────────────────────────────────────────────────────────────────────
@@ -149,6 +156,47 @@ function getInitials(name: string | null | undefined) {
     .padEnd(2, '•');
 }
 
+type SyncResultItem = {
+  sucursal_id: string;
+  count?: number;
+  error?: string;
+};
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
+}
+
+function parseSyncResults(payload: unknown): SyncResultItem[] {
+  if (!isRecord(payload)) return [];
+  const maybeResults = payload.results;
+  if (!Array.isArray(maybeResults)) return [];
+
+  return maybeResults
+    .map((entry): SyncResultItem | null => {
+      if (!isRecord(entry) || entry.sucursal_id === undefined || entry.sucursal_id === null) {
+        return null;
+      }
+
+      const normalized: SyncResultItem = {
+        sucursal_id: String(entry.sucursal_id),
+      };
+
+      if (typeof entry.count === 'number') {
+        normalized.count = entry.count;
+      } else if (typeof entry.count === 'string') {
+        const numeric = Number(entry.count);
+        if (Number.isFinite(numeric)) normalized.count = numeric;
+      }
+
+      if (typeof entry.error === 'string') {
+        normalized.error = entry.error;
+      }
+
+      return normalized;
+    })
+    .filter((item): item is SyncResultItem => item !== null);
+}
+
 /* ────────────────────────────────────────────────────────────────────────────
    Mock data (se activa solo si Supabase falla o viene vacío)
 --------------------------------------------------------------------------- */
@@ -189,21 +237,56 @@ const buildMockResumen = (detalle: PeriodoDetalle[]): PeriodoResumen => {
 --------------------------------------------------------------------------- */
 export default function Calcular() {
   const navigate = useNavigate();
-  const { sucursales, sucursalSeleccionada, setSucursalSeleccionada } = useAuthOrg();
+  const {
+    sucursales,
+    sucursalSeleccionada,
+    setSucursalSeleccionada,
+    isAdmin: authIsAdmin,
+  } = useAuthOrg();
   const periodoId = useMemo(() => getQueryParam('periodo'), []);
   const demoMode = useMemo(() => shouldUseDemoMode, []);
+  const vercelEnv = import.meta.env.VITE_VERCEL_ENV as string | undefined;
+  const isPreviewEnv = useMemo(() => {
+    if (import.meta.env.MODE !== 'production') return true;
+    if (demoMode) return true;
+    if (!vercelEnv) return false;
+    return vercelEnv === 'preview' || vercelEnv === 'development';
+  }, [demoMode, vercelEnv]);
+  const isAdmin = Boolean(authIsAdmin);
+  const functionsBaseUrl = useMemo(() => {
+    const envUrl = import.meta.env.VITE_SUPABASE_FUNCTIONS_URL as string | undefined;
+    if (envUrl && typeof envUrl === 'string') {
+      return envUrl.replace(/\/$/, '');
+    }
+    try {
+      return functionsBase().replace(/\/$/, '');
+    } catch (err) {
+      console.warn('[Calcular] functionsBaseUrl no disponible', err);
+      return '';
+    }
+  }, []);
 
   const [periodo, setPeriodo] = useState<Periodo | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [calculando, setCalculando] = useState(false);
   const [detalle, setDetalle] = useState<PeriodoDetalle[]>([]);
+  const [syncingEmpleados, setSyncingEmpleados] = useState(false);
   const [detalleSource, setDetalleSource] = useState<DetalleSource>('hr_periodo_detalle');
   const [resumen, setResumen] = useState<PeriodoResumen | null>(null);
   const [isDemo, setIsDemo] = useState(false);
   const [demoReason, setDemoReason] = useState<string | null>(null);
   const [resolvedViewAvailable, setResolvedViewAvailable] = useState<boolean | null>(null);
   const [resolvedViewStatus, setResolvedViewStatus] = useState<number | null>(null);
+  const [toasts, setToasts] = useState<ToastItem[]>([]);
+
+  const pushToast = useCallback((toast: Omit<ToastItem, 'id'>) => createToast(setToasts, toast), []);
+  const handleDismissToast = useCallback((id: string) => dismissToast(setToasts, id), []);
+  const showSyncButton = useMemo(
+    () => Boolean(periodo?.sucursal_id && (isAdmin || isPreviewEnv)),
+    [isAdmin, isPreviewEnv, periodo?.sucursal_id]
+  );
+
 
   const totals = useMemo(
     () => ({
@@ -393,72 +476,170 @@ export default function Calcular() {
 
   /* ── Calcular planilla (RPC) ───────────────────────────────────────────── */
   const handleCalcular = useCallback(async () => {
-  if (!periodo) return;
-  setCalculando(true);
-  setError('');
+    if (!periodo) return;
+    setCalculando(true);
+    setError('');
 
-  try {
-    // 1) Intenta RPC real si existe
-    const { error: rpcErr } = await supabase.rpc('rpc_hr_calcular_periodo', {
-      p_periodo_id: periodo.id,
-    });
-    if (!rpcErr) {
+    try {
+      // 1) Intenta RPC real si existe
+      const { error: rpcErr } = await supabase.rpc('rpc_hr_calcular_periodo', {
+        p_periodo_id: periodo.id,
+      });
+      if (!rpcErr) {
+        await loadPeriodo();
+        return;
+      }
+
+      // 2) Si no existe la RPC, hace un fallback "seguro" desde el cliente:
+      //    - toma empleados de la sucursal del periodo (si hay maestro)
+      //    - si no hay maestro, usa lo que ya tenga hr_periodo_detalle o crea 3 demo
+      //    - escribe hr_periodo_detalle y recarga
+
+      // intenta leer maestro
+      const { data: empleados } = await supabase
+        .from('hr_empleado')
+        .select('id, nombre, salario_base, sucursal_id')
+        .limit(200);
+
+      // limpia el detalle del período
+      await supabase
+        .from('hr_periodo_detalle')
+        .delete()
+        .eq('periodo_id', periodo.id);
+
+      let rows: any[] = [];
+
+      if (empleados && empleados.length) {
+        const filtrados = empleados.filter((e) =>
+          !periodo.sucursal_id ? true : String(e.sucursal_id) === String(periodo.sucursal_id)
+        );
+        rows = (filtrados.length ? filtrados : empleados).map((e) => ({
+          periodo_id: periodo.id,
+          empleado_id: String(e.id),
+          empleado_nombre: e.nombre ?? e.id,
+          salario_base: Number(e.salario_base ?? 0),
+          horas: 40,
+          total: Number(e.salario_base ?? 0),
+        }));
+      } else {
+        // demo mínimo si no hay maestro
+        rows = [
+          {
+            periodo_id: periodo.id,
+            empleado_id: 'E-001',
+            empleado_nombre: 'Juan Pérez',
+            salario_base: 900,
+            horas: 40,
+            total: 900,
+          },
+          {
+            periodo_id: periodo.id,
+            empleado_id: 'E-002',
+            empleado_nombre: 'María Gómez',
+            salario_base: 850,
+            horas: 38,
+            total: 807.5,
+          },
+          {
+            periodo_id: periodo.id,
+            empleado_id: 'E-003',
+            empleado_nombre: 'Carlos López',
+            salario_base: 1000,
+            horas: 42,
+            total: 1050,
+          },
+        ];
+      }
+
+      if (rows.length) {
+        const { error: insErr } = await supabase.from('hr_periodo_detalle').insert(rows);
+        if (insErr) throw insErr;
+      }
+
       await loadPeriodo();
+    } catch (e: any) {
+      console.error('[Calcular] fallback error', e);
+      setError(e?.message ?? 'Error al calcular');
+    } finally {
+      setCalculando(false);
+    }
+  }, [periodo, loadPeriodo]);
+
+  const handleSyncEmpleados = useCallback(async () => {
+    if (!periodo?.sucursal_id) {
+      pushToast({
+        tone: 'warning',
+        title: 'Selecciona un período válido',
+        description: 'No se encontró la sucursal asociada al período.',
+      });
       return;
     }
 
-    // 2) Si no existe la RPC, hace un fallback "seguro" desde el cliente:
-    //    - toma empleados de la sucursal del periodo (si hay maestro)
-    //    - si no hay maestro, usa lo que ya tenga hr_periodo_detalle o crea 3 demo
-    //    - escribe hr_periodo_detalle y recarga
+    if (!functionsBaseUrl) {
+      pushToast({
+        tone: 'error',
+        title: 'Función no configurada',
+        description: 'Configura VITE_SUPABASE_FUNCTIONS_URL o VITE_SUPABASE_URL para habilitar la sincronización.',
+      });
+      return;
+    }
 
-    // intenta leer maestro
-    const { data: empleados } = await supabase
-      .from('hr_empleado')
-      .select('id, nombre, salario_base, sucursal_id')
-      .limit(200);
+    setSyncingEmpleados(true);
+    try {
+      const endpoint = `${functionsBaseUrl}/sync_empleados`;
+      const response = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ sucursal_id: periodo.sucursal_id }),
+      });
 
-    // limpia el detalle del período
-    await supabase.from('hr_periodo_detalle')
-      .delete()
-      .eq('periodo_id', periodo.id);
-
-    let rows: any[] = [];
-
-    if (empleados && empleados.length) {
-      const filtrados = empleados.filter(e =>
-        !periodo.sucursal_id ? true : String(e.sucursal_id) === String(periodo.sucursal_id)
+      const payload = (await response.json().catch(() => null)) as unknown;
+      const results = parseSyncResults(payload);
+      const currentResult = results.find(
+        (item) => item.sucursal_id === String(periodo.sucursal_id)
       );
-      rows = (filtrados.length ? filtrados : empleados).map(e => ({
-        periodo_id: periodo.id,
-        empleado_id: String(e.id),
-        empleado_nombre: e.nombre ?? e.id,
-        salario_base: Number(e.salario_base ?? 0),
-        horas: 40,
-        total: Number(e.salario_base ?? 0),
-      }));
-    } else {
-      // demo mínimo si no hay maestro
-      rows = [
-        { periodo_id: periodo.id, empleado_id: 'E-001', empleado_nombre: 'Juan Pérez',  salario_base: 900,  horas: 40, total: 900 },
-        { periodo_id: periodo.id, empleado_id: 'E-002', empleado_nombre: 'María Gómez', salario_base: 850,  horas: 38, total: 807.5 },
-        { periodo_id: periodo.id, empleado_id: 'E-003', empleado_nombre: 'Carlos López',salario_base: 1000, horas: 42, total: 1050 },
-      ];
-    }
 
-    if (rows.length) {
-      const { error: insErr } = await supabase.from('hr_periodo_detalle').insert(rows);
-      if (insErr) throw insErr;
-    }
+      const payloadError = isRecord(payload) && typeof payload.error === 'string' ? payload.error : null;
 
-    await loadPeriodo();
-  } catch (e: any) {
-    console.error('[Calcular] fallback error', e);
-    setError(e?.message ?? 'Error al calcular');
-  } finally {
-    setCalculando(false);
-  }
-}, [periodo, loadPeriodo]);
+      if (!response.ok || payloadError || payload === null || (isRecord(payload) && payload.ok === false) || currentResult?.error) {
+        const message = currentResult?.error ?? payloadError ?? `Error HTTP ${response.status}`;
+        throw new Error(message);
+      }
+
+      const count = Number(currentResult?.count ?? 0);
+      pushToast({
+        tone: 'success',
+        title: 'Empleados sincronizados',
+        description:
+          count > 0
+            ? `Se sincronizaron ${count} empleado${count === 1 ? '' : 's'} de la sucursal.`
+            : 'No hubo cambios en la lista de empleados.',
+      });
+
+      const otherErrors = results
+        .filter((item) => item.sucursal_id !== String(periodo.sucursal_id) && item.error)
+        .map((item) => item.error as string);
+
+      if (otherErrors.length > 0) {
+        pushToast({
+          tone: 'warning',
+          title: 'Otras sucursales con errores',
+          description: otherErrors.join(' | '),
+        });
+      }
+
+      await loadPeriodo();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      pushToast({
+        tone: 'error',
+        title: 'Error al sincronizar',
+        description: message || 'No se pudo sincronizar empleados.',
+      });
+    } finally {
+      setSyncingEmpleados(false);
+    }
+  }, [functionsBaseUrl, loadPeriodo, periodo?.sucursal_id, pushToast]);
 
   /* ── Cambio de sucursal ───────────────────────────────────────────────── */
   function handleChangeSucursal(e: React.ChangeEvent<HTMLSelectElement>) {
@@ -522,8 +703,10 @@ export default function Calcular() {
 
   /* ── UI ────────────────────────────────────────────────────────────────── */
   return (
-    <div className="space-y-6 p-6">
-      <BackBar />
+    <>
+      <ToastContainer toasts={toasts} onDismiss={handleDismissToast} />
+      <div className="space-y-6 p-6">
+        <BackBar />
 
       {loading ? (
         <div className="rounded-2xl bg-white p-8 text-center shadow">
@@ -569,7 +752,7 @@ export default function Calcular() {
                 </div>
               </div>
 
-              <div className="flex items-center gap-3">
+              <div className="flex flex-wrap items-center gap-3">
                 <button
                   onClick={handleCalcular}
                   disabled={calculando}
@@ -578,6 +761,17 @@ export default function Calcular() {
                   <PlayCircle className={`h-5 w-5 ${calculando ? 'animate-spin' : ''}`} />
                   {calculando ? 'Calculando…' : 'Calcular planilla'}
                 </button>
+                {showSyncButton && (
+                  <button
+                    onClick={handleSyncEmpleados}
+                    disabled={syncingEmpleados}
+                    className="inline-flex items-center gap-2 rounded-xl border border-indigo-200 bg-indigo-50 px-5 py-3 text-sm font-semibold text-indigo-700 shadow transition hover:bg-indigo-100 disabled:opacity-50"
+                    title="Sincronizar empleados desde INVU"
+                  >
+                    <Users className={`h-4 w-4 ${syncingEmpleados ? 'animate-spin' : ''}`} />
+                    {syncingEmpleados ? 'Sincronizando…' : 'Sincronizar empleados'}
+                  </button>
+                )}
                 <button
                   onClick={loadPeriodo}
                   className="inline-flex items-center gap-2 rounded-xl border px-5 py-3 shadow transition hover:bg-gray-50"
@@ -691,6 +885,7 @@ export default function Calcular() {
           )}
         </>
       )}
-    </div>
+      </div>
+    </>
   );
 }

@@ -1,6 +1,7 @@
 import { Navigate } from 'react-router-dom';
 import { ReactNode } from 'react';
 import { useAuthOrg } from '../context/AuthOrgContext';
+import { shouldUseDemoMode } from '../lib/supabase';
 
 interface Props { children: ReactNode }
 
@@ -48,6 +49,10 @@ export const ProtectedRoute = ({ children }: Props) => {
         </div>
       </div>
     );
+  }
+
+  if (!user && shouldUseDemoMode) {
+    return <>{children}</>;
   }
 
   if (!user) return <Navigate to="/login" replace />;
