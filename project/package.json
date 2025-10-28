@@ -9,6 +9,13 @@
     "lint": "eslint .",
     "preview": "vite preview"
   },
+  "scripts": {
+  "dev": "vite",
+  "build": "vite build",
+  "vercel-build": "vite build",
+  "lint": "eslint .",
+  "preview": "vite preview"
+}
   "dependencies": {
     "@supabase/supabase-js": "^2.57.4",
     "@types/node": "^24.5.0",
