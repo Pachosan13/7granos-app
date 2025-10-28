@@ -12,6 +12,7 @@ import { useNavigate } from 'react-router-dom';
 import * as AuthOrgMod from '../../context/AuthOrgContext';
 import { supabase, shouldUseDemoMode } from '../../lib/supabase';
 import { formatDateDDMMYYYY } from '../../lib/format';
+import { callSupabaseFunction } from '../../lib/functions';
 
 /* ────────────────────────────────────────────────────────────────────────────
    Contexto seguro
