@@ -205,6 +205,14 @@ export default function Calcular() {
   const [resolvedViewAvailable, setResolvedViewAvailable] = useState<boolean | null>(null);
   const [resolvedViewStatus, setResolvedViewStatus] = useState<number | null>(null);
 
+  const showSyncButton =
+    (import.meta as any).env?.VITE_SHOW_SYNC_BUTTON === '1' /* fuerza en CI */
+    || (typeof window !== 'undefined' && (
+         // tu lógica actual de “admin/preview” si tienes una
+         localStorage.getItem('__7gr_admin') === '1' ||
+         window.location.search.includes('admin=1')
+       ));
+  
   const totals = useMemo(
     () => ({
       salario: sum(detalle, 'salario_base'),
