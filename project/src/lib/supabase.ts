@@ -2,41 +2,42 @@
 import { createClient } from '@supabase/supabase-js';
 
 /**
- * Leemos variables tipo Vite (import.meta.env.*).
- * En CI (GitHub Actions), las inyectaremos como ENV (ver workflow más abajo).
+ * Variables de entorno (Vite)
+ * - En GitHub Actions las tomamos desde los "Secrets" que ya creaste.
+ * - En local, puedes tenerlas en .env.local
  */
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL as string | undefined;
 const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined;
 
 /**
- * Flag opcional para forzar modo demo localmente:
- * VITE_DEMO=1 → fuerza fallback sin tocar backend
+ * Bandera de demo (opcional):
+ *  - VITE_DEMO=1 → fuerza modo demo.
+ *  - Si faltan credenciales, también entra en demo automáticamente.
  */
 export const DEMO = import.meta.env.VITE_DEMO === '1';
 
-export const isSupabaseConfigured = !!(supabaseUrl && supabaseAnonKey);
+export const isSupabaseConfigured = Boolean(supabaseUrl && supabaseAnonKey);
 export const shouldUseDemoMode = DEMO || !isSupabaseConfigured;
 
 if (!isSupabaseConfigured) {
   console.warn(
-    '[supabase] ⚠️ Variables faltantes. Define VITE_SUPABASE_URL y VITE_SUPABASE_ANON_KEY.\n' +
-    'Se creará un cliente placeholder y la app debería entrar en modo demo si lo manejas en UI.'
+    '[supabase] No hay credenciales. Revisa VITE_SUPABASE_URL y VITE_SUPABASE_ANON_KEY (o usa VITE_DEMO=1).'
   );
 }
 
 /**
- * Cliente Supabase.
- * Si faltan envs, se crea con placeholders para que el import no rompa
- * (tu UI debe decidir usar fallback cuando shouldUseDemoMode === true).
+ * Cliente Supabase
+ * - Si no hay credenciales, crea un cliente "placeholder" que nunca debería usarse en producción;
+ *   tu UI debe activar fallback demo cuando shouldUseDemoMode === true.
  */
 export const supabase = createClient(
   supabaseUrl || 'https://placeholder.supabase.co',
-  supabaseAnonKey || 'anon-placeholder',
+  supabaseAnonKey || 'placeholder-key',
   {
     auth: {
       persistSession: true,
       autoRefreshToken: true,
       detectSessionInUrl: true,
     },
-    global: {
-      headers:
+  }
+);
