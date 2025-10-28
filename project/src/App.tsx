@@ -1,4 +1,3 @@
-// src/App.tsx
 import React, { ComponentType } from 'react';
 import { BrowserRouter, Routes, Route } from 'react-router-dom';
 
@@ -42,6 +41,9 @@ import * as PeriodosMod from './pages/payroll/Periodos';
 import * as EmpleadosPageMod from './pages/importar/Empleados';
 import * as AttendancePageMod from './payroll/AttendancePage';
 
+// ⚠️ Temporal: usar Calcular DEMO hasta validar render
+import * as CalcularDemoMod from './pages/payroll/Calcular.demo';
+
 // ⚠️ Proveedores: si tu proyecto usa otro nombre/ruta, igual caerá en fallback seguro
 import * as ProveedoresPageMod from './pages/compras/ProveedoresPage';
 
@@ -65,6 +67,7 @@ const GastosFijosImportar = pick(GastosFijosImportarMod, ['default'], 'GastosFij
 const Periodos = pick(PeriodosMod, ['default', 'Periodos'], 'Periodos');
 const EmpleadosPage = pick(EmpleadosPageMod, ['default', 'EmpleadosPage'], 'EmpleadosPage');
 const AttendancePage = pick(AttendancePageMod, ['default', 'AttendancePage'], 'AttendancePage');
+const CalcularDemo = pick(CalcularDemoMod, ['default'], 'CalcularDemo');
 
 // Proveedores
 const ProveedoresPage = pick(
@@ -105,6 +108,8 @@ export const App = () => (
                   <>
                     <Route path="/payroll" element={<Periodos />} />
                     <Route path="/payroll/periodos" element={<Periodos />} />
+                    {/* 🔹 Nueva ruta temporal para probar Calcular.demo */}
+                    <Route path="/payroll/calcular" element={<CalcularDemo />} />
                   </>
                 )}
                 {ff(import.meta.env.VITE_FF_PAYROLL_EMPLOYEES) && (
