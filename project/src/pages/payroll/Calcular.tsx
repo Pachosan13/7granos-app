@@ -1,11 +1,12 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
+  AlertCircle,
   ArrowLeft,
   Building2,
-  RefreshCw,
-  PlayCircle,
-  AlertCircle,
+  ClipboardList,
   Loader2,
+  PlayCircle,
+  RefreshCw,
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import * as AuthOrgMod from '../../context/AuthOrgContext';
@@ -57,6 +58,7 @@ interface Periodo {
 }
 
 type PeriodoDetalle = {
+  periodo_id?: string;
   empleado_id: string;
   empleado_nombre?: string | null;
   salario_base?: number | null;
@@ -71,15 +73,29 @@ type PeriodoResumen = {
   total_neto?: number | null;
 };
 
+type DetalleSource = 'hr_periodo_detalle' | 'v_ui_periodo_detalle_resuelto';
+
 declare global {
   interface Window {
     __DEMO_MODE__?: boolean;
   }
 }
 
+const DETAIL_COLUMNS = 'periodo_id, empleado_id, empleado_nombre, salario_base, horas, total';
+
 const MESES = [
-  'Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio',
-  'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre',
+  'Enero',
+  'Febrero',
+  'Marzo',
+  'Abril',
+  'Mayo',
+  'Junio',
+  'Julio',
+  'Agosto',
+  'Septiembre',
+  'Octubre',
+  'Noviembre',
+  'Diciembre',
 ];
 
 const ESTADOS_LABELS: Record<EstadoPeriodo, string> = {
@@ -99,6 +115,38 @@ function getQueryParam(name: string): string | null {
   if (typeof window === 'undefined') return null;
   const url = new URL(window.location.href);
   return url.searchParams.get(name);
+}
+
+function money(value: number | string | null | undefined) {
+  const numeric = Number(value ?? 0);
+  return new Intl.NumberFormat('en-US', {
+    style: 'currency',
+    currency: 'USD',
+    minimumFractionDigits: 2,
+  }).format(Number.isFinite(numeric) ? numeric : 0);
+}
+
+function sum<T extends Record<string, any>>(rows: T[], key: keyof T) {
+  return rows.reduce((acc, row) => acc + Number(row?.[key] ?? 0), 0);
+}
+
+function formatHours(value: number | string | null | undefined) {
+  return Number(value ?? 0).toLocaleString('en-US', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
+}
+
+function getInitials(name: string | null | undefined) {
+  if (!name) return '??';
+  const parts = String(name)
+    .trim()
+    .split(/\s+/)
+    .slice(0, 2);
+  return parts
+    .map((p) => p.charAt(0).toUpperCase())
+    .join('')
+    .padEnd(2, '•');
 }
 
 /* ────────────────────────────────────────────────────────────────────────────
@@ -150,14 +198,39 @@ export default function Calcular() {
   const [error, setError] = useState('');
   const [calculando, setCalculando] = useState(false);
   const [detalle, setDetalle] = useState<PeriodoDetalle[]>([]);
+  const [detalleSource, setDetalleSource] = useState<DetalleSource>('hr_periodo_detalle');
   const [resumen, setResumen] = useState<PeriodoResumen | null>(null);
   const [isDemo, setIsDemo] = useState(false);
   const [demoReason, setDemoReason] = useState<string | null>(null);
+  const [resolvedViewAvailable, setResolvedViewAvailable] = useState<boolean | null>(null);
+  const [resolvedViewStatus, setResolvedViewStatus] = useState<number | null>(null);
+
+  const totals = useMemo(
+    () => ({
+      salario: sum(detalle, 'salario_base'),
+      horas: sum(detalle, 'horas'),
+      total: sum(detalle, 'total'),
+    }),
+    [detalle]
+  );
 
   // bandera global para que el Agent pueda detectar modo demo (opcional)
   useEffect(() => {
     window.__DEMO_MODE__ = isDemo;
   }, [isDemo]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    if (!sucursalSeleccionada && sucursales.length > 0) {
+      const storedId = localStorage.getItem('selectedSucursalId');
+      const fallback = storedId
+        ? sucursales.find((s) => String(s.id) === String(storedId))
+        : undefined;
+      if (fallback) {
+        setSucursalSeleccionada(fallback);
+      }
+    }
+  }, [sucursalSeleccionada, sucursales, setSucursalSeleccionada]);
 
   const activateDemo = useCallback(
     (reason?: string) => {
@@ -169,6 +242,7 @@ export default function Calcular() {
       const demoPeriodo = mockPeriodo(fallbackPeriodoId, fallbackSucursalId);
       setPeriodo(demoPeriodo);
       setDetalle(mockDetalle);
+      setDetalleSource('hr_periodo_detalle');
       setResumen(buildMockResumen(mockDetalle));
       setIsDemo(true);
       setDemoReason(reason ?? null);
@@ -176,6 +250,42 @@ export default function Calcular() {
     },
     [periodoId, sucursalSeleccionada?.id]
   );
+
+  const checkResolvedViewAvailability = useCallback(async (periodoIdToCheck: string) => {
+    const supabaseUrl = import.meta.env.VITE_SUPABASE_URL as string | undefined;
+    const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined;
+
+    if (!supabaseUrl || !supabaseAnonKey || typeof fetch === 'undefined') {
+      setResolvedViewAvailable(false);
+      setResolvedViewStatus(null);
+      return false;
+    }
+
+    try {
+      const endpoint =
+        `${supabaseUrl}/rest/v1/v_ui_periodo_detalle_resuelto?periodo_id=eq.${encodeURIComponent(
+          periodoIdToCheck
+        )}&select=periodo_id&limit=1`;
+      const response = await fetch(endpoint, {
+        headers: {
+          apikey: supabaseAnonKey,
+          Authorization: `Bearer ${supabaseAnonKey}`,
+        },
+      });
+      setResolvedViewStatus(response.status);
+      if (response.ok) {
+        setResolvedViewAvailable(true);
+        return true;
+      }
+      setResolvedViewAvailable(false);
+      return false;
+    } catch (error) {
+      console.warn('[Calcular] No se pudo verificar la vista resuelta', error);
+      setResolvedViewAvailable(false);
+      setResolvedViewStatus(null);
+      return false;
+    }
+  }, []);
 
   /* ── Cargar período y detalle ─────────────────────────────────────────── */
   const loadPeriodo = useCallback(async () => {
@@ -185,12 +295,17 @@ export default function Calcular() {
         setLoading(false);
         setIsDemo(false);
         setDemoReason(null);
+        setDetalle([]);
+        setResumen(null);
         return;
       }
       setLoading(true);
       setError('');
       setIsDemo(false);
       setDemoReason(null);
+      setDetalle([]);
+      setResumen(null);
+      setDetalleSource('hr_periodo_detalle');
 
       if (demoMode) {
         activateDemo('Supabase no configurado (shouldUseDemoMode=TRUE)');
@@ -198,7 +313,6 @@ export default function Calcular() {
         return;
       }
 
-      // 1) Período
       const { data: pData, error: pErr } = await supabase
         .from('hr_periodo')
         .select('*')
@@ -210,19 +324,41 @@ export default function Calcular() {
 
       setPeriodo(pData as Periodo);
 
-      // 2) Detalle
-      const { data: detData, error: detErr } = await supabase
+      const { data: baseData, error: baseErr } = await supabase
         .from('hr_periodo_detalle')
-        .select('*')
-        .eq('periodo_id', periodoId);
+        .select(DETAIL_COLUMNS)
+        .eq('periodo_id', periodoId)
+        .order('empleado_nombre', { ascending: true });
 
-      // Si la tabla no existe (42P01) u otro error, lo manejamos abajo con fallback.
-      if (detErr && detErr.code !== '42P01') throw detErr;
+      if (baseErr && baseErr.code !== '42P01') throw baseErr;
+      if (baseErr?.code === '42P01') throw baseErr;
 
-      const rows = (detData ?? []) as PeriodoDetalle[];
-      setDetalle(rows);
+      let finalRows = (baseData ?? []) as PeriodoDetalle[];
+      let finalSource: DetalleSource = 'hr_periodo_detalle';
 
-      // 3) Resumen (vista opcional)
+      let canUseResolvedView = resolvedViewAvailable === true;
+      if (!canUseResolvedView) {
+        canUseResolvedView = await checkResolvedViewAvailability(periodoId);
+      }
+
+      if (canUseResolvedView) {
+        const { data: viewData, error: viewErr } = await supabase
+          .from('v_ui_periodo_detalle_resuelto')
+          .select(DETAIL_COLUMNS)
+          .eq('periodo_id', periodoId);
+
+        if (viewErr && viewErr.code !== '42P01') {
+          console.warn('[Calcular] Error al usar v_ui_periodo_detalle_resuelto, se mantiene la tabla base', viewErr);
+          setResolvedViewAvailable(false);
+        } else if (viewData) {
+          finalRows = viewData as PeriodoDetalle[];
+          finalSource = 'v_ui_periodo_detalle_resuelto';
+        }
+      }
+
+      setDetalle(finalRows);
+      setDetalleSource(finalSource);
+
       const { data: resumenData, error: resErr } = await supabase
         .from('v_ui_resumen_planilla')
         .select('*')
@@ -233,8 +369,8 @@ export default function Calcular() {
 
       if (resumenData) {
         setResumen(resumenData as PeriodoResumen);
-      } else if (rows.length > 0) {
-        setResumen(buildMockResumen(rows));
+      } else if (finalRows.length > 0) {
+        setResumen(buildMockResumen(finalRows));
       } else {
         setResumen(null);
       }
@@ -245,7 +381,13 @@ export default function Calcular() {
     } finally {
       setLoading(false);
     }
-  }, [activateDemo, demoMode, periodoId]);
+  }, [
+    activateDemo,
+    checkResolvedViewAvailability,
+    demoMode,
+    periodoId,
+    resolvedViewAvailable,
+  ]);
 
   useEffect(() => void loadPeriodo(), [loadPeriodo]);
 
@@ -275,38 +417,48 @@ export default function Calcular() {
   function handleChangeSucursal(e: React.ChangeEvent<HTMLSelectElement>) {
     const newId = e.target.value;
     const nueva = sucursales.find((s) => String(s.id) === String(newId));
-    if (nueva && typeof setSucursalSeleccionada === 'function') {
+    if (nueva) {
       setSucursalSeleccionada(nueva);
       localStorage.setItem('selectedSucursalId', nueva.id);
     }
     navigate('/payroll');
   }
 
-  /* ── UI ────────────────────────────────────────────────────────────────── */
-  return (
-    <div className="p-6 space-y-6">
-      {/* HEADER ─────────────────────────────────────────────────────────── */}
-      <div className="flex items-center justify-between">
-        <button
-          onClick={() => navigate('/payroll')}
-          className="inline-flex items-center gap-2 px-4 py-2 rounded-xl border bg-white hover:bg-gray-50 shadow"
-        >
-          <ArrowLeft className="h-4 w-4" />
-          <span>Volver a períodos</span>
-        </button>
-
+  const BackBar: React.FC = () => {
+    const goBack = () => {
+      if (window.history.length > 1) window.history.back();
+      else navigate('/payroll');
+    };
+    return (
+      <div className="mb-6 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
         <div className="flex items-center gap-2">
-          <div className="inline-flex items-center px-3 py-2 rounded-lg border bg-gray-50 text-gray-700">
-            <Building2 className="h-4 w-4 mr-2" />
-            <span className="text-sm">
-              {sucursalSeleccionada?.nombre ?? 'Sin sucursal'}
-            </span>
+          <button
+            onClick={goBack}
+            className="inline-flex items-center gap-2 rounded-xl border bg-white px-4 py-2 shadow hover:bg-gray-50"
+            title="Volver"
+          >
+            <ArrowLeft className="h-4 w-4" />
+            <span>Volver</span>
+          </button>
+          <a
+            href="/payroll"
+            className="text-sm text-slate-600 underline underline-offset-4 transition hover:text-slate-900"
+            title="Ver períodos"
+          >
+            Ir a períodos
+          </a>
+        </div>
+
+        <div className="flex items-center gap-3">
+          <div className="inline-flex items-center rounded-lg border bg-gray-50 px-3 py-2 text-gray-700">
+            <Building2 className="mr-2 h-4 w-4" />
+            <span className="text-sm">{sucursalSeleccionada?.nombre ?? 'Sin sucursal'}</span>
           </div>
           {sucursales.length > 0 && (
             <select
               value={sucursalSeleccionada?.id ?? ''}
               onChange={handleChangeSucursal}
-              className="px-3 py-2 rounded-lg border bg-white"
+              className="rounded-lg border bg-white px-3 py-2 text-sm"
               title="Cambiar sucursal"
             >
               {sucursales.map((s) => (
@@ -318,40 +470,44 @@ export default function Calcular() {
           )}
         </div>
       </div>
+    );
+  };
 
-      {/* ESTADOS ─────────────────────────────────────────────────────────── */}
+  /* ── UI ────────────────────────────────────────────────────────────────── */
+  return (
+    <div className="space-y-6 p-6">
+      <BackBar />
+
       {loading ? (
-        <div className="bg-white rounded-2xl shadow p-8 text-center">
-          <Loader2 className="animate-spin h-8 w-8 text-accent mx-auto mb-3" />
+        <div className="rounded-2xl bg-white p-8 text-center shadow">
+          <Loader2 className="mx-auto mb-3 h-8 w-8 animate-spin text-accent" />
           <p>Cargando período…</p>
         </div>
       ) : error && !isDemo ? (
-        <div className="bg-red-50 border-l-4 border-red-500 rounded-xl p-4">
+        <div className="rounded-xl border-l-4 border-red-500 bg-red-50 p-4">
           <div className="flex items-center gap-2 text-red-700">
             <AlertCircle className="h-5 w-5" />
             <span className="font-medium">{error}</span>
           </div>
         </div>
       ) : !periodo ? (
-        <div className="bg-white rounded-2xl shadow p-8 text-center">
+        <div className="rounded-2xl bg-white p-8 text-center shadow">
           <p>No se encontró el período solicitado.</p>
         </div>
       ) : (
         <>
-          {/* Banner modo demo si aplica */}
           {isDemo && (
-            <div className="bg-amber-50 border border-amber-300 text-amber-800 rounded-xl p-3 flex items-center gap-2">
+            <div className="flex items-center gap-2 rounded-xl border border-amber-300 bg-amber-50 p-3 text-amber-800">
               <AlertCircle className="h-5 w-5" />
               <span className="text-sm">
-                Mostrando datos de ejemplo (modo demo). Intenta “Refrescar” para reconectar con Supabase.
+                Mostrando datos de ejemplo (modo demo). Intenta «Refrescar» para reconectar con Supabase.
                 {demoReason ? ` (${demoReason})` : ''}
               </span>
             </div>
           )}
 
-          {/* ── Resumen del período ───────────────────────────────────────── */}
-          <div className="bg-white rounded-2xl shadow p-6 border">
-            <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+          <div className="rounded-2xl border bg-white p-6 shadow">
+            <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
               <div>
                 <h2 className="text-2xl font-semibold">
                   {MESES[periodo.periodo_mes - 1]} {periodo.periodo_ano}
@@ -360,9 +516,7 @@ export default function Calcular() {
                   {formatDateDDMMYYYY(periodo.fecha_inicio)} — {formatDateDDMMYYYY(periodo.fecha_fin)}
                 </p>
                 <div className="mt-2">
-                  <span
-                    className={`px-3 py-1 rounded-full text-xs font-medium ${ESTADOS_COLORS[periodo.estado]}`}
-                  >
+                  <span className={`rounded-full px-3 py-1 text-xs font-medium ${ESTADOS_COLORS[periodo.estado]}`}>
                     {ESTADOS_LABELS[periodo.estado]}
                   </span>
                 </div>
@@ -372,14 +526,14 @@ export default function Calcular() {
                 <button
                   onClick={handleCalcular}
                   disabled={calculando}
-                  className="inline-flex items-center gap-2 px-5 py-3 rounded-xl text-white bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-700 hover:to-purple-700 shadow disabled:opacity-50"
+                  className="inline-flex items-center gap-2 rounded-xl bg-gradient-to-r from-blue-600 to-purple-600 px-5 py-3 text-white shadow transition hover:from-blue-700 hover:to-purple-700 disabled:opacity-50"
                 >
                   <PlayCircle className={`h-5 w-5 ${calculando ? 'animate-spin' : ''}`} />
                   {calculando ? 'Calculando…' : 'Calcular planilla'}
                 </button>
                 <button
                   onClick={loadPeriodo}
-                  className="inline-flex items-center gap-2 px-5 py-3 rounded-xl border hover:bg-gray-50 shadow"
+                  className="inline-flex items-center gap-2 rounded-xl border px-5 py-3 shadow transition hover:bg-gray-50"
                 >
                   <RefreshCw className="h-4 w-4" />
                   Refrescar
@@ -388,68 +542,102 @@ export default function Calcular() {
             </div>
           </div>
 
-          {/* ── Detalle de empleados ─────────────────────────────────────── */}
-          <div className="bg-white rounded-2xl shadow p-6 border">
-            <h3 className="text-xl font-semibold mb-4">Empleados del período</h3>
+          <div className="rounded-2xl border bg-white p-6 shadow">
+            <div className="mb-4 flex flex-col gap-2 sm:flex-row sm:items-baseline sm:justify-between">
+              <h3 className="text-xl font-semibold">Empleados del período</h3>
+              <span className="text-xs uppercase tracking-wide text-slate-400">
+                Fuente: {detalleSource === 'v_ui_periodo_detalle_resuelto' ? 'Vista resuelta' : 'Tabla base ordenada'}
+                {resolvedViewStatus && ` (REST ${resolvedViewStatus})`}
+              </span>
+            </div>
 
             {detalle.length === 0 ? (
-              <p className="text-gray-500">No hay registros de detalle para este período.</p>
+              <div className="flex flex-col items-center justify-center rounded-2xl border border-dashed border-slate-300 bg-slate-50 py-12 text-center">
+                <div className="mb-4 flex h-16 w-16 items-center justify-center rounded-full bg-white shadow-inner">
+                  <ClipboardList className="h-8 w-8 text-slate-400" />
+                </div>
+                <h4 className="text-lg font-semibold text-slate-700">Sin cálculos todavía</h4>
+                <p className="mt-2 max-w-sm text-sm text-slate-500">
+                  Ejecuta el cálculo para generar los detalles de empleados y visualizar la planilla completa.
+                </p>
+                <button
+                  onClick={handleCalcular}
+                  className="mt-6 inline-flex items-center gap-2 rounded-full bg-gradient-to-r from-blue-600 to-purple-600 px-6 py-3 text-sm font-semibold text-white shadow-lg shadow-blue-500/30 transition hover:from-blue-700 hover:to-purple-700"
+                >
+                  <PlayCircle className="h-4 w-4" />
+                  Calcular planilla
+                </button>
+              </div>
             ) : (
-              <div className="overflow-x-auto">
-                <table className="min-w-full text-sm">
-                  <thead className="bg-gray-100 text-gray-700">
-                    <tr>
-                      <th className="px-4 py-2 text-left">Empleado</th>
-                      <th className="px-4 py-2 text-right">Salario</th>
-                      <th className="px-4 py-2 text-right">Horas</th>
-                      <th className="px-4 py-2 text-right">Total</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {detalle.map((row, i) => (
-                      <tr key={i} className="border-b">
-                        <td className="px-4 py-2">{row.empleado_nombre ?? row.empleado_id}</td>
-                        <td className="px-4 py-2 text-right">
-                          {Number(row.salario_base ?? 0).toLocaleString('en-US', { minimumFractionDigits: 2 })}
-                        </td>
-                        <td className="px-4 py-2 text-right">{row.horas ?? '—'}</td>
-                        <td className="px-4 py-2 text-right font-semibold">
-                          {Number(row.total ?? 0).toLocaleString('en-US', { minimumFractionDigits: 2 })}
-                        </td>
+              <div className="overflow-hidden rounded-2xl border border-slate-200">
+                <div className="overflow-x-auto">
+                  <table className="min-w-full table-fixed text-sm">
+                    <thead className="sticky top-0 z-10 bg-slate-50/90 backdrop-blur">
+                      <tr className="text-xs uppercase tracking-wide text-slate-500">
+                        <th className="px-6 py-3 text-left font-semibold">Empleado</th>
+                        <th className="px-6 py-3 text-right font-semibold">Salario base</th>
+                        <th className="px-6 py-3 text-right font-semibold">Horas</th>
+                        <th className="px-6 py-3 text-right font-semibold">Total</th>
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {detalle.map((row, index) => (
+                        <tr
+                          key={`${row.empleado_id ?? index}-${index}`}
+                          className={index % 2 === 1 ? 'bg-slate-50/60' : 'bg-white'}
+                        >
+                          <td className="px-6 py-4">
+                            <div className="flex items-center gap-3">
+                              <div className="flex h-10 w-10 items-center justify-center rounded-full bg-indigo-100 text-sm font-semibold text-indigo-600">
+                                {getInitials(row.empleado_nombre || row.empleado_id)}
+                              </div>
+                              <div className="min-w-0">
+                                <div className="truncate text-sm font-semibold text-slate-900">
+                                  {row.empleado_nombre ?? 'Empleado sin nombre'}
+                                </div>
+                                <div className="text-xs text-slate-500">{row.empleado_id ?? 'ID no disponible'}</div>
+                              </div>
+                            </div>
+                          </td>
+                          <td className="px-6 py-4 text-right font-medium text-slate-700">{money(row.salario_base)}</td>
+                          <td className="px-6 py-4 text-right text-slate-600">{formatHours(row.horas)}</td>
+                          <td className="px-6 py-4 text-right text-sm font-semibold text-slate-900">{money(row.total)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                    <tfoot>
+                      <tr className="bg-slate-900 text-slate-50">
+                        <td className="px-6 py-4 text-left text-sm font-semibold uppercase tracking-wide">Totales</td>
+                        <td className="px-6 py-4 text-right text-sm font-semibold">{money(totals.salario)}</td>
+                        <td className="px-6 py-4 text-right text-sm font-semibold">{formatHours(totals.horas)}</td>
+                        <td className="px-6 py-4 text-right text-sm font-semibold">{money(totals.total)}</td>
+                      </tr>
+                    </tfoot>
+                  </table>
+                </div>
               </div>
             )}
           </div>
 
-          {/* ── Resumen final ─────────────────────────────────────────────── */}
           {resumen && (
-            <div className="bg-white rounded-2xl shadow p-6 border">
-              <h3 className="text-xl font-semibold mb-4">Resumen de totales</h3>
-              <div className="grid grid-cols-2 md:grid-cols-4 gap-6">
+            <div className="rounded-2xl border bg-white p-6 shadow">
+              <h3 className="mb-4 text-xl font-semibold">Resumen de totales</h3>
+              <div className="grid grid-cols-2 gap-6 md:grid-cols-4">
                 <div>
-                  <div className="text-gray-500 text-sm">Empleados</div>
+                  <div className="text-sm text-gray-500">Empleados</div>
                   <div className="text-lg font-semibold">{resumen.total_empleados ?? '—'}</div>
                 </div>
                 <div>
-                  <div className="text-gray-500 text-sm">Salarios</div>
-                  <div className="text-lg font-semibold">
-                    ${Number(resumen.total_salarios ?? 0).toLocaleString('en-US', { minimumFractionDigits: 2 })}
-                  </div>
+                  <div className="text-sm text-gray-500">Salarios</div>
+                  <div className="text-lg font-semibold">{money(resumen.total_salarios)}</div>
                 </div>
                 <div>
-                  <div className="text-gray-500 text-sm">Deducciones</div>
-                  <div className="text-lg font-semibold">
-                    ${Number(resumen.total_deducciones ?? 0).toLocaleString('en-US', { minimumFractionDigits: 2 })}
-                  </div>
+                  <div className="text-sm text-gray-500">Deducciones</div>
+                  <div className="text-lg font-semibold">{money(resumen.total_deducciones)}</div>
                 </div>
                 <div>
-                  <div className="text-gray-500 text-sm">Total Neto</div>
-                  <div className="text-lg font-semibold">
-                    ${Number(resumen.total_neto ?? 0).toLocaleString('en-US', { minimumFractionDigits: 2 })}
-                  </div>
+                  <div className="text-sm text-gray-500">Total Neto</div>
+                  <div className="text-lg font-semibold">{money(resumen.total_neto)}</div>
                 </div>
               </div>
             </div>
