@@ -9,20 +9,36 @@ import {
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import * as AuthOrgMod from '../../context/AuthOrgContext';
-import { supabase } from '../../lib/supabase';
+import { supabase, shouldUseDemoMode } from '../../lib/supabase';
 import { formatDateDDMMYYYY } from '../../lib/format';
 
 /* ────────────────────────────────────────────────────────────────────────────
    Contexto seguro
 --------------------------------------------------------------------------- */
 type Sucursal = { id: string; nombre: string };
+
+type UseAuthOrgResult = {
+  sucursales: Sucursal[];
+  sucursalSeleccionada: Sucursal | null;
+  setSucursalSeleccionada: (sucursal: Sucursal | null) => void;
+};
+
+type AuthOrgModule = {
+  useAuthOrg?: () => UseAuthOrgResult;
+  default?: () => UseAuthOrgResult;
+};
+
+const authOrgModule = AuthOrgMod as unknown as AuthOrgModule;
+
 const useAuthOrg =
-  (AuthOrgMod as any).useAuthOrg ??
-  AuthOrgMod.default ??
+  authOrgModule.useAuthOrg ??
+  authOrgModule.default ??
   (() => ({
     sucursales: [] as Sucursal[],
     sucursalSeleccionada: null as Sucursal | null,
-    setSucursalSeleccionada: (_: Sucursal | null) => {},
+    setSucursalSeleccionada: (sucursal: Sucursal | null) => {
+      void sucursal;
+    },
   }));
 
 /* ────────────────────────────────────────────────────────────────────────────
@@ -38,6 +54,27 @@ interface Periodo {
   fecha_fin: string;
   estado: EstadoPeriodo;
   created_at: string;
+}
+
+type PeriodoDetalle = {
+  empleado_id: string;
+  empleado_nombre?: string | null;
+  salario_base?: number | null;
+  horas?: number | null;
+  total?: number | null;
+};
+
+type PeriodoResumen = {
+  total_empleados?: number | null;
+  total_salarios?: number | null;
+  total_deducciones?: number | null;
+  total_neto?: number | null;
+};
+
+declare global {
+  interface Window {
+    __DEMO_MODE__?: boolean;
+  }
 }
 
 const MESES = [
@@ -85,13 +122,13 @@ const mockPeriodo = (id: string, sucursal_id = 'demo-1'): Periodo => {
   };
 };
 
-const mockDetalle = [
+const mockDetalle: PeriodoDetalle[] = [
   { empleado_id: 'E-001', empleado_nombre: 'Juan Pérez', salario_base: 900, horas: 40, total: 900 },
   { empleado_id: 'E-002', empleado_nombre: 'María Gómez', salario_base: 850, horas: 38, total: 807.5 },
   { empleado_id: 'E-003', empleado_nombre: 'Carlos López', salario_base: 1000, horas: 42, total: 1050 },
 ];
 
-const buildMockResumen = (detalle: any[]) => {
+const buildMockResumen = (detalle: PeriodoDetalle[]): PeriodoResumen => {
   const total_empleados = detalle.length;
   const total_salarios = detalle.reduce((s, r) => s + Number(r.salario_base ?? 0), 0);
   const total_deducciones = Math.round(total_salarios * 0.075 * 100) / 100; // demo 7.5%
@@ -106,19 +143,39 @@ export default function Calcular() {
   const navigate = useNavigate();
   const { sucursales, sucursalSeleccionada, setSucursalSeleccionada } = useAuthOrg();
   const periodoId = useMemo(() => getQueryParam('periodo'), []);
+  const demoMode = useMemo(() => shouldUseDemoMode, []);
 
   const [periodo, setPeriodo] = useState<Periodo | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [calculando, setCalculando] = useState(false);
-  const [detalle, setDetalle] = useState<any[]>([]);
-  const [resumen, setResumen] = useState<any>(null);
+  const [detalle, setDetalle] = useState<PeriodoDetalle[]>([]);
+  const [resumen, setResumen] = useState<PeriodoResumen | null>(null);
   const [isDemo, setIsDemo] = useState(false);
+  const [demoReason, setDemoReason] = useState<string | null>(null);
 
   // bandera global para que el Agent pueda detectar modo demo (opcional)
   useEffect(() => {
-    (window as any).__DEMO_MODE__ = isDemo;
+    window.__DEMO_MODE__ = isDemo;
   }, [isDemo]);
+
+  const activateDemo = useCallback(
+    (reason?: string) => {
+      if (reason) {
+        console.warn('[Calcular] Activando datos demo:', reason);
+      }
+      const fallbackPeriodoId = periodoId || 'periodo-demo';
+      const fallbackSucursalId = sucursalSeleccionada?.id ?? 'demo-1';
+      const demoPeriodo = mockPeriodo(fallbackPeriodoId, fallbackSucursalId);
+      setPeriodo(demoPeriodo);
+      setDetalle(mockDetalle);
+      setResumen(buildMockResumen(mockDetalle));
+      setIsDemo(true);
+      setDemoReason(reason ?? null);
+      setError('');
+    },
+    [periodoId, sucursalSeleccionada?.id]
+  );
 
   /* ── Cargar período y detalle ─────────────────────────────────────────── */
   const loadPeriodo = useCallback(async () => {
@@ -127,11 +184,19 @@ export default function Calcular() {
         setError('Falta el parámetro ?periodo=');
         setLoading(false);
         setIsDemo(false);
+        setDemoReason(null);
         return;
       }
       setLoading(true);
       setError('');
       setIsDemo(false);
+      setDemoReason(null);
+
+      if (demoMode) {
+        activateDemo('Supabase no configurado (shouldUseDemoMode=TRUE)');
+        setLoading(false);
+        return;
+      }
 
       // 1) Período
       const { data: pData, error: pErr } = await supabase
@@ -154,7 +219,7 @@ export default function Calcular() {
       // Si la tabla no existe (42P01) u otro error, lo manejamos abajo con fallback.
       if (detErr && detErr.code !== '42P01') throw detErr;
 
-      const rows = detData ?? [];
+      const rows = (detData ?? []) as PeriodoDetalle[];
       setDetalle(rows);
 
       // 3) Resumen (vista opcional)
@@ -167,29 +232,20 @@ export default function Calcular() {
       if (resErr && resErr.code !== '42P01') throw resErr;
 
       if (resumenData) {
-        setResumen(resumenData);
+        setResumen(resumenData as PeriodoResumen);
+      } else if (rows.length > 0) {
+        setResumen(buildMockResumen(rows));
       } else {
-        // Si no hay vista, calculamos un mini resumen desde detalle real.
-        if (rows.length > 0) {
-          setResumen(buildMockResumen(rows));
-        } else {
-          // Si no hay filas reales, activamos fallback demo coherente con el período real.
-          throw new Error('Sin filas de detalle');
-        }
+        setResumen(null);
       }
-    } catch (e: any) {
-      console.warn('[Calcular] Fallback demo activado:', e?.message ?? e);
-      // Fallback completo y consistente
-      const demoPeriodo = mockPeriodo(periodoId || 'periodo-demo', sucursalSeleccionada?.id as any);
-      setPeriodo(demoPeriodo);
-      setDetalle(mockDetalle);
-      setResumen(buildMockResumen(mockDetalle));
-      setIsDemo(true);
-      setError(''); // no mostramos error duro si estamos en demo
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.warn('[Calcular] Fallback demo activado:', message);
+      activateDemo(message);
     } finally {
       setLoading(false);
     }
-  }, [periodoId, sucursalSeleccionada?.id]);
+  }, [activateDemo, demoMode, periodoId]);
 
   useEffect(() => void loadPeriodo(), [loadPeriodo]);
 
@@ -206,9 +262,10 @@ export default function Calcular() {
 
       await new Promise((r) => setTimeout(r, 800)); // Simulación
       await loadPeriodo();
-    } catch (e: any) {
-      console.error('[Calcular] calcular error', e);
-      setError(e?.message ?? 'Error al calcular');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error('[Calcular] calcular error', error);
+      setError(message || 'Error al calcular');
     } finally {
       setCalculando(false);
     }
@@ -287,6 +344,7 @@ export default function Calcular() {
               <AlertCircle className="h-5 w-5" />
               <span className="text-sm">
                 Mostrando datos de ejemplo (modo demo). Intenta “Refrescar” para reconectar con Supabase.
+                {demoReason ? ` (${demoReason})` : ''}
               </span>
             </div>
           )}
@@ -348,7 +406,7 @@ export default function Calcular() {
                     </tr>
                   </thead>
                   <tbody>
-                    {detalle.map((row: any, i) => (
+                    {detalle.map((row, i) => (
                       <tr key={i} className="border-b">
                         <td className="px-4 py-2">{row.empleado_nombre ?? row.empleado_id}</td>
                         <td className="px-4 py-2 text-right">
