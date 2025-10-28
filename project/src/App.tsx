@@ -34,6 +34,8 @@ import * as CapturaComprasPageMod from './pages/compras/CapturaComprasPage';
 import * as ProtectedRouteMod from './components/ProtectedRoute';
 import * as ContabilidadMod from './pages/Contabilidad';
 import * as IniciarSesionMod from './pages/Auth/IniciarSesion';
+import * as GastosFijosListaMod from './pages/gastos-fijos/Lista';
+import * as GastosFijosImportarMod from './pages/gastos-fijos/Importar';
 
 // Payroll
 import * as PeriodosMod from './pages/payroll/Periodos';
@@ -56,6 +58,8 @@ const CapturaComprasPage = pick(
 const ProtectedRoute = pick(ProtectedRouteMod, ['default', 'ProtectedRoute'], 'ProtectedRoute');
 const Contabilidad = pick(ContabilidadMod, ['default', 'Contabilidad'], 'Contabilidad');
 const IniciarSesion = pick(IniciarSesionMod, ['default', 'IniciarSesion'], 'IniciarSesion');
+const GastosFijosLista = pick(GastosFijosListaMod, ['default'], 'GastosFijosLista');
+const GastosFijosImportar = pick(GastosFijosImportarMod, ['default'], 'GastosFijosImportar');
 
 // Payroll (no ocultes si no hay variable; solo si es 'false')
 const Periodos = pick(PeriodosMod, ['default', 'Periodos'], 'Periodos');
@@ -86,6 +90,8 @@ export const App = () => (
                 <Route path="/dashboard" element={<Dashboard />} />
                 <Route path="/ventas" element={<VentasPage />} />
                 <Route path="/contabilidad" element={<Contabilidad />} />
+                <Route path="/gastos-fijos" element={<GastosFijosLista />} />
+                <Route path="/gastos-fijos/importar" element={<GastosFijosImportar />} />
 
                 {/* Compras */}
                 <Route path="/compras/captura" element={<CapturaComprasPage />} />
