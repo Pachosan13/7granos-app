@@ -1,0 +1,13 @@
+{
+  "name": "7granos-app",
+  "private": true,
+  "scripts": {
+    "dev": "npm --prefix project run dev",
+    "build": "npm --prefix project run build",
+    "lint": "npm --prefix project run lint",
+    "preview": "npm --prefix project run preview"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
