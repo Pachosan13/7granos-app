@@ -34,6 +34,8 @@ import * as CapturaComprasPageMod from './pages/compras/CapturaComprasPage';
 import * as ProtectedRouteMod from './components/ProtectedRoute';
 import * as ContabilidadMod from './pages/Contabilidad';
 import * as IniciarSesionMod from './pages/Auth/IniciarSesion';
+import * as GastosFijosListaMod from './pages/gastos-fijos/Lista';
+import * as GastosFijosImportarMod from './pages/gastos-fijos/Importar';
 
 // Payroll
 import * as PeriodosMod from './pages/payroll/Periodos';
@@ -56,6 +58,8 @@ const CapturaComprasPage = pick(
 const ProtectedRoute = pick(ProtectedRouteMod, ['default', 'ProtectedRoute'], 'ProtectedRoute');
 const Contabilidad = pick(ContabilidadMod, ['default', 'Contabilidad'], 'Contabilidad');
 const IniciarSesion = pick(IniciarSesionMod, ['default', 'IniciarSesion'], 'IniciarSesion');
+const GastosFijosLista = pick(GastosFijosListaMod, ['default'], 'GastosFijosLista');
+const GastosFijosImportar = pick(GastosFijosImportarMod, ['default'], 'GastosFijosImportar');
 
 // Payroll (no ocultes si no hay variable; solo si es 'false')
 const Periodos = pick(PeriodosMod, ['default', 'Periodos'], 'Periodos');
@@ -83,8 +87,11 @@ export const App = () => (
             <Layout>
               <Routes>
                 <Route path="/" element={<Dashboard />} />
+                <Route path="/dashboard" element={<Dashboard />} />
                 <Route path="/ventas" element={<VentasPage />} />
                 <Route path="/contabilidad" element={<Contabilidad />} />
+                <Route path="/gastos-fijos" element={<GastosFijosLista />} />
+                <Route path="/gastos-fijos/importar" element={<GastosFijosImportar />} />
 
                 {/* Compras */}
                 <Route path="/compras/captura" element={<CapturaComprasPage />} />
@@ -95,7 +102,10 @@ export const App = () => (
 
                 {/* Payroll (no se oculta a menos que flag sea 'false') */}
                 {ff(import.meta.env.VITE_FF_PAYROLL_PERIODS) && (
-                  <Route path="/payroll" element={<Periodos />} />
+                  <>
+                    <Route path="/payroll" element={<Periodos />} />
+                    <Route path="/payroll/periodos" element={<Periodos />} />
+                  </>
                 )}
                 {ff(import.meta.env.VITE_FF_PAYROLL_EMPLOYEES) && (
                   <Route path="/payroll/empleados" element={<EmpleadosPage />} />

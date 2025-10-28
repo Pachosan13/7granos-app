@@ -1,6 +1,6 @@
 import { createContext, useContext, useState, useEffect, ReactNode, useMemo } from 'react';
 import { User } from '@supabase/supabase-js';
-import { supabase } from '../lib/supabase';
+import { supabase, shouldUseDemoMode } from '../lib/supabase';
 import { getMyProfile, getMyBranches, UserProfile, Sucursal } from '../lib/org';
 
 type ViewMode = 'all' | 'single';
@@ -36,6 +36,40 @@ interface AuthOrgProviderProps {
 
 const STORAGE_KEY = 'viewMode';
 
+const seedDemoIdentity = () => {
+  const now = new Date().toISOString();
+  const offlineUser: User = {
+    id: 'offline-user',
+    aud: 'authenticated',
+    role: 'authenticated',
+    email: 'demo@7granos.app',
+    phone: '',
+    app_metadata: {},
+    user_metadata: {},
+    created_at: now,
+    confirmed_at: now,
+    email_confirmed_at: now,
+    phone_confirmed_at: null,
+    last_sign_in_at: now,
+    updated_at: now,
+    identities: [],
+    factors: [],
+  } as User;
+
+  const offlineProfile: UserProfile = {
+    user_id: offlineUser.id,
+    rol: 'admin',
+    created_at: now,
+  };
+
+  const offlineSucursales: Sucursal[] = [
+    { id: 'sucursal-centro', nombre: 'Sucursal Centro', activa: true },
+    { id: 'sucursal-norte', nombre: 'Sucursal Norte', activa: true },
+  ];
+
+  return { offlineUser, offlineProfile, offlineSucursales };
+};
+
 export const AuthOrgProvider = ({ children }: AuthOrgProviderProps) => {
   const [user, setUser] = useState<User | null>(null);
   const [profile, setProfile] = useState<UserProfile | null>(null);
@@ -54,7 +88,7 @@ export const AuthOrgProvider = ({ children }: AuthOrgProviderProps) => {
   const getFilteredSucursalIds = useMemo(() => {
     return () => {
       if (viewMode === 'all' || sucursalSeleccionada === null) {
-        return sucursales.map(s => s.id);
+        return sucursales.map((s) => s.id);
       }
       return [sucursalSeleccionada.id];
     };
@@ -78,8 +112,27 @@ export const AuthOrgProvider = ({ children }: AuthOrgProviderProps) => {
         setLoading(true);
         setError(null);
 
-        // Get current user session
-        const { data: { session }, error: sessionError } = await supabase.auth.getSession();
+        if (shouldUseDemoMode) {
+          console.warn('Supabase no está configurado o DEMO activo. Sembrando identidad ficticia.');
+          const { offlineUser, offlineProfile, offlineSucursales } = seedDemoIdentity();
+          const savedViewMode = (localStorage.getItem(STORAGE_KEY) as ViewMode | null) || 'all';
+
+          if (mounted) {
+            setUser(offlineUser);
+            setProfile(offlineProfile);
+            setSucursales(offlineSucursales);
+            setViewModeState(savedViewMode);
+            setSucursalSeleccionada(savedViewMode === 'single' ? offlineSucursales[0] : null);
+            setLoading(false);
+            setError(null);
+          }
+          return;
+        }
+
+        const {
+          data: { session },
+          error: sessionError,
+        } = await supabase.auth.getSession();
 
         if (sessionError) {
           console.error('Error obteniendo sesión:', sessionError);
@@ -102,7 +155,6 @@ export const AuthOrgProvider = ({ children }: AuthOrgProviderProps) => {
           return;
         }
 
-        // Load user profile
         const userProfile = await getMyProfile();
 
         if (!userProfile) {
@@ -119,7 +171,6 @@ export const AuthOrgProvider = ({ children }: AuthOrgProviderProps) => {
           setProfile(userProfile);
         }
 
-        // Load branches based on user role
         const isUserAdmin = userProfile.rol === 'admin';
         const branches = await getMyBranches(isUserAdmin);
 
@@ -130,7 +181,6 @@ export const AuthOrgProvider = ({ children }: AuthOrgProviderProps) => {
         if (mounted) {
           setSucursales(branches);
 
-          // Restore saved view mode
           const savedViewMode = localStorage.getItem(STORAGE_KEY) as ViewMode | null;
           const initialViewMode = savedViewMode || 'all';
           setViewModeState(initialViewMode);
@@ -155,7 +205,12 @@ export const AuthOrgProvider = ({ children }: AuthOrgProviderProps) => {
 
     loadUserData();
 
-    // Listen for auth state changes
+    if (shouldUseDemoMode) {
+      return () => {
+        mounted = false;
+      };
+    }
+
     const {
       data: { subscription },
     } = supabase.auth.onAuthStateChange((_event, session) => {
@@ -163,14 +218,12 @@ export const AuthOrgProvider = ({ children }: AuthOrgProviderProps) => {
         const currentUser = session?.user || null;
         setUser(currentUser);
 
-        // If user logged out, clear everything
         if (!currentUser) {
           setProfile(null);
           setSucursales([]);
           setSucursalSeleccionada(null);
           setError(null);
         } else {
-          // If user logged in, reload data
           loadUserData();
         }
       }
@@ -180,7 +233,7 @@ export const AuthOrgProvider = ({ children }: AuthOrgProviderProps) => {
       mounted = false;
       subscription.unsubscribe();
     };
-  }, []);
+  }, [shouldUseDemoMode]);
 
   const value: AuthOrgContextType = {
     user,
@@ -197,9 +250,5 @@ export const AuthOrgProvider = ({ children }: AuthOrgProviderProps) => {
     getFilteredSucursalIds,
   };
 
-  return (
-    <AuthOrgContext.Provider value={value}>
-      {children}
-    </AuthOrgContext.Provider>
-  );
+  return <AuthOrgContext.Provider value={value}>{children}</AuthOrgContext.Provider>;
 };
