@@ -86,6 +86,7 @@ jobs:
           
       - name: Install Playwright browsers
         working-directory: ${{ env.APP_PATH }}
+        continue-on-error: true
         run: npx playwright install --with-deps
 
       - name: Install Playwright
