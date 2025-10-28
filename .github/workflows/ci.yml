@@ -11,7 +11,7 @@ jobs:
 
     # 🔐 Secrets disponibles para build y tests
     env:
-      VITE_SHOW_SYNC_BUTTON: "1"  # 👈 fuerza render del botón en CI
+      VITE_SHOW_SYNC_BUTTON: "1"   # ⬅️ clave para que aparezca el botón en CI
       VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
       VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
       SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
