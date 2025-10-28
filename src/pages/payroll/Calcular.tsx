@@ -1,12 +1,13 @@
 // src/pages/payroll/Calcular.tsx
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
+  AlertCircle,
   ArrowLeft,
   Building2,
-  RefreshCw,
-  PlayCircle,
-  AlertCircle,
+  ClipboardList,
   Loader2,
+  PlayCircle,
+  RefreshCw,
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import * as AuthOrgMod from '../../context/AuthOrgContext';
@@ -64,6 +65,31 @@ function getQueryParam(name: string): string | null {
   return url.searchParams.get(name);
 }
 
+function money(value: number | string | null | undefined) {
+  const numeric = Number(value ?? 0);
+  return new Intl.NumberFormat('en-US', {
+    style: 'currency',
+    currency: 'USD',
+    minimumFractionDigits: 2,
+  }).format(Number.isFinite(numeric) ? numeric : 0);
+}
+
+function sum<T extends Record<string, any>>(rows: T[], key: keyof T) {
+  return rows.reduce((acc, row) => acc + Number(row?.[key] ?? 0), 0);
+}
+
+function getInitials(name: string | null | undefined) {
+  if (!name) return '??';
+  const parts = String(name)
+    .trim()
+    .split(/\s+/)
+    .slice(0, 2);
+  return parts
+    .map((p) => p.charAt(0).toUpperCase())
+    .join('')
+    .padEnd(2, '•');
+}
+
 /* ────────────────────────────────────────────────────────────────────────────
    Componente principal
 --------------------------------------------------------------------------- */
@@ -78,6 +104,26 @@ export default function Calcular() {
   const [calculando, setCalculando] = useState(false);
   const [detalle, setDetalle] = useState<any[]>([]);
   const [resumen, setResumen] = useState<any>(null);
+
+  const totals = useMemo(
+    () => ({
+      salario: sum(detalle, 'salario_base'),
+      horas: sum(detalle, 'horas'),
+      total: sum(detalle, 'total'),
+    }),
+    [detalle]
+  );
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    if (!sucursalSeleccionada && sucursales.length > 0 && typeof setSucursalSeleccionada === 'function') {
+      const storedId = localStorage.getItem('selectedSucursalId');
+      const fallback = sucursales.find((s) => String(s.id) === String(storedId));
+      if (fallback) {
+        setSucursalSeleccionada(fallback);
+      }
+    }
+  }, [sucursalSeleccionada, sucursales, setSucursalSeleccionada]);
 
   /* ── Cargar período y detalle ─────────────────────────────────────────── */
   const loadPeriodo = useCallback(async () => {
@@ -100,13 +146,32 @@ export default function Calcular() {
       setPeriodo(pData as Periodo);
 
       // Intentar cargar empleados o líneas si existen
-      const { data: detData, error: detErr } = await supabase
-        .from('hr_periodo_detalle')
-        .select('*')
-        .eq('periodo_id', periodoId);
-      if (detErr && detErr.code !== '42P01') throw detErr;
+      let detalleData: any[] | null = null;
+      let detalleError: any = null;
 
-      setDetalle(detData || []);
+      const { data: viewData, error: viewErr } = await supabase
+        .from('v_ui_periodo_detalle')
+        .select('*')
+        .eq('periodo_id', periodoId)
+        .order('empleado_nombre', { ascending: true });
+
+      if (viewErr && viewErr.code !== '42P01') {
+        detalleError = viewErr;
+      } else if (viewErr?.code === '42P01') {
+        const { data: fallbackData, error: fallbackErr } = await supabase
+          .from('hr_periodo_detalle')
+          .select('*')
+          .eq('periodo_id', periodoId)
+          .order('empleado_nombre', { ascending: true });
+        detalleData = fallbackData ?? [];
+        detalleError = fallbackErr;
+      } else {
+        detalleData = viewData ?? [];
+      }
+
+      if (detalleError && detalleError.code !== '42P01') throw detalleError;
+
+      setDetalle(detalleData ?? []);
 
       // Cargar resumen si existe vista
       const { data: resumenData } = await supabase
@@ -278,33 +343,83 @@ export default function Calcular() {
             <h3 className="text-xl font-semibold mb-4">Empleados del período</h3>
 
             {detalle.length === 0 ? (
-              <p className="text-gray-500">No hay registros de detalle para este período.</p>
+              <div className="flex flex-col items-center justify-center rounded-2xl border border-dashed border-slate-300 bg-slate-50 py-12 text-center">
+                <div className="mb-4 flex h-16 w-16 items-center justify-center rounded-full bg-white shadow-inner">
+                  <ClipboardList className="h-8 w-8 text-slate-400" />
+                </div>
+                <h4 className="text-lg font-semibold text-slate-700">Sin cálculos todavía</h4>
+                <p className="mt-2 max-w-sm text-sm text-slate-500">
+                  Ejecuta el cálculo para generar los detalles de empleados y visualizar la planilla completa.
+                </p>
+                <button
+                  onClick={handleCalcular}
+                  className="mt-6 inline-flex items-center gap-2 rounded-full bg-gradient-to-r from-blue-600 to-purple-600 px-6 py-3 text-sm font-semibold text-white shadow-lg shadow-blue-500/30 transition hover:from-blue-700 hover:to-purple-700"
+                >
+                  <PlayCircle className="h-4 w-4" />
+                  Calcular planilla
+                </button>
+              </div>
             ) : (
-              <div className="overflow-x-auto">
-                <table className="min-w-full text-sm">
-                  <thead className="bg-gray-100 text-gray-700">
-                    <tr>
-                      <th className="px-4 py-2 text-left">Empleado</th>
-                      <th className="px-4 py-2 text-right">Salario</th>
-                      <th className="px-4 py-2 text-right">Horas</th>
-                      <th className="px-4 py-2 text-right">Total</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {detalle.map((row: any, i) => (
-                      <tr key={i} className="border-b">
-                        <td className="px-4 py-2">{row.empleado_nombre ?? row.empleado_id}</td>
-                        <td className="px-4 py-2 text-right">
-                          {Number(row.salario_base ?? 0).toLocaleString('en-US', { minimumFractionDigits: 2 })}
-                        </td>
-                        <td className="px-4 py-2 text-right">{row.horas ?? '—'}</td>
-                        <td className="px-4 py-2 text-right font-semibold">
-                          {Number(row.total ?? 0).toLocaleString('en-US', { minimumFractionDigits: 2 })}
-                        </td>
+              <div className="overflow-hidden rounded-2xl border border-slate-200">
+                <div className="overflow-x-auto">
+                  <table className="min-w-full table-fixed text-sm">
+                    <thead className="sticky top-0 z-10 bg-slate-50/90 backdrop-blur">
+                      <tr className="text-xs uppercase tracking-wide text-slate-500">
+                        <th className="px-6 py-3 text-left font-semibold">Empleado</th>
+                        <th className="px-6 py-3 text-right font-semibold">Salario base</th>
+                        <th className="px-6 py-3 text-right font-semibold">Horas</th>
+                        <th className="px-6 py-3 text-right font-semibold">Total</th>
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {detalle.map((row: any, i) => (
+                        <tr
+                          key={`${row.empleado_id ?? i}-${i}`}
+                          className={i % 2 === 1 ? 'bg-slate-50/60' : 'bg-white'}
+                        >
+                          <td className="px-6 py-4">
+                            <div className="flex items-center gap-3">
+                              <div className="flex h-10 w-10 items-center justify-center rounded-full bg-indigo-100 text-sm font-semibold text-indigo-600">
+                                {getInitials(row.empleado_nombre || row.empleado_id)}
+                              </div>
+                              <div className="min-w-0">
+                                <div className="truncate text-sm font-semibold text-slate-900">
+                                  {row.empleado_nombre ?? 'Empleado sin nombre'}
+                                </div>
+                                <div className="text-xs text-slate-500">{row.empleado_id ?? 'ID no disponible'}</div>
+                              </div>
+                            </div>
+                          </td>
+                          <td className="px-6 py-4 text-right font-medium text-slate-700">{money(row.salario_base)}</td>
+                          <td className="px-6 py-4 text-right text-slate-600">
+                            {Number(row.horas ?? 0).toLocaleString('en-US', {
+                              minimumFractionDigits: 2,
+                              maximumFractionDigits: 2,
+                            })}
+                          </td>
+                          <td className="px-6 py-4 text-right text-sm font-semibold text-slate-900">
+                            {money(row.total)}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                    <tfoot>
+                      <tr className="bg-slate-900 text-slate-50">
+                        <td className="px-6 py-4 text-left text-sm font-semibold uppercase tracking-wide">
+                          Totales
+                        </td>
+                        <td className="px-6 py-4 text-right text-sm font-semibold">{money(totals.salario)}</td>
+                        <td className="px-6 py-4 text-right text-sm font-semibold">
+                          {totals.horas.toLocaleString('en-US', {
+                            minimumFractionDigits: 2,
+                            maximumFractionDigits: 2,
+                          })}
+                        </td>
+                        <td className="px-6 py-4 text-right text-sm font-semibold">{money(totals.total)}</td>
+                      </tr>
+                    </tfoot>
+                  </table>
+                </div>
               </div>
             )}
           </div>
@@ -320,21 +435,15 @@ export default function Calcular() {
                 </div>
                 <div>
                   <div className="text-gray-500 text-sm">Salarios</div>
-                  <div className="text-lg font-semibold">
-                    ${Number(resumen.total_salarios ?? 0).toLocaleString('en-US', { minimumFractionDigits: 2 })}
-                  </div>
+                  <div className="text-lg font-semibold">{money(resumen.total_salarios)}</div>
                 </div>
                 <div>
                   <div className="text-gray-500 text-sm">Deducciones</div>
-                  <div className="text-lg font-semibold">
-                    ${Number(resumen.total_deducciones ?? 0).toLocaleString('en-US', { minimumFractionDigits: 2 })}
-                  </div>
+                  <div className="text-lg font-semibold">{money(resumen.total_deducciones)}</div>
                 </div>
                 <div>
                   <div className="text-gray-500 text-sm">Total Neto</div>
-                  <div className="text-lg font-semibold">
-                    ${Number(resumen.total_neto ?? 0).toLocaleString('en-US', { minimumFractionDigits: 2 })}
-                  </div>
+                  <div className="text-lg font-semibold">{money(resumen.total_neto)}</div>
                 </div>
               </div>
             </div>
