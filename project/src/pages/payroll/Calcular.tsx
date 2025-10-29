@@ -531,104 +531,111 @@ export default function Calcular() {
 
   /* ── UI ────────────────────────────────────────────────────────────────── */
   return (
-    <div className="space-y-6 p-6">
-      <BackBar />
+  <div className="space-y-6 p-6">
+    <BackBar />
 
-      {loading ? (
-        <div className="rounded-2xl bg-white p-8 text-center shadow">
-          <Loader2 className="mx-auto mb-3 h-8 w-8 animate-spin text-accent" />
-          <p>Cargando período…</p>
+    {loading ? (
+      <div className="rounded-2xl bg-white p-8 text-center shadow">
+        <Loader2 className="mx-auto mb-3 h-8 w-8 animate-spin text-accent" />
+        <p>Cargando período…</p>
+      </div>
+    ) : error && !isDemo ? (
+      <div className="rounded-xl border-l-4 border-red-500 bg-red-50 p-4">
+        <div className="flex items-center gap-2 text-red-700">
+          <AlertCircle className="h-5 w-5" />
+          <span className="font-medium">{error}</span>
         </div>
-      ) : error && !isDemo ? (
-        <div className="rounded-xl border-l-4 border-red-500 bg-red-50 p-4">
-          <div className="flex items-center gap-2 text-red-700">
+      </div>
+    ) : !periodo ? (
+      <div className="rounded-2xl bg-white p-8 text-center shadow">
+        <p>No se encontró el período solicitado.</p>
+      </div>
+    ) : (
+      /* ↓↓↓ en vez de <> usamos un contenedor real y lo cerramos más abajo ↓↓↓ */
+      <div className="space-y-6">
+        {isDemo && (
+          <div className="flex items-center gap-2 rounded-xl border border-amber-300 bg-amber-50 p-3 text-amber-800">
             <AlertCircle className="h-5 w-5" />
-            <span className="font-medium">{error}</span>
+            <span className="text-sm">
+              Mostrando datos de ejemplo (modo demo). Intenta «Refrescar» para reconectar con Supabase.
+              {demoReason ? ` (${demoReason})` : ''}
+            </span>
+          </div>
+        )}
+
+        <div className="rounded-2xl border bg-white p-6 shadow">
+          <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+            <div>
+              <h2 className="text-2xl font-semibold">
+                {MESES[periodo.periodo_mes - 1]} {periodo.periodo_ano}
+              </h2>
+              <p className="text-gray-600">
+                {formatDateDDMMYYYY(periodo.fecha_inicio)} — {formatDateDDMMYYYY(periodo.fecha_fin)}
+              </p>
+              <div className="mt-2">
+                <span className={`rounded-full px-3 py-1 text-xs font-medium ${ESTADOS_COLORS[periodo.estado]}`}>
+                  {ESTADOS_LABELS[periodo.estado]}
+                </span>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-3">
+              <button
+                onClick={handleCalcular}
+                disabled={calculando}
+                className="inline-flex items-center gap-2 px-5 py-3 rounded-xl text-white bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-700 hover:to-purple-700 shadow disabled:opacity-50"
+              >
+                <PlayCircle className={`h-5 w-5 ${calculando ? 'animate-spin' : ''}`} />
+                {calculando ? 'Calculando…' : 'Calcular planilla'}
+              </button>
+
+              <button
+                onClick={loadPeriodo}
+                className="inline-flex items-center gap-2 px-5 py-3 rounded-xl border hover:bg-gray-50 shadow"
+              >
+                <RefreshCw className="h-4 w-4" />
+                Refrescar
+              </button>
+
+              {showSyncButton && (
+                <button
+                  onClick={async () => {
+                    try {
+                      const fnUrl = import.meta.env.VITE_SUPABASE_FUNCTIONS_URL?.replace(/\/$/, '');
+                      const sucursalId = (sucursalSeleccionada?.id || (periodo as any)?.sucursal_id) as string | undefined;
+
+                      const res = await fetch(`${fnUrl}/sync_empleados`, {
+                        method: 'POST',
+                        headers: { 'content-type': 'application/json' },
+                        body: JSON.stringify(sucursalId ? { sucursal_id: sucursalId } : {}),
+                      });
+                      const data = await res.json();
+                      if (!res.ok) throw new Error(data?.error || 'Error al sincronizar');
+
+                      console.log('Empleados sincronizados:', data);
+                      await loadPeriodo();
+                      alert('✅ Empleados sincronizados');
+                    } catch (e: any) {
+                      console.error(e);
+                      alert(`❌ Error al sincronizar: ${e?.message || e}`);
+                    }
+                  }}
+                  className="inline-flex items-center gap-2 px-4 py-3 rounded-xl border bg-white hover:bg-gray-50 shadow"
+                  title="Sincronizar empleados desde INVU"
+                >
+                  <Loader2 className="h-4 w-4" />
+                  Sincronizar empleados
+                </button>
+              )}
+            </div>
           </div>
         </div>
-      ) : !periodo ? (
-        <div className="rounded-2xl bg-white p-8 text-center shadow">
-          <p>No se encontró el período solicitado.</p>
-        </div>
-      ) : (
-        <>
-          {isDemo && (
-            <div className="flex items-center gap-2 rounded-xl border border-amber-300 bg-amber-50 p-3 text-amber-800">
-              <AlertCircle className="h-5 w-5" />
-              <span className="text-sm">
-                Mostrando datos de ejemplo (modo demo). Intenta «Refrescar» para reconectar con Supabase.
-                {demoReason ? ` (${demoReason})` : ''}
-              </span>
-            </div>
-          )}
 
-          <div className="rounded-2xl border bg-white p-6 shadow">
-            <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
-              <div>
-                <h2 className="text-2xl font-semibold">
-                  {MESES[periodo.periodo_mes - 1]} {periodo.periodo_ano}
-                </h2>
-                <p className="text-gray-600">
-                  {formatDateDDMMYYYY(periodo.fecha_inicio)} — {formatDateDDMMYYYY(periodo.fecha_fin)}
-                </p>
-                <div className="mt-2">
-                  <span className={`rounded-full px-3 py-1 text-xs font-medium ${ESTADOS_COLORS[periodo.estado]}`}>
-                    {ESTADOS_LABELS[periodo.estado]}
-                  </span>
-                </div>
-              </div>
-
-              <div className="flex items-center gap-3">
-  <button
-    onClick={handleCalcular}
-    disabled={calculando}
-    className="inline-flex items-center gap-2 px-5 py-3 rounded-xl text-white bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-700 hover:to-purple-700 shadow disabled:opacity-50"
-  >
-    <PlayCircle className={`h-5 w-5 ${calculando ? 'animate-spin' : ''}`} />
-    {calculando ? 'Calculando…' : 'Calcular planilla'}
-  </button>
-
-  <button
-    onClick={loadPeriodo}
-    className="inline-flex items-center gap-2 px-5 py-3 rounded-xl border hover:bg-gray-50 shadow"
-  >
-    <RefreshCw className="h-4 w-4" />
-    Refrescar
-  </button>
-
-  {showSyncButton && (
-    <button
-      onClick={async () => {
-        try {
-          // Llama a tu Edge Function /sync_empleados (ajusta URL si ya tienes helper)
-          const fnUrl = import.meta.env.VITE_SUPABASE_FUNCTIONS_URL?.replace(/\/$/, '');
-          const sucursalId = (sucursalSeleccionada?.id || (periodo as any)?.sucursal_id) as string | undefined;
-
-          const res = await fetch(`${fnUrl}/sync_empleados`, {
-            method: 'POST',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify(sucursalId ? { sucursal_id: sucursalId } : {}),
-          });
-          const data = await res.json();
-          if (!res.ok) throw new Error(data?.error || 'Error al sincronizar');
-
-          // Toast simple (si no tienes lib de toasts)
-          console.log('Empleados sincronizados:', data);
-          await loadPeriodo();
-          alert('✅ Empleados sincronizados');
-        } catch (e: any) {
-          console.error(e);
-          alert(`❌ Error al sincronizar: ${e?.message || e}`);
-        }
-      }}
-      className="inline-flex items-center gap-2 px-4 py-3 rounded-xl border bg-white hover:bg-gray-50 shadow"
-      title="Sincronizar empleados desde INVU"
-    >
-      <Loader2 className="h-4 w-4" />
-      Sincronizar empleados
-    </button>
-  )}
-</div>
+        {/* …el resto de tu contenido (tabla empleados, resumen, etc.)… */}
+      </div> /* ← CIERRE del contenedor que reemplaza al fragmento */
+    )}
+  </div>
+);
 
           <div className="rounded-2xl border bg-white p-6 shadow">
             <div className="mb-4 flex flex-col gap-2 sm:flex-row sm:items-baseline sm:justify-between">
