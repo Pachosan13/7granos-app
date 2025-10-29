@@ -12,7 +12,6 @@ import { useNavigate } from 'react-router-dom';
 import * as AuthOrgMod from '../../context/AuthOrgContext';
 import { supabase, shouldUseDemoMode } from '../../lib/supabase';
 import { formatDateDDMMYYYY } from '../../lib/format';
-import { callSupabaseFunction } from '../../lib/functions';
 
 /* ────────────────────────────────────────────────────────────────────────────
    Contexto seguro
@@ -254,7 +253,7 @@ export default function Calcular() {
 
   const checkResolvedViewAvailability = useCallback(async (periodoIdToCheck: string) => {
     const supabaseUrl = import.meta.env.VITE_SUPABASE_URL as string | undefined;
-    theconst supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined;
+    const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined;
 
     if (!supabaseUrl || !supabaseAnonKey || typeof fetch === 'undefined') {
       setResolvedViewAvailable(false);
@@ -719,8 +718,8 @@ export default function Calcular() {
               </div>
             </div>
           )}
-        </div> {/* ← cierre del contenedor: className="space-y-6" */}
-      )}        {/* ← cierre del branch del ternario */}
-    </div>      {/* ← cierre del wrapper: className="space-y-6 p-6" */}
+        </div>
+      )}
+    </div>
   );
 }
