@@ -85,3 +85,4 @@ jobs:
         working-directory: ${{ env.APP_PATH }}
         continue-on-error: true
         run: npx playwright test
+

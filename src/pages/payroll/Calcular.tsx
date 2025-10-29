@@ -4,10 +4,12 @@ import {
   AlertCircle,
   ArrowLeft,
   Building2,
+  CheckCircle2,
   ClipboardList,
   Loader2,
   PlayCircle,
   RefreshCw,
+  UserCog,
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import * as AuthOrgMod from '../../context/AuthOrgContext';
@@ -102,6 +104,15 @@ export default function Calcular() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [calculando, setCalculando] = useState(false);
+  const [syncing, setSyncing] = useState(false);
+  const [showSyncButton, setShowSyncButton] = useState(false);
+  const [syncMessage, setSyncMessage] = useState<
+    | {
+        type: 'success' | 'error';
+        message: string;
+      }
+    | null
+  >(null);
   const [detalle, setDetalle] = useState<any[]>([]);
   const [resumen, setResumen] = useState<any>(null);
 
@@ -113,6 +124,30 @@ export default function Calcular() {
     }),
     [detalle]
   );
+
+  useEffect(() => {
+    const envFlag = String((import.meta as any).env?.VITE_SHOW_SYNC_BUTTON ?? '');
+    if (envFlag === '1') {
+      setShowSyncButton(true);
+      return;
+    }
+    if (typeof window === 'undefined') return;
+    try {
+      const params = new URLSearchParams(window.location.search ?? '');
+      const localAdmin = window.localStorage.getItem('__7gr_admin');
+      if (params.get('admin') === '1' || params.get('preview') === '1' || localAdmin === '1') {
+        setShowSyncButton(true);
+      }
+    } catch (err) {
+      console.warn('No se pudo determinar el modo admin/preview', err);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!syncMessage) return;
+    const timer = window.setTimeout(() => setSyncMessage(null), 4000);
+    return () => window.clearTimeout(timer);
+  }, [syncMessage]);
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
@@ -210,6 +245,51 @@ export default function Calcular() {
       setCalculando(false);
     }
   }, [periodo, loadPeriodo]);
+
+  /* ── Sincronizar empleados ────────────────────────────────────────────── */
+  const handleSyncEmpleados = useCallback(async () => {
+    if (syncing) return;
+    setSyncMessage(null);
+    try {
+      setSyncing(true);
+      const env = (import.meta as any).env ?? {};
+      const baseUrl = String(env.VITE_SUPABASE_FUNCTIONS_URL ?? '').replace(/\/$/, '');
+      const anonKey = String(env.VITE_SUPABASE_ANON_KEY ?? '');
+
+      if (!baseUrl || !anonKey) {
+        throw new Error('Configura VITE_SUPABASE_FUNCTIONS_URL y VITE_SUPABASE_ANON_KEY.');
+      }
+
+      const targetSucursalId = sucursalSeleccionada?.id ?? periodo?.sucursal_id ?? null;
+
+      const response = await fetch(`${baseUrl}/sync_empleados`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          apikey: anonKey,
+          authorization: `Bearer ${anonKey}`,
+        },
+        body: targetSucursalId ? JSON.stringify({ sucursal_id: targetSucursalId }) : undefined,
+      });
+
+      const payload = await response.json().catch(() => ({}));
+      const ok = response.ok && (payload?.ok ?? true) !== false;
+
+      if (!ok) {
+        const message = payload?.error ?? `Error ${response.status}`;
+        throw new Error(String(message));
+      }
+
+      setSyncMessage({ type: 'success', message: 'Empleados sincronizados correctamente.' });
+      await loadPeriodo();
+    } catch (err: any) {
+      console.error('[Calcular] sync_empleados error', err);
+      const message = err?.message ?? 'Error al sincronizar empleados.';
+      setSyncMessage({ type: 'error', message });
+    } finally {
+      setSyncing(false);
+    }
+  }, [syncing, sucursalSeleccionada?.id, periodo?.sucursal_id, loadPeriodo]);
 
   /* ── Cambio de sucursal ───────────────────────────────────────────────── */
   function handleChangeSucursal(e: React.ChangeEvent<HTMLSelectElement>) {
@@ -334,8 +414,36 @@ export default function Calcular() {
                   <RefreshCw className="h-4 w-4" />
                   Refrescar
                 </button>
+                {showSyncButton && (
+                  <button
+                    type="button"
+                    onClick={handleSyncEmpleados}
+                    disabled={syncing}
+                    className="inline-flex items-center gap-2 px-5 py-3 rounded-xl border bg-white hover:bg-gray-50 shadow disabled:opacity-60"
+                    title="Sincronizar empleados desde INVU"
+                  >
+                    {syncing ? <Loader2 className="h-4 w-4 animate-spin" /> : <UserCog className="h-4 w-4" />}
+                    {syncing ? 'Sincronizando…' : 'Sincronizar empleados'}
+                  </button>
+                )}
               </div>
             </div>
+            {syncMessage && (
+              <div
+                className={`mt-4 flex items-center gap-2 rounded-xl border px-4 py-3 text-sm font-medium ${
+                  syncMessage.type === 'success'
+                    ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+                    : 'border-red-200 bg-red-50 text-red-700'
+                }`}
+              >
+                {syncMessage.type === 'success' ? (
+                  <CheckCircle2 className="h-4 w-4" />
+                ) : (
+                  <AlertCircle className="h-4 w-4" />
+                )}
+                <span>{syncMessage.message}</span>
+              </div>
+            )}
           </div>
 
           {/* ── Detalle de empleados */}
