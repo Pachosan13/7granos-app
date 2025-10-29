@@ -719,8 +719,8 @@ export default function Calcular() {
               </div>
             </div>
           )}
-        </div>
-      )}
-    </div>
+        </div> {/* ← cierre del contenedor: className="space-y-6" */}
+      )}        {/* ← cierre del branch del ternario */}
+    </div>      {/* ← cierre del wrapper: className="space-y-6 p-6" */}
   );
 }
