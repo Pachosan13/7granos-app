@@ -13,8 +13,7 @@ import { useNavigate } from 'react-router-dom';
 import * as AuthOrgMod from '../../context/AuthOrgContext';
 import { supabase, shouldUseDemoMode } from '../../lib/supabase';
 import { formatDateDDMMYYYY } from '../../lib/format';
-import { functionsBase } from '../../lib/functionsBase';
-import { ToastContainer, ToastItem, createToast, dismissToast } from '../../components/Toast';
+import { callSupabaseFunction } from '../../lib/functions';
 
 /* ────────────────────────────────────────────────────────────────────────────
    Contexto seguro
@@ -288,6 +287,14 @@ export default function Calcular() {
   );
 
 
+  const showSyncButton =
+    (import.meta as any).env?.VITE_SHOW_SYNC_BUTTON === '1' /* fuerza en CI */
+    || (typeof window !== 'undefined' && (
+         // tu lógica actual de “admin/preview” si tienes una
+         localStorage.getItem('__7gr_admin') === '1' ||
+         window.location.search.includes('admin=1')
+       ));
+  
   const totals = useMemo(
     () => ({
       salario: sum(detalle, 'salario_base'),
@@ -752,36 +759,57 @@ export default function Calcular() {
                 </div>
               </div>
 
-              <div className="flex flex-wrap items-center gap-3">
-                <button
-                  onClick={handleCalcular}
-                  disabled={calculando}
-                  className="inline-flex items-center gap-2 rounded-xl bg-gradient-to-r from-blue-600 to-purple-600 px-5 py-3 text-white shadow transition hover:from-blue-700 hover:to-purple-700 disabled:opacity-50"
-                >
-                  <PlayCircle className={`h-5 w-5 ${calculando ? 'animate-spin' : ''}`} />
-                  {calculando ? 'Calculando…' : 'Calcular planilla'}
-                </button>
-                {showSyncButton && (
-                  <button
-                    onClick={handleSyncEmpleados}
-                    disabled={syncingEmpleados}
-                    className="inline-flex items-center gap-2 rounded-xl border border-indigo-200 bg-indigo-50 px-5 py-3 text-sm font-semibold text-indigo-700 shadow transition hover:bg-indigo-100 disabled:opacity-50"
-                    title="Sincronizar empleados desde INVU"
-                  >
-                    <Users className={`h-4 w-4 ${syncingEmpleados ? 'animate-spin' : ''}`} />
-                    {syncingEmpleados ? 'Sincronizando…' : 'Sincronizar empleados'}
-                  </button>
-                )}
-                <button
-                  onClick={loadPeriodo}
-                  className="inline-flex items-center gap-2 rounded-xl border px-5 py-3 shadow transition hover:bg-gray-50"
-                >
-                  <RefreshCw className="h-4 w-4" />
-                  Refrescar
-                </button>
-              </div>
-            </div>
-          </div>
+              <div className="flex items-center gap-3">
+  <button
+    onClick={handleCalcular}
+    disabled={calculando}
+    className="inline-flex items-center gap-2 px-5 py-3 rounded-xl text-white bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-700 hover:to-purple-700 shadow disabled:opacity-50"
+  >
+    <PlayCircle className={`h-5 w-5 ${calculando ? 'animate-spin' : ''}`} />
+    {calculando ? 'Calculando…' : 'Calcular planilla'}
+  </button>
+
+  <button
+    onClick={loadPeriodo}
+    className="inline-flex items-center gap-2 px-5 py-3 rounded-xl border hover:bg-gray-50 shadow"
+  >
+    <RefreshCw className="h-4 w-4" />
+    Refrescar
+  </button>
+
+  {showSyncButton && (
+    <button
+      onClick={async () => {
+        try {
+          // Llama a tu Edge Function /sync_empleados (ajusta URL si ya tienes helper)
+          const fnUrl = import.meta.env.VITE_SUPABASE_FUNCTIONS_URL?.replace(/\/$/, '');
+          const sucursalId = (sucursalSeleccionada?.id || (periodo as any)?.sucursal_id) as string | undefined;
+
+          const res = await fetch(`${fnUrl}/sync_empleados`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify(sucursalId ? { sucursal_id: sucursalId } : {}),
+          });
+          const data = await res.json();
+          if (!res.ok) throw new Error(data?.error || 'Error al sincronizar');
+
+          // Toast simple (si no tienes lib de toasts)
+          console.log('Empleados sincronizados:', data);
+          await loadPeriodo();
+          alert('✅ Empleados sincronizados');
+        } catch (e: any) {
+          console.error(e);
+          alert(`❌ Error al sincronizar: ${e?.message || e}`);
+        }
+      }}
+      className="inline-flex items-center gap-2 px-4 py-3 rounded-xl border bg-white hover:bg-gray-50 shadow"
+      title="Sincronizar empleados desde INVU"
+    >
+      <Loader2 className="h-4 w-4" />
+      Sincronizar empleados
+    </button>
+  )}
+</div>
 
           <div className="rounded-2xl border bg-white p-6 shadow">
             <div className="mb-4 flex flex-col gap-2 sm:flex-row sm:items-baseline sm:justify-between">

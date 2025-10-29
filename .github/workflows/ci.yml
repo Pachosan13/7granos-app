@@ -11,11 +11,10 @@ jobs:
 
     # 🔐 Secrets disponibles para build y tests
     env:
+      VITE_SHOW_SYNC_BUTTON: "1"   # ⬅️ clave para que aparezca el botón en CI
       VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
       VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
-      # Opcional (NO se expone al frontend; úsalo solo en pasos de servidor/seed si algún día lo necesitas)
       SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-      # Forzar/permitir demo en CI si quisieras: 0 = real, 1 = demo
       VITE_DEMO: 0
 
     steps:
@@ -84,6 +83,11 @@ jobs:
           else
             echo "found=false" >> $GITHUB_OUTPUT
           fi
+          
+      - name: Install Playwright browsers
+        working-directory: ${{ env.APP_PATH }}
+        continue-on-error: true
+        run: npx playwright install --with-deps
 
       - name: Install Playwright
         if: steps.has_pw.outputs.found == 'true'
