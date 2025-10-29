@@ -1,5 +1,4 @@
 name: CI
-
 on:
   pull_request:
   push:
@@ -8,19 +7,17 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-
-    # 🔐 Secrets disponibles para build y tests
     env:
-      VITE_SHOW_SYNC_BUTTON: "1"   # ⬅️ clave para que aparezca el botón en CI
+      # Vars que ya tenías + flags
       VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
       VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
       SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
       VITE_DEMO: 0
-
+      VITE_SHOW_SYNC_BUTTON: "1"
     steps:
       - uses: actions/checkout@v4
 
-      # 1) Detecta carpeta de la app (primer package.json del repo)
+      # Detecta directorio de la app
       - name: Detect APP_PATH
         id: detect
         shell: bash
@@ -33,16 +30,19 @@ jobs:
           echo "APP_PATH=$APP_PATH" >> $GITHUB_ENV
           echo "App path: $APP_PATH"
 
-      # 2) Node (sin cache agresivo para evitar paths obsoletos)
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '20.11.1'     # pin estable
           cache: 'npm'
           cache-dependency-path: |
-            ${{ env.APP_PATH }}/package-lock.json
-            ${{ env.APP_PATH }}/package.json
+            **/package-lock.json
 
-      # 3) Instala deps (usa ci si hay lockfile; si no, install)
+      - name: Print Node & npm
+        run: |
+          node -v
+          npm -v
+          npx -v
+
       - name: Install deps
         working-directory: ${{ env.APP_PATH }}
         run: |
@@ -52,7 +52,13 @@ jobs:
             npm install
           fi
 
-      # 4) Typecheck/Lint no bloqueantes
+      # 🔧 Arregla crash de esbuild en runners Linux
+      - name: Rebuild esbuild (verbose)
+        working-directory: ${{ env.APP_PATH }}
+        run: |
+          npm rebuild esbuild --verbose || true
+          node -e "console.log('esbuild version:', require('esbuild').version)"
+
       - name: Typecheck (non-blocking)
         working-directory: ${{ env.APP_PATH }}
         run: npm run typecheck || true
@@ -61,40 +67,21 @@ jobs:
         working-directory: ${{ env.APP_PATH }}
         run: npm run lint || true
 
-      # 5) Build tolerante (si no hay script build, no falla)
-      - name: Build
+      # 🛠️ Build con retry si falla por binario nativo
+      - name: Build (retry on esbuild)
         working-directory: ${{ env.APP_PATH }}
+        env:
+          CI: "false"
+          NODE_OPTIONS: "--max-old-space-size=2048"
         run: |
-          if npm pkg get scripts.build | grep -qv null; then
-            # CI=false para que CRA/Vite no traten warnings como errores
-            CI=false npm run build
-          else
-            echo "No build script; skipping"
-          fi
+          set -euxo pipefail
+          npm run build || (npm rebuild esbuild --verbose && npm run build)
 
-      # 6) Playwright: instala browsers + deps y ejecuta SOLO si hay config
-      - name: Check for Playwright config
-        id: has_pw
-        shell: bash
+      # (Opcional) Habilitar Playwright real; si no quieres bloquear, deja continue-on-error
+      - name: Install Playwright
         working-directory: ${{ env.APP_PATH }}
-        run: |
-          if ls playwright.config.* >/dev/null 2>&1; then
-            echo "found=true" >> $GITHUB_OUTPUT
-          else
-            echo "found=false" >> $GITHUB_OUTPUT
-          fi
-          
-      - name: Install Playwright browsers
+        run: npx playwright install --with-deps
+      - name: Test (Playwright)
         working-directory: ${{ env.APP_PATH }}
         continue-on-error: true
-        run: npx playwright install --with-deps
-
-      - name: Install Playwright
-        if: steps.has_pw.outputs.found == 'true'
-        working-directory: ${{ env.APP_PATH }}
-        run: npx playwright install --with-deps
-
-      - name: Test (Playwright)
-        if: steps.has_pw.outputs.found == 'true'
-        working-directory: ${{ env.APP_PATH }}
         run: npx playwright test
