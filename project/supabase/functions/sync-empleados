@@ -1,102 +1,171 @@
+// Edge Function: sync-empleados (v4 – robusta + diagnóstico)
+
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
-// Env
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-const INVU_BASE_ROOT = (Deno.env.get("INVU_BASE_URL") ?? "https://api6.invupos.com/invuApiPos/index.php").replace(/\/$/, "");
-const INVU_ROOT = INVU_BASE_ROOT.replace(/\/index\.php$/, "");
-const CREDS_JSON = Deno.env.get("INVU_CREDENTIALS_JSON") ?? "{}";
+const INVU_TOKENS_JSON = Deno.env.get("INVU_TOKENS_JSON") ?? "{}";
+const INVU_CREDENTIALS_JSON = Deno.env.get("INVU_CREDENTIALS_JSON") ?? "{}";
+const INVU_BASE_RAW =
+  Deno.env.get("INVU_BASE_URL") ?? "https://api6.invupos.com/invuApiPos/index.php";
+
+// builder para soportar valores con /index.php y con/ sin '?r='
+function buildUrl(pathWithQuery: string) {
+  const hasR = INVU_BASE_RAW.includes("?r=");
+  const base = INVU_BASE_RAW.replace(/\/$/, "");
+  const rest = pathWithQuery.replace(/^\?r=|^\/|^r=/, "");
+  return hasR ? `${base}${rest.startsWith("empleados/") ? "" : ""}${rest}`
+              : `${base}?r=${rest}`;
+}
 
 const supa = createClient(SUPABASE_URL, SERVICE_ROLE, { auth: { persistSession: false } });
 
-type CredsMap = Record<string, { username: string; password: string }>;
-function J(data: unknown, status = 200) { return new Response(JSON.stringify(data), { status, headers: { "content-type": "application/json; charset=utf-8" } }); }
-function safeParse<T>(x: string, fb: T): T { try { return JSON.parse(x) as T; } catch { return fb; } }
+function json(data: unknown, status = 200) {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: { "content-type": "application/json; charset=utf-8" },
+  });
+}
 
-async function userAuth(sucursalId: string) {
-  const creds: CredsMap = safeParse(CREDS_JSON, {});
-  const c = creds[sucursalId];
-  if (!c?.username || !c?.password) throw new Error(`No hay credenciales para sucursal ${sucursalId}`);
-  const res = await fetch(`${INVU_ROOT}/userAuth`, {
+async function getTokenForSucursal(sucursal_id: string): Promise<string | null> {
+  const tokens = JSON.parse(INVU_TOKENS_JSON || "{}");
+  if (tokens[sucursal_id]?.token) return tokens[sucursal_id].token as string;
+
+  // opción B: credenciales -> pedir token
+  const creds = JSON.parse(INVU_CREDENTIALS_JSON || "{}");
+  const c = creds[sucursal_id];
+  if (!c?.username || !c?.password) return null;
+
+  const res = await fetch(buildUrl("userAuth"), {
     method: "POST",
     headers: { accept: "application/json", "content-type": "application/json" },
-    body: JSON.stringify({ grant_type: "authorization", username: c.username, password: c.password }),
+    body: JSON.stringify({
+      grant_type: "authorization",
+      username: c.username,
+      password: c.password,
+    }),
   });
-  const text = await res.text();
-  if (!res.ok) throw new Error(`userAuth ${res.status}: ${text}`);
-  const json = safeParse(text, {} as any);
-  const token = json?.authorization as string | undefined;
-  if (!token) throw new Error(`userAuth sin authorization: ${text}`);
-  return token;
+  if (!res.ok) return null;
+  const body = await res.json().catch(() => ({} as any));
+  return body?.authorization ?? null;
+}
+
+type RawEmpleado = {
+  id: number;
+  nombres?: string;
+  apellidos?: string;
+  identificacion?: string | null;
+  email?: string | null;
+  movimientos?: unknown[];
+};
+
+function normalize(raw: RawEmpleado[], sucursal_id: string) {
+  const out = [];
+  for (const e of raw) {
+    if (!e || typeof e.id !== "number") continue;
+    if (e.id === 0) continue; // ignora Default
+    const nombre = [e.nombres, e.apellidos].filter(Boolean).join(" ").trim();
+    if (!nombre) continue;
+    out.push({
+      sucursal_id,
+      invu_employee_id: String(e.id),
+      nombre,
+      email: e.email ?? null,
+      last_synced_at: new Date().toISOString(),
+    });
+  }
+  return out;
 }
 
 Deno.serve(async (req) => {
   try {
-    if (req.method !== "POST") return J({ error: "Only POST" }, 405);
-    const body = safeParse(await req.text(), {} as any);
-    const sucursal_id: string | undefined = body?.sucursal_id;
-    const dry_run = Boolean(body?.dry_run);
-    const debug = Boolean(body?.debug);
+    if (req.method !== "POST") return json({ error: "Only POST" }, 405);
+    const body = await req.json().catch(() => ({}));
+    const sucursal_id = body?.sucursal_id as string | undefined;
+    const dry_run = !!body?.dry_run;
+    const debug = !!body?.debug;
+    const force = (body?.force as "mov" | "emp" | undefined) || undefined;
 
-    if (!sucursal_id) return J({ ok: false, error: "Falta sucursal_id" }, 400);
+    if (!sucursal_id) return json({ ok: false, error: "Falta sucursal_id" }, 400);
 
-    // 1) token fresco SIEMPRE
-    const token = await userAuth(sucursal_id);
+    const token = await getTokenForSucursal(sucursal_id);
+    if (!token) {
+      return json({ ok: false, error: `No hay token/credenciales para sucursal_id=${sucursal_id}` }, 400);
+    }
 
-    // 2) SOLO MOVIMIENTOS (ya verificado que devuelve data para ti)
-    const start = 1609459200, end = 1893456000; // 2021..2030
-    const url = `${INVU_BASE_ROOT}?r=empleados/movimientos/fini/${start}/ffin/${end}`;
-    const res = await fetch(url, { headers: { accept: "application/json", AUTHORIZATION: token } });
-    const text = await res.text();
+    const headers = { accept: "application/json", AUTHORIZATION: token };
 
-    if (debug) console.log("GET", url, res.status, text.slice(0, 300));
+    // A) movimientos (rango amplio)
+    const start = 1609459200; // 2021-01-01
+    const end = Math.floor(Date.now() / 1000);
+    const urlMov = buildUrl(`empleados/movimientos/fini/${start}/ffin/${end}`);
 
-    if (!res.ok) return J({ ok: false, step: "movimientos", status: res.status, body: text.slice(0, 600) }, 502);
+    // B) catálogo empleados
+    const urlEmp = buildUrl("empleados/empleados");
 
-    const json = safeParse(text, {} as any);
-    const arr = Array.isArray(json?.data) ? json.data : [];
+    let source: "mov" | "emp" = "mov";
+    let raw: any = null;
 
-    // 3) Normaliza empleados a partir de "data"
-    // INVU entrega { id, nombres, apellidos, ... , movimientos: [] }
-    const nowIso = new Date().toISOString();
-    const rows = arr
-      .map((e: any) => {
-        const id = e?.id;
-        if (id == null) return null;
-        const nombre = [e?.nombres, e?.apellidos].filter(Boolean).join(" ").trim() || null;
-        return {
-          sucursal_id,
-          invu_employee_id: String(id),
-          nombre,
-          email: e?.email ?? null,
-          activo: true,
-          last_synced_at: nowIso,
-        };
-      })
-      .filter(Boolean) as Array<{
-        sucursal_id: string; invu_employee_id: string; nombre: string | null; email: string | null; activo: boolean; last_synced_at: string;
-      }>;
+    if (force !== "emp") {
+      const r = await fetch(urlMov, { headers });
+      if (r.ok) raw = await r.json();
+      if (!Array.isArray(raw?.data) || raw.data.length === 0) raw = null;
+    }
+
+    if (!raw) {
+      const r2 = await fetch(urlEmp, { headers });
+      // algunos tenants devuelven 400 con {error:true}, lo toleramos
+      if (r2.ok) {
+        const t = await r2.text();
+        try {
+          raw = JSON.parse(t);
+          source = "emp";
+        } catch {
+          raw = null;
+        }
+      }
+    }
+
+    const arr: RawEmpleado[] = Array.isArray(raw?.data) ? raw.data : [];
+    const upserts = normalize(arr, sucursal_id);
 
     if (dry_run) {
-      return J({
+      return json({
         ok: true,
         sucursal_id,
-        debug: { url, status: res.status, count: rows.length, sample: rows.slice(0, 3) },
+        source,
+        total_raw: arr.length,
+        preview: upserts.slice(0, 5),
       });
     }
 
-    if (rows.length === 0) {
-      return J({ ok: true, sucursal_id, inserted: 0, note: "movimientos devolvió 0 empleados" });
+    if (upserts.length === 0) {
+      return json({
+        ok: true,
+        sucursal_id,
+        source,
+        total_raw: arr.length,
+        upserted: 0,
+        note: "Sin registros válidos para upsert",
+      });
     }
 
-    const { error } = await supa.from("hr_empleado")
-      .upsert(rows, { onConflict: "sucursal_id,invu_employee_id" });
+    const { error } = await supa
+      .from("hr_empleado")
+      .upsert(upserts, { onConflict: "sucursal_id,invu_employee_id" });
 
-    if (error) return J({ ok: false, error: error.message }, 500);
+    if (error) return json({ ok: false, error: error.message }, 500);
 
-    return J({ ok: true, sucursal_id, inserted: rows.length });
-  } catch (err) {
-    return J({ ok: false, error: (err as Error).message }, 500);
+    return json({
+      ok: true,
+      sucursal_id,
+      source,
+      total_raw: arr.length,
+      upserted: upserts.length,
+      sample: upserts.slice(0, 5),
+    });
+  } catch (e: any) {
+    return json({ ok: false, error: e?.message || String(e) }, 500);
   }
 });
