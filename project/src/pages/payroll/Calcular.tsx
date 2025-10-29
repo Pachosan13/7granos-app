@@ -621,27 +621,24 @@ export default function Calcular() {
                 {showSyncButton && (
                   <button
                     onClick={async () => {
-                      try {
-                        const fnUrl = import.meta.env.VITE_SUPABASE_FUNCTIONS_URL?.replace(/\/$/, '');
-                        const sucursalId =
-                          sucursalSeleccionada?.id ?? periodo?.sucursal_id ?? undefined;
+                  try {
+                    const sucursalId =
+                      (sucursalSeleccionada?.id || (periodo as any)?.sucursal_id) as string | undefined;
+                
+                    const { data, error } = await supabase.functions.invoke('sync-empleados', {
+                      body: sucursalId ? { sucursal_id: sucursalId } : {},
+                    });
+                    if (error) throw error;
+                
+                    console.log('Empleados sincronizados:', data);
+                    await loadPeriodo();
+                    alert('✅ Empleados sincronizados');
+                  } catch (e: any) {
+                    console.error(e);
+                    alert(`❌ Error al sincronizar: ${e?.message || e}`);
+                  }
+                }}
 
-                        const res = await fetch(`${fnUrl}/sync_empleados`, {
-                          method: 'POST',
-                          headers: { 'content-type': 'application/json' },
-                          body: JSON.stringify(sucursalId ? { sucursal_id: sucursalId } : {}),
-                        });
-                        const data = await res.json();
-                        if (!res.ok) throw new Error(data?.error || 'Error al sincronizar');
-
-                        console.log('Empleados sincronizados:', data);
-                        await loadPeriodo();
-                        alert('✅ Empleados sincronizados');
-                      } catch (error) {
-                        console.error(error);
-                        alert(`❌ Error al sincronizar: ${getErrorMessage(error)}`);
-                      }
-                    }}
                     className="inline-flex items-center gap-2 px-4 py-3 rounded-xl border bg-white hover:bg-gray-50 shadow"
                     title="Sincronizar empleados desde INVU"
                   >
