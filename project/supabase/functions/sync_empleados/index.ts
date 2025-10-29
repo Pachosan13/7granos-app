@@ -1,30 +1,19 @@
-// Edge Function: sync-empleados (v4-diag)
-// - Intenta v6 movimientos; si falla o retorna vacío, cae a catálogo empleados.
-// - Upsert por (sucursal_id, invu_employee_id).
-// - Devuelve diagnóstico completo: urlUsed, status, total_raw, sample, mode.
-// - Admite flags en body: { dry_run?: boolean, debug?: boolean, force?: "mov" | "empleados" }
-
+// v3.1 — diagnósticos + auto-refresh de token
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
-const VERSION = "v4-diag";
-
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-const INVU_TOKENS_JSON = Deno.env.get("INVU_TOKENS_JSON") ?? "{}";
 const INVU_BASE_RAW =
-  Deno.env.get("INVU_BASE_URL") ?? "https://api6.invupos.com/invuApiPos/index.php?r=";
+  Deno.env.get("INVU_BASE_URL") ?? "https://api6.invupos.com/invuApiPos/index.php";
+const TOKENS_RAW = Deno.env.get("INVU_TOKENS_JSON") ?? "{}";
+const CREDS_RAW  = Deno.env.get("INVU_CREDENTIALS_JSON") ?? "{}";
 
 function buildUrl(pathWithQuery: string) {
-  // normaliza base para concatenar path con o sin ?r=
-  let base = INVU_BASE_RAW;
-  if (!base.includes("?r=")) {
-    // si la base terminara en 'index.php' sin '?r=', se lo agregamos
-    base = base.replace(/\/?$/, "");
-    if (!base.endsWith("?r=")) base = base + (base.includes("?") ? "" : "?r=");
-  }
+  // admite con o sin ?r=
+  const hasR = /\?r=/.test(INVU_BASE_RAW);
   const rest = pathWithQuery.replace(/^\?r=/, "");
-  return `${base}${rest}`;
+  return `${INVU_BASE_RAW}${hasR ? "" : "?r="}${rest}`;
 }
 
 const supa = createClient(SUPABASE_URL, SERVICE_ROLE, { auth: { persistSession: false } });
@@ -36,118 +25,98 @@ function json(data: unknown, status = 200) {
   });
 }
 
-async function fetchInvu(path: string, token: string) {
-  const url = buildUrl(path);
+async function fetchInvuEmployeesByMov(token: string) {
+  // rango amplio: 2021-01-01 a 2030-01-01
+  const url = buildUrl("empleados/movimientos/fini/1609459200/ffin/1893456000");
+  return await fetch(url, {
+    headers: { "AUTHORIZATION": token, "accept": "application/json" },
+  });
+}
+
+async function userAuth(username: string, password: string) {
+  const url = buildUrl("userAuth");
   const res = await fetch(url, {
-    headers: { AUTHORIZATION: token, accept: "application/json" },
+    method: "POST",
+    headers: { "content-type": "application/json", "accept": "application/json" },
+    body: JSON.stringify({ grant_type: "authorization", username, password }),
   });
   const text = await res.text();
-  let data: any = null;
-  try {
-    data = JSON.parse(text);
-  } catch (_) {
-    // puede venir HTML si el token o la ruta están mal
-  }
-  return { url, status: res.status, text, data };
+  if (!res.ok) throw new Error(`userAuth ${res.status}: ${text}`);
+  const j = JSON.parse(text);
+  const token = j?.authorization ?? j?.Authorization ?? j?.auth ?? null;
+  if (!token) throw new Error(`userAuth ok pero sin token: ${text}`);
+  return token as string;
 }
 
 Deno.serve(async (req) => {
   try {
     if (req.method !== "POST") return json({ error: "Only POST" }, 405);
     const body = await req.json().catch(() => ({}));
-    const sucursal_id = body?.sucursal_id as string | undefined;
-    const dry_run = Boolean(body?.dry_run);
-    const debug = Boolean(body?.debug);
-    const force: "mov" | "empleados" | undefined = body?.force;
+    const { sucursal_id, dry_run, debug, force } = body ?? {};
+
+    const tokens = JSON.parse(TOKENS_RAW || "{}");
+    const creds  = JSON.parse(CREDS_RAW  || "{}");
+
+    if (debug) {
+      return json({
+        ok: true,
+        debug: {
+          invu_base_url: INVU_BASE_RAW,
+          sucursal_id,
+          tokens_keys: Object.keys(tokens),
+          has_token: Boolean(tokens?.[sucursal_id]?.token),
+          has_creds: Boolean(creds?.[sucursal_id]),
+          force
+        }
+      });
+    }
 
     if (!sucursal_id) return json({ ok: false, error: "Falta sucursal_id" }, 400);
 
-    const tokens = JSON.parse(INVU_TOKENS_JSON || "{}");
-    const token = tokens[sucursal_id]?.token as string | undefined;
-    if (!token) return json({ ok: false, error: `No hay token para sucursal_id=${sucursal_id}` }, 400);
+    let token: string | undefined = tokens?.[sucursal_id]?.token;
 
-    // 1) intento A: movimientos v6 (ventana amplia)
-    const start_date = 1609459200; // 2021-01-01
-    const end_date = Math.floor(Date.now() / 1000);
-    const tryMov = async () =>
-      await fetchInvu(`empleados/movimientos/fini/${start_date}/ffin/${end_date}`, token);
-
-    // 2) intento B: catálogo de empleados
-    const tryEmps = async () => await fetchInvu(`empleados/empleados&limit=500`, token);
-
-    let first = { url: "", status: 0, text: "", data: null as any };
-    let second = { url: "", status: 0, text: "", data: null as any };
-    let mode: "mov" | "empleados" = "mov";
-    let empleados: any[] = [];
-
-    if (force === "empleados") {
-      first = await tryEmps();
-      mode = "empleados";
-    } else if (force === "mov") {
-      first = await tryMov();
-      mode = "mov";
-    } else {
-      // estrategia por defecto: intenta mov primero
-      first = await tryMov();
-      mode = "mov";
+    // si nos piden forzar refresh o no hay token, intenta userAuth
+    if (!token || force === "auth") {
+      const c = creds?.[sucursal_id];
+      if (!c) return json({ ok: false, error: `No hay token ni credenciales para sucursal_id=${sucursal_id}` }, 400);
+      token = await userAuth(c.username, c.password);
     }
 
-    // si mov falla o no trae data útil, cae a empleados
-    const extractMov = (d: any) => (Array.isArray(d?.data) ? d.data : []);
-    const extractEmp = (d: any) => (Array.isArray(d?.data) ? d.data : Array.isArray(d) ? d : []);
-
-    if (mode === "mov") {
-      empleados = extractMov(first.data);
-      if (first.status !== 200 || empleados.length === 0) {
-        second = await tryEmps();
-        empleados = extractEmp(second.data);
-        mode = "empleados";
-      }
-    } else {
-      empleados = extractEmp(first.data);
+    // 1er intento al endpoint de movimientos
+    let res = await fetchInvuEmployeesByMov(token);
+    if (res.status === 401 || res.status === 403) {
+      // reintenta con userAuth (token vencido)
+      const c = creds?.[sucursal_id];
+      if (!c)
+        return json({ ok: false, error: `Token inválido y no hay credenciales para refresh (sucursal_id=${sucursal_id})` }, 400);
+      token = await userAuth(c.username, c.password);
+      res = await fetchInvuEmployeesByMov(token);
     }
 
-    const total_raw = Array.isArray(empleados) ? empleados.length : 0;
-    const sample = (empleados || []).slice(0, 5).map((e: any) => ({
-      invu_employee_id: String(e?.id ?? ""),
-      nombre: [e?.nombres, e?.apellidos].filter(Boolean).join(" ").trim(),
-    }));
+    const text = await res.text();
+    if (!res.ok) return json({ ok: false, error: `INVU ${res.status}: ${text}` }, 502);
+
+    const parsed = JSON.parse(text);
+    const data = Array.isArray(parsed?.data) ? parsed.data : [];
+    const total_raw = data.length;
+    const sample = data.slice(0, 5);
 
     if (dry_run) {
-      return json({
-        ok: true,
-        version: VERSION,
-        mode,
-        first: { url: first.url, status: first.status },
-        second: second.url ? { url: second.url, status: second.status } : null,
-        total_raw,
-        sample,
-      });
+      return json({ ok: true, sucursal_id, total_raw, sample });
     }
 
-    // Mapeo para upsert
-    const rows =
-      (empleados || []).map((e: any) => ({
-        sucursal_id,
-        invu_employee_id: String(e?.id ?? ""),
-        nombre: [e?.nombres, e?.apellidos].filter(Boolean).join(" ").trim() || null,
-        email: e?.email ?? null,
-        last_synced_at: new Date().toISOString(),
-      })) ?? [];
-
-    if (rows.length === 0) {
-      return json({
-        ok: true,
-        version: VERSION,
-        mode,
-        first: { url: first.url, status: first.status },
-        second: second.url ? { url: second.url, status: second.status } : null,
-        upserted: 0,
-        total_raw,
-        sample,
-        note: "No hubo filas para upsert",
-      });
+    if (total_raw === 0) {
+      return json({ ok: true, sucursal_id, upserted: 0, note: "sin empleados" });
     }
+
+    const rows = data.map((e: any) => ({
+      sucursal_id,
+      invu_employee_id: String(e.id ?? ""),
+      nombre: [e.nombres, e.apellidos].filter(Boolean).join(" ").trim() || String(e.id ?? ""),
+      email: e.email ?? null,
+      activo: true,
+      last_synced_at: new Date().toISOString(),
+    }));
 
     const { error: upErr } = await supa
       .from("hr_empleado")
@@ -155,21 +124,8 @@ Deno.serve(async (req) => {
 
     if (upErr) return json({ ok: false, error: upErr.message }, 500);
 
-    return json({
-      ok: true,
-      version: VERSION,
-      mode,
-      upserted: rows.length,
-      total_raw,
-      sample,
-      debug: debug
-        ? {
-            first: { url: first.url, status: first.status },
-            second: second.url ? { url: second.url, status: second.status } : null,
-          }
-        : undefined,
-    });
-  } catch (err) {
-    return json({ ok: false, error: (err as Error).message }, 500);
+    return json({ ok: true, sucursal_id, upserted: rows.length, total_raw, sample });
+  } catch (e: any) {
+    return json({ ok: false, error: e?.message ?? String(e) }, 500);
   }
 });
