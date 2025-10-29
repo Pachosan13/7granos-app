@@ -1,24 +1,24 @@
-// Deno Deploy / Supabase Edge Function
-// POST body: { sucursal_id: string }
+// Edge Function: sync-empleados
+// Sincroniza empleados desde INVU usando endpoint v6 (movimientos)
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
-type TokensBySucursal = Record<string, { token: string }>;
-
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
-const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-const INVU_BASE_URL =
-  // deja el valor que ya usas en tus otras funciones (v6):
-  Deno.env.get("INVU_BASE_URL") ?? "https://api6.invupos.com/invuApiPos/index.php?r";
+const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const INVU_TOKENS_JSON = Deno.env.get("INVU_TOKENS_JSON") ?? "{}";
 
-const supa = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
+// ✅ IMPORTANTE: base correcta
+const INVU_BASE_URL =
+  Deno.env.get("INVU_BASE_URL") ??
+  "https://api6.invupos.com/invuApiPos/index.php?r=";
+
+const supa = createClient(SUPABASE_URL, SERVICE_ROLE, {
   auth: { persistSession: false },
 });
 
-function json(res: unknown, status = 200) {
-  return new Response(JSON.stringify(res), {
+function response(data: unknown, status = 200) {
+  return new Response(JSON.stringify(data), {
     status,
     headers: { "content-type": "application/json; charset=utf-8" },
   });
@@ -26,106 +26,69 @@ function json(res: unknown, status = 200) {
 
 Deno.serve(async (req) => {
   try {
-    if (req.method !== "POST") return json({ error: "Only POST" }, 405);
-    const { sucursal_id } = (await req.json()) as { sucursal_id?: string };
-    if (!sucursal_id) return json({ ok: false, error: "Falta sucursal_id" }, 400);
+    if (req.method !== "POST") return response({ error: "Only POST" }, 405);
 
-    // 1) token por sucursal
-    const tokens: TokensBySucursal = JSON.parse(INVU_TOKENS_JSON);
-    const cred = tokens[sucursal_id];
-    if (!cred?.token) {
-      return json(
-        { ok: false, error: `No hay token en INVU_TOKENS_JSON para sucursal_id=${sucursal_id}` },
+    const { sucursal_id } = await req.json();
+    if (!sucursal_id) return response({ ok: false, error: "Falta sucursal_id" }, 400);
+
+    const tokens = JSON.parse(INVU_TOKENS_JSON);
+    const token = tokens[sucursal_id]?.token;
+    if (!token)
+      return response(
+        { ok: false, error: `No hay token para sucursal_id=${sucursal_id}` },
         400,
       );
-    }
 
-    // 2) Llamar a INUV v6 usando el endpoint confirmado de "movimientos"
-    //    Usamos un rango amplio para traer el roster completo.
-    const start = 0; // 1970-01-01
-    const end = Math.floor(Date.now() / 1000); // ahora (epoch seg)
+    // ✅ Endpoint correcto confirmado en tu prueba
+    const start_date = 1609459200; // 2021-01-01 (broad range)
+    const end_date = Math.floor(Date.now() / 1000); // ahora
+    const url = `${INVU_BASE_URL}empleados/movimientos/fini/${start_date}/ffin/${end_date}`;
 
-    const url = `${INVU_BASE_URL}/empleados/movimientos/fini/${start}/ffin/${end}`;
     const invuRes = await fetch(url, {
       headers: {
-        // MUY IMPORTANTE: en v6 se usa AUTHORIZATION en mayúsculas
-        AUTHORIZATION: cred.token,
+        AUTHORIZATION: token,
         accept: "application/json",
       },
     });
 
-    const raw = await invuRes.text();
+    const text = await invuRes.text();
     if (!invuRes.ok) {
-      return json(
+      return response(
         {
           ok: false,
-          error: `INVU empleados ${invuRes.status}: ${raw}`,
+          error: `INVU empleados ${invuRes.status}: ${text}`,
         },
         502,
       );
     }
 
-    let parsed: any;
-    try {
-      parsed = JSON.parse(raw);
-    } catch {
-      return json({ ok: false, error: "Respuesta INVU no es JSON", raw }, 502);
+    const parsed = JSON.parse(text);
+    const empleados = Array.isArray(parsed?.data) ? parsed.data : [];
+
+    if (!empleados.length) {
+      return response({ ok: true, sucursal_id, upserted: 0, note: "Sin empleados" });
     }
 
-    const empleados: Array<{
-      id: number;
-      nombres: string;
-      apellidos: string;
-      identificacion: string | null;
-      email: string | null;
-    }> = Array.isArray(parsed?.data) ? parsed.data : [];
-
-    // 3) Normalizar y upsert en hr_empleado
-    //    Campos esperados en tu tabla: id (uuid), sucursal_id (uuid), invu_employee_id (int/text),
-    //    nombre (text), email (text), last_synced_at (timestamptz)
-    //    - Si la tabla tiene otras columnas NOT NULL, ajústalas aquí con defaults.
-    const rows = empleados.map((e) => ({
+    const upserts = empleados.map((e: any) => ({
       sucursal_id,
       invu_employee_id: String(e.id),
-      nombre: [e.nombres, e.apellidos].filter(Boolean).join(" ").trim() || e.identificacion || `Emp${e.id}`,
+      nombre: [e.nombres, e.apellidos].filter(Boolean).join(" ").trim(),
       email: e.email ?? null,
       last_synced_at: new Date().toISOString(),
     }));
 
-    // Evita upsert vacío (en cuyo caso devolvemos ok:true sin tocar nada)
-    if (rows.length === 0) {
-      return json({ ok: true, received: { sucursal_id }, upserted: 0, note: "INVU devolvió 0 empleados" });
-    }
-
-    // upsert por (sucursal_id, invu_employee_id)
     const { error: upErr } = await supa
       .from("hr_empleado")
-      .upsert(rows, {
-        onConflict: "sucursal_id,invu_employee_id",
-        ignoreDuplicates: false,
-      });
+      .upsert(upserts, { onConflict: "sucursal_id,invu_employee_id" });
 
-    if (upErr) {
-      return json({ ok: false, error: `Upsert hr_empleado: ${upErr.message}` }, 500);
-    }
+    if (upErr) return response({ ok: false, error: upErr.message }, 500);
 
-    // Recuento por sucursal para devolver algo útil
-    const { data: countRows, error: cErr } = await supa
-      .from("hr_empleado")
-      .select("id", { count: "exact", head: true })
-      .eq("sucursal_id", sucursal_id);
-
-    if (cErr) {
-      return json({ ok: true, received: { sucursal_id }, upserted: rows.length, warn: cErr.message });
-    }
-
-    return json({
+    return response({
       ok: true,
-      received: { sucursal_id },
-      upserted: rows.length,
-      empleados_en_sucursal: countRows === null ? undefined : countRows, // supabase-js v2 coloca el count en .count al usar head:true
+      sucursal_id,
+      upserted: upserts.length,
     });
-  } catch (e) {
-    return json({ ok: false, error: (e as Error).message ?? String(e) }, 500);
+  } catch (err) {
+    return response({ ok: false, error: (err as Error).message }, 500);
   }
 });
