@@ -15,7 +15,7 @@ type InvuEmpleado = {
 type Payload = {
   // si viene → sincroniza SOLO esa sucursal
   sucursal_id?: string;
-  // si NO viene → sincroniza todas las sucursales definidas en INVU_TOKENS_JSON
+  // si no viene → sincroniza todas las sucursales definidas en INVU_TOKENS_JSON
 };
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
@@ -29,19 +29,14 @@ const SB_HEADERS = {
   "Content-Type": "application/json",
 };
 
-// helpers
 const norm = (s: string | null | undefined) => (s ?? "").trim();
 
 async function fetchInvuEmpleados(authToken: string): Promise<InvuEmpleado[]> {
   const url = new URL(INVU_BASE_URL);
-  // Muchos tenants exponen la lista como r=empleados
-  url.searchParams.set("r", "empleados");
+  url.searchParams.set("r", "empleados"); // lista completa de empleados
 
   const res = await fetch(url.toString(), {
-    headers: {
-      accept: "application/json",
-      AUTHORIZATION: authToken,
-    },
+    headers: { accept: "application/json", AUTHORIZATION: authToken },
   });
 
   if (!res.ok) {
@@ -55,23 +50,18 @@ async function fetchInvuEmpleados(authToken: string): Promise<InvuEmpleado[]> {
 }
 
 async function upsertChunk(rows: any[]) {
-  // Intento directo
+  // intento directo
   const res = await fetch(`${SUPABASE_URL}/rest/v1/hr_empleado`, {
     method: "POST",
     headers: SB_HEADERS,
     body: JSON.stringify(rows),
   });
-
   if (res.ok || res.status === 204) return;
 
-  // Conflicto → forzar upsert por índice único que tengas activo
+  // conflicto → forzar upsert por índice único (sucursal_id, invu_employee_id)
   const res2 = await fetch(
     `${SUPABASE_URL}/rest/v1/hr_empleado?on_conflict=sucursal_id,invu_employee_id`,
-    {
-      method: "POST",
-      headers: SB_HEADERS,
-      body: JSON.stringify(rows),
-    },
+    { method: "POST", headers: SB_HEADERS, body: JSON.stringify(rows) },
   );
   if (!res2.ok) {
     const t = await res2.text();
@@ -83,11 +73,10 @@ async function syncOneSucursal(sucursal_id: string, cfg: TokenMapEntry) {
   const empleados = await fetchInvuEmpleados(cfg.token);
   const nowIso = new Date().toISOString();
 
-  // Map → filas hr_empleado
   const rows = empleados.map((e) => ({
     sucursal_id,
     invu_employee_id: e.id,
-    empleado_id: String(e.id), // ID externo como string
+    empleado_id: String(e.id), // id externo como string
     nombre: `${norm(e.nombres)} ${norm(e.apellidos)}`.trim() || `Emp ${e.id}`,
     email: norm(e.email) || null,
     invu_identificacion: norm(e.identificacion) || null,
@@ -95,7 +84,6 @@ async function syncOneSucursal(sucursal_id: string, cfg: TokenMapEntry) {
     last_synced_at: nowIso,
   }));
 
-  // Batch para cargas grandes
   let total = 0;
   const CHUNK = 500;
   for (let i = 0; i < rows.length; i += CHUNK) {
@@ -107,29 +95,30 @@ async function syncOneSucursal(sucursal_id: string, cfg: TokenMapEntry) {
 }
 
 Deno.serve(async (req) => {
+  // CORS
+  const cors = {
+    "access-control-allow-origin": "*",
+    "access-control-allow-headers": "authorization,content-type",
+  };
+  if (req.method === "OPTIONS") return new Response(null, { headers: cors });
+
   try {
     const payload = (await req.json().catch(() => ({}))) as Payload;
 
     let tokenMap: TokenMap = {};
-    try {
-      tokenMap = JSON.parse(TOKENS_RAW);
-    } catch {
-      tokenMap = {};
-    }
+    try { tokenMap = JSON.parse(TOKENS_RAW); } catch { tokenMap = {}; }
 
     const targets: Array<[string, TokenMapEntry]> = [];
-
     if (payload.sucursal_id) {
       const cfg = tokenMap[payload.sucursal_id];
       if (!cfg?.token) {
         return new Response(JSON.stringify({
           ok: false,
           error: `No hay token en INVU_TOKENS_JSON para sucursal_id=${payload.sucursal_id}`,
-        }), { status: 400, headers: { "content-type": "application/json" } });
+        }), { status: 400, headers: { "content-type": "application/json", ...cors } });
       }
       targets.push([payload.sucursal_id, cfg]);
     } else {
-      // todas las sucursales que aparezcan en el JSON
       for (const [sucId, cfg] of Object.entries(tokenMap)) {
         if (cfg?.token) targets.push([sucId, cfg]);
       }
@@ -137,7 +126,7 @@ Deno.serve(async (req) => {
         return new Response(JSON.stringify({
           ok: false,
           error: "INVU_TOKENS_JSON está vacío o malformado.",
-        }), { status: 400, headers: { "content-type": "application/json" } });
+        }), { status: 400, headers: { "content-type": "application/json", ...cors } });
       }
     }
 
@@ -148,13 +137,13 @@ Deno.serve(async (req) => {
     }
 
     return new Response(JSON.stringify({ ok: true, results }), {
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", ...cors },
     });
   } catch (e) {
     console.error(e);
     return new Response(JSON.stringify({ ok: false, error: String(e?.message ?? e) }), {
       status: 500,
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", ...cors },
     });
   }
 });
