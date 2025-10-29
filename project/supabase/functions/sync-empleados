@@ -1,23 +1,37 @@
-// Edge Function: sync-empleados (robusta con fallback)
-// 1) Intenta empleados/movimientos (v6).
-// 2) Si viene vacío, usa empleados/empleados (catálogo).
-// 3) Upsert por (sucursal_id, invu_employee_id).
-// 4) Devuelve conteo y un sample para inspección rápida.
+// Edge Function: sync-empleados (v3, con diagnóstico detallado)
+// - Intenta v6 movimientos; si viene vacío, cae a catálogo empleados.
+// - Upsert por (sucursal_id, invu_employee_id).
+// - Devuelve: upserted, urlUsed, mode, sample (primeros 5), total_raw.
+// - Soporta dry_run para probar sin escribir (dry_run=true).
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
+const VERSION = "v3-diagnostic";
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const INVU_TOKENS_JSON = Deno.env.get("INVU_TOKENS_JSON") ?? "{}";
-const INVU_BASE_URL =
+const INVU_BASE_RAW =
   Deno.env.get("INVU_BASE_URL") ?? "https://api6.invupos.com/invuApiPos/index.php";
+
+// normaliza INVU_BASE para poder concatenar bien los path/query
+function buildUrl(pathWithQuery: string) {
+  // Soportar bases tipo ".../index.php" o ".../index.php?r="
+  if (INVU_BASE_RAW.includes("?r=")) {
+    // base ya incluye ?r= → solo concatenamos el resto sin '?r='
+    const rest = pathWithQuery.replace(/^\?r=/, "");
+    return `${INVU_BASE_RAW}${rest.startsWith("empleados/") ? "" : ""}${rest}`;
+  }
+  // base sin ?r= → añadimos ?r=
+  const rest = pathWithQuery.replace(/^\?r=/, "");
+  return `${INVU_BASE_RAW}?r=${rest}`;
+}
 
 const supa = createClient(SUPABASE_URL, SERVICE_ROLE, {
   auth: { persistSession: false },
 });
 
-function j(data: unknown, status = 200) {
+function J(data: unknown, status = 200) {
   return new Response(JSON.stringify(data), {
     status,
     headers: { "content-type": "application/json; charset=utf-8" },
@@ -56,76 +70,102 @@ async function fetchJSON(url: string, token: string) {
   });
   const text = await res.text();
   let json: any = null;
-  try {
-    json = JSON.parse(text);
-  } catch {
-    // keep text for diagnostics
-  }
+  try { json = JSON.parse(text); } catch { /* keep raw text */ }
   return { ok: res.ok, status: res.status, text, json };
 }
 
 Deno.serve(async (req) => {
   try {
-    if (req.method !== "POST") return j({ error: "Only POST" }, 405);
+    if (req.method !== "POST") return J({ error: "Only POST" }, 405);
 
-    const { sucursal_id } = await req.json();
-    if (!sucursal_id) return j({ ok: false, error: "Falta sucursal_id" }, 400);
+    const body = await req.json().catch(() => ({}));
+    const sucursal_id = body?.sucursal_id as string | undefined;
+    const dry_run = Boolean(body?.dry_run);
 
-    const tokens = JSON.parse(INVU_TOKENS_JSON);
+    if (!sucursal_id) return J({ ok: false, error: "Falta sucursal_id", version: VERSION }, 400);
+
+    const tokens = JSON.parse(INVU_TOKENS_JSON || "{}");
     const token: string | undefined = tokens[sucursal_id]?.token;
-    if (!token) return j({ ok: false, error: `No hay token para sucursal_id=${sucursal_id}` }, 400);
+    if (!token) return J({ ok: false, error: `No hay token para sucursal_id=${sucursal_id}`, version: VERSION }, 400);
 
-    // 1) Intento por movimientos
+    // 1) Intento por movimientos (amplio rango por si acaso)
     const start_date = 1609459200; // 2021-01-01
     const end_date = Math.floor(Date.now() / 1000);
-    const urlMov = `${INVU_BASE_URL}?r=empleados/movimientos/fini/${start_date}/ffin/${end_date}`;
+    const urlMov = buildUrl(`empleados/movimientos/fini/${start_date}/ffin/${end_date}`);
     const mov = await fetchJSON(urlMov, token);
 
+    let mode = "movimientos";
     let empleados: EmpleadoINVU[] = Array.isArray(mov.json?.data) ? mov.json.data : [];
-
-    // 2) Fallback a catálogo si viene vacío
     let urlUsed = urlMov;
-    if (!empleados.length) {
-      const urlCat = `${INVU_BASE_URL}?r=empleados/empleados&limit=500`;
-      const cat = await fetchJSON(urlCat, token);
-      urlUsed = urlCat;
+    let rawStatus = mov.status;
+    let rawOk = mov.ok;
 
-      if (!cat.ok) {
-        return j({
+    // 2) Fallback catálogo si viene vacío o error
+    if (!rawOk || !empleados.length) {
+      const urlCat = buildUrl("empleados/empleados&limit=500");
+      const cat = await fetchJSON(urlCat, token);
+      mode = "empleados";
+      urlUsed = urlCat;
+      rawStatus = cat.status;
+      rawOk = cat.ok;
+      empleados = Array.isArray(cat.json?.data) ? cat.json.data : [];
+
+      if (!rawOk) {
+        return J({
           ok: false,
+          version: VERSION,
           step: "catalog",
-          status: cat.status,
-          error: cat.text,
+          status: rawStatus,
           urlUsed,
-          base: INVU_BASE_URL,
+          base: INVU_BASE_RAW,
+          errorText: cat.text?.slice(0, 500),
         }, 502);
       }
-      empleados = Array.isArray(cat.json?.data) ? cat.json.data : [];
     }
 
+    const total_raw = empleados.length;
     const rows = normalize(sucursal_id, empleados);
-    if (!rows.length) {
-      return j({
+    const sample = rows.slice(0, 5).map((r) => ({
+      invu_employee_id: r.invu_employee_id,
+      nombre: r.nombre,
+    }));
+
+    if (dry_run) {
+      return J({
         ok: true,
+        version: VERSION,
         sucursal_id,
-        upserted: 0,
+        mode,
         urlUsed,
-        base: INVU_BASE_URL,
-        note: "Sin empleados o normalización vacía",
+        base: INVU_BASE_RAW,
+        total_raw,
+        to_upsert: rows.length,
+        sample,
+        dry_run: true,
       });
     }
 
-    const { error } = await supa
-      .from("hr_empleado")
-      .upsert(rows, { onConflict: "sucursal_id,invu_employee_id" });
+    let upserted = 0;
+    if (rows.length) {
+      const { error } = await supa
+        .from("hr_empleado")
+        .upsert(rows, { onConflict: "sucursal_id,invu_employee_id" });
+      if (error) return J({ ok: false, version: VERSION, error: error.message, urlUsed, base: INVU_BASE_RAW }, 500);
+      upserted = rows.length;
+    }
 
-    if (error) return j({ ok: false, error: error.message, urlUsed, base: INVU_BASE_URL }, 500);
-
-    // muestra un sample para ver que realmente entraron nombres/ids
-    const sample = rows.slice(0, 5).map((r) => ({ invu_employee_id: r.invu_employee_id, nombre: r.nombre }));
-
-    return j({ ok: true, sucursal_id, upserted: rows.length, urlUsed, base: INVU_BASE_URL, sample });
+    return J({
+      ok: true,
+      version: VERSION,
+      sucursal_id,
+      mode,
+      urlUsed,
+      base: INVU_BASE_RAW,
+      total_raw,
+      upserted,
+      sample,
+    });
   } catch (err: any) {
-    return j({ ok: false, error: err?.message ?? String(err) }, 500);
+    return J({ ok: false, version: VERSION, error: err?.message ?? String(err) }, 500);
   }
 });
