@@ -126,8 +126,14 @@ function money(value: number | string | null | undefined) {
   }).format(Number.isFinite(numeric) ? numeric : 0);
 }
 
-function sum<T extends Record<string, any>>(rows: T[], key: keyof T) {
-  return rows.reduce((acc, row) => acc + Number(row?.[key] ?? 0), 0);
+type NumericLike = number | string | null | undefined;
+
+function sum<T extends Record<string, NumericLike>>(rows: T[], key: keyof T) {
+  return rows.reduce((acc, row) => {
+    const rawValue = row[key] as NumericLike;
+    const numeric = typeof rawValue === 'number' ? rawValue : Number(rawValue ?? 0);
+    return acc + (Number.isFinite(numeric) ? numeric : 0);
+  }, 0);
 }
 
 function formatHours(value: number | string | null | undefined) {
@@ -141,6 +147,17 @@ function getInitials(name: string | null | undefined) {
   if (!name) return '??';
   const parts = String(name).trim().split(/\s+/).slice(0, 2);
   return parts.map((p) => p.charAt(0).toUpperCase()).join('').padEnd(2, '•');
+}
+
+function getErrorMessage(error: unknown) {
+  if (error instanceof Error) return error.message;
+  if (typeof error === 'string') return error;
+  try {
+    return JSON.stringify(error);
+  } catch (stringifyError) {
+    void stringifyError;
+    return 'Error desconocido';
+  }
 }
 
 /* ────────────────────────────────────────────────────────────────────────────
@@ -201,7 +218,7 @@ export default function Calcular() {
 
   // ✅ Una sola declaración: controla visibilidad del botón de sincronización
   const showSyncButton =
-    (import.meta as any).env?.VITE_SHOW_SYNC_BUTTON === '1' ||
+    import.meta.env.VITE_SHOW_SYNC_BUTTON === '1' ||
     (typeof window !== 'undefined' &&
       (localStorage.getItem('__7gr_admin') === '1' || window.location.search.includes('admin=1')));
 
@@ -415,7 +432,7 @@ export default function Calcular() {
 
       await supabase.from('hr_periodo_detalle').delete().eq('periodo_id', periodo.id);
 
-      let rows: any[] = [];
+      let rows: PeriodoDetalle[] = [];
 
       if (empleados && empleados.length) {
         const filtrados = empleados.filter((e) =>
@@ -432,9 +449,30 @@ export default function Calcular() {
       } else {
         // demo mínimo si no hay maestro
         rows = [
-          { periodo_id: periodo.id, empleado_id: 'E-001', empleado_nombre: 'Juan Pérez',  salario_base: 900,  horas: 40, total: 900 },
-          { periodo_id: periodo.id, empleado_id: 'E-002', empleado_nombre: 'María Gómez', salario_base: 850,  horas: 38, total: 807.5 },
-          { periodo_id: periodo.id, empleado_id: 'E-003', empleado_nombre: 'Carlos López',salario_base: 1000, horas: 42, total: 1050 },
+          {
+            periodo_id: periodo.id,
+            empleado_id: 'E-001',
+            empleado_nombre: 'Juan Pérez',
+            salario_base: 900,
+            horas: 40,
+            total: 900,
+          },
+          {
+            periodo_id: periodo.id,
+            empleado_id: 'E-002',
+            empleado_nombre: 'María Gómez',
+            salario_base: 850,
+            horas: 38,
+            total: 807.5,
+          },
+          {
+            periodo_id: periodo.id,
+            empleado_id: 'E-003',
+            empleado_nombre: 'Carlos López',
+            salario_base: 1000,
+            horas: 42,
+            total: 1050,
+          },
         ];
       }
 
@@ -444,9 +482,9 @@ export default function Calcular() {
       }
 
       await loadPeriodo();
-    } catch (e: any) {
-      console.error('[Calcular] fallback error', e);
-      setError(e?.message ?? 'Error al calcular');
+    } catch (error) {
+      console.error('[Calcular] fallback error', error);
+      setError(getErrorMessage(error));
     } finally {
       setCalculando(false);
     }
@@ -585,9 +623,8 @@ export default function Calcular() {
                     onClick={async () => {
                       try {
                         const fnUrl = import.meta.env.VITE_SUPABASE_FUNCTIONS_URL?.replace(/\/$/, '');
-                        const sucursalId = (sucursalSeleccionada?.id || (periodo as any)?.sucursal_id) as
-                          | string
-                          | undefined;
+                        const sucursalId =
+                          sucursalSeleccionada?.id ?? periodo?.sucursal_id ?? undefined;
 
                         const res = await fetch(`${fnUrl}/sync_empleados`, {
                           method: 'POST',
@@ -600,9 +637,9 @@ export default function Calcular() {
                         console.log('Empleados sincronizados:', data);
                         await loadPeriodo();
                         alert('✅ Empleados sincronizados');
-                      } catch (e: any) {
-                        console.error(e);
-                        alert(`❌ Error al sincronizar: ${e?.message || e}`);
+                      } catch (error) {
+                        console.error(error);
+                        alert(`❌ Error al sincronizar: ${getErrorMessage(error)}`);
                       }
                     }}
                     className="inline-flex items-center gap-2 px-4 py-3 rounded-xl border bg-white hover:bg-gray-50 shadow"
