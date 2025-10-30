@@ -1,8 +1,7 @@
 import { createContext, useContext, useState, useEffect, ReactNode, useMemo } from 'react';
 import { User } from '@supabase/supabase-js';
-import { supabase, shouldUseDemoMode } from '../lib/supabase';
-import { supabase, isSupabaseConfigured } from '../lib/supabase';
-import { getMyProfile, getMyBranches, UserProfile, Sucursal } from '../lib/org';
+import { supabase, shouldUseDemoMode, isSupabaseConfigured } from '../lib/supabase';
+import { getMyProfile, getMyBranches, type UserProfile, type Sucursal } from '../lib/org';
 
 type ViewMode = 'all' | 'single';
 
