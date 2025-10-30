@@ -1,23 +1,28 @@
 import React, { Component, Suspense } from 'react';
+import type { ErrorInfo, ReactNode } from 'react';
+
+type BoundaryProps = { children: ReactNode };
+type BoundaryState = { error?: Error };
 
 /** ErrorBoundary: evita que un error dentro de Dashboard tumbe toda la app */
-class DashboardBoundary extends Component<{ children: React.ReactNode }, { error?: any }> {
-  constructor(props: any) {
-    super(props);
-    this.state = { error: undefined };
-  }
-  static getDerivedStateFromError(error: any) {
+class DashboardBoundary extends Component<BoundaryProps, BoundaryState> {
+  state: BoundaryState = { error: undefined };
+
+  static getDerivedStateFromError(error: Error): BoundaryState {
     return { error };
   }
-  componentDidCatch(error: any, info: any) {
+
+  componentDidCatch(error: Error, info: ErrorInfo) {
     console.error('💥 Error dentro de Dashboard:', error, info);
   }
+
   render() {
-    if (this.state.error) {
+    const { error } = this.state;
+    if (error) {
       return (
         <div style={{ padding: 24, background: '#fde68a', borderRadius: 8 }}>
           <h3 style={{ color: '#b91c1c', marginTop: 0 }}>Error en Dashboard</h3>
-          <pre style={{ whiteSpace: 'pre-wrap' }}>{String(this.state.error)}</pre>
+          <pre style={{ whiteSpace: 'pre-wrap' }}>{error.message ?? String(error)}</pre>
         </div>
       );
     }
