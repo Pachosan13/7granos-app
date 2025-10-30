@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { supabase } from '../../lib/supabase';
 import { postJournalsInRange } from '../../lib/contabilidad';
+import { money } from '../../lib/format';
 
 type Row = {
   mes: string; // YYYY-MM-01
@@ -105,8 +106,7 @@ export const ReportesTab = () => {
     try {
       const [y2, m2] = hastaMes.split('-').map(Number);
       const desde = `${desdeMes}-01`;
-      // último día del mes hastaMes: new Date(year, month, 0) da el último día del "month"
-      const lastDay = new Date(y2, m2, 0).getDate();
+      const lastDay = new Date(y2, m2, 0).getDate(); // último día del mes hastaMes
       const hasta = `${hastaMes}-${String(lastDay).padStart(2, '0')}`;
 
       await postJournalsInRange({ desde, hasta, sucursalId: null });
@@ -210,22 +210,22 @@ export const ReportesTab = () => {
                       <td className="p-2">
                         {r.sucursal_id ? sucursales[r.sucursal_id] ?? r.sucursal_id : 'Consolidado'}
                       </td>
-                      <td className="p-2 text-right">${Number(r.ingresos || 0).toLocaleString()}</td>
-                      <td className="p-2 text-right">${Number(r.cogs || 0).toLocaleString()}</td>
-                      <td className="p-2 text-right">${Number(r.gastos || 0).toLocaleString()}</td>
-                      <td className="p-2 text-right">${Number(r.margen_bruto || 0).toLocaleString()}</td>
-                      <td className="p-2 text-right">${Number(r.utilidad_operativa || 0).toLocaleString()}</td>
+                      <td className="p-2 text-right">{money(r.ingresos)}</td>
+                      <td className="p-2 text-right">{money(r.cogs)}</td>
+                      <td className="p-2 text-right">{money(r.gastos)}</td>
+                      <td className="p-2 text-right">{money(r.margen_bruto)}</td>
+                      <td className="p-2 text-right">{money(r.utilidad_operativa)}</td>
                     </tr>
                   ))}
                 </tbody>
                 <tfoot>
                   <tr className="bg-gray-50 border-t font-semibold">
                     <td className="p-2 text-right">Total</td>
-                    <td className="p-2 text-right">${tot.ingresos.toLocaleString()}</td>
-                    <td className="p-2 text-right">${tot.cogs.toLocaleString()}</td>
-                    <td className="p-2 text-right">${tot.gastos.toLocaleString()}</td>
-                    <td className="p-2 text-right">${tot.margen_bruto.toLocaleString()}</td>
-                    <td className="p-2 text-right">${tot.utilidad_operativa.toLocaleString()}</td>
+                    <td className="p-2 text-right">{money(tot.ingresos)}</td>
+                    <td className="p-2 text-right">{money(tot.cogs)}</td>
+                    <td className="p-2 text-right">{money(tot.gastos)}</td>
+                    <td className="p-2 text-right">{money(tot.margen_bruto)}</td>
+                    <td className="p-2 text-right">{money(tot.utilidad_operativa)}</td>
                   </tr>
                 </tfoot>
               </table>
@@ -237,13 +237,9 @@ export const ReportesTab = () => {
       {rows.length === 0 && !loading && !fetchError && (
         <div className="text-slate-700">
           {previewMode ? (
-            <>
-              No hay datos en la vista de <b>preview</b> para el rango seleccionado.
-            </>
+            <>No hay datos en la vista de <b>preview</b> para el rango seleccionado.</>
           ) : (
-            <>
-              No hay asientos <b>posteados</b> en el rango seleccionado.
-            </>
+            <>No hay asientos <b>posteados</b> en el rango seleccionado.</>
           )}
         </div>
       )}
