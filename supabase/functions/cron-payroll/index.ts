@@ -1,58 +1,80 @@
-import "jsr:@supabase/functions-js/edge-runtime.d.ts";
+// supabase/functions/cron-payroll/index.ts
+// Ejecuta el cálculo de planilla del período actual (12 y 26) o bajo `force:true`.
+// Devuelve errores siempre serializados (nunca "[object Object]").
+
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
-const SUPABASE_URL = Deno.env.get("SUPABASE_URL");
-const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+const SUPABASE_URL  = Deno.env.get("SUPABASE_URL")!;
+const SERVICE_ROLE  = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 
-if (!SUPABASE_URL || !SERVICE_ROLE) {
-  throw new Error("Missing Supabase credentials for cron-payroll function");
+function json(body: unknown, status = 200) {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "content-type": "application/json" },
+  });
 }
 
-const supa = createClient(SUPABASE_URL, SERVICE_ROLE, {
-  auth: { persistSession: false },
-});
+function jsonError(err: unknown, debug = false, status = 500) {
+  const e = err as any;
+  const out = {
+    ok: false,
+    error: e?.message ?? String(e),
+    details: e?.details ?? e?.cause ?? undefined,
+    code: e?.code ?? undefined,
+    stack: debug ? e?.stack : undefined,
+  };
+  return json(out, status);
+}
 
-Deno.serve(async () => {
-  const startedAt = new Date();
-  const day = startedAt.getDate();
-  const month = startedAt.getMonth() + 1;
-  const year = startedAt.getFullYear();
-
-  console.log("[cron-payroll] Triggered", { iso: startedAt.toISOString(), day, month, year });
-
+Deno.serve(async (req) => {
   try {
-    if (![12, 26].includes(day)) {
-      const skipPayload = { ok: true, skipped: true, reason: "Not payroll day" as const };
-      console.log("[cron-payroll] Skipping execution", skipPayload);
-      return new Response(JSON.stringify(skipPayload), {
-        headers: { "content-type": "application/json" },
+    if (req.method !== "POST") {
+      return json({ ok: false, error: "Method not allowed" }, 405);
+    }
+
+    const { force = false, debug = false } = await (async () => {
+      try { return await req.json(); } catch { return {}; }
+    })();
+
+    const now = new Date();
+    const day = now.getUTCDate();
+
+    // Solo corre automático el 12 y 26; con `force:true` corre siempre.
+    if (!force && !(day === 12 || day === 26)) {
+      return json({
+        ok: true,
+        skipped: true,
+        reason: "Not a payroll day (12/26 UTC)",
+        todayUTC: now.toISOString(),
       });
     }
 
-    const { error } = await supa.rpc("hr_calcular_periodo_actual", {});
+    // Client con service role para evitar RLS en RPC/tablas internas
+    const supabase = createClient(SUPABASE_URL, SERVICE_ROLE, {
+      global: { headers: { "x-client-info": "cron-payroll" } },
+    });
+
+    // Llama el RPC (ajusta nombre/args si tu función requiere parámetros)
+    const { data, error } = await supabase.rpc("hr_calcular_periodo_actual");
     if (error) {
-      console.error("[cron-payroll] RPC failed", error);
-      throw error;
+      // Lanza con cause para que salga en `details`
+      const e = new Error("RPC hr_calcular_periodo_actual failed", { cause: error });
+      (e as any).code = error.code;
+      throw e;
     }
 
-    const payload = {
+    return json({
       ok: true,
-      run: `${day}/${month}/${year}`,
-      status: "Payroll generated" as const,
-      executedAt: startedAt.toISOString(),
-    };
-
-    console.log("[cron-payroll] Payroll generated", payload);
-
-    return new Response(JSON.stringify(payload), {
-      headers: { "content-type": "application/json" },
+      ran: true,
+      ran_at: now.toISOString(),
+      result: data ?? null,
     });
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    console.error("[cron-payroll] Error", message);
-    return new Response(JSON.stringify({ ok: false, error: message }), {
-      status: 500,
-      headers: { "content-type": "application/json" },
-    });
+    console.error("cron-payroll failed:", err);
+    // Cuando llames con {"debug":true} verás el stack
+    const wantsDebug =
+      req.headers.get("x-debug") === "1" ||
+      (await req.clone().json().catch(() => ({} as any))).debug === true;
+    return jsonError(err, wantsDebug);
   }
 });
