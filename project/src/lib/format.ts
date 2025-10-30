@@ -1,8 +1,11 @@
-const formatPercentage = (value: number): string => {
-  return `${(value * 100).toFixed(2)}%`;
-};
+// project/src/lib/format.ts
 
-const formatDateDDMMYYYY = (date: Date | string): string => {
+/** % con 2 decimales: 0.256 -> "25.60%" */
+export const formatPercentage = (value: number): string =>
+  `${(value * 100).toFixed(2)}%`;
+
+/** DD/MM/YYYY */
+export const formatDateDDMMYYYY = (date: Date | string): string => {
   const d = new Date(date);
   const day = d.getDate().toString().padStart(2, '0');
   const month = (d.getMonth() + 1).toString().padStart(2, '0');
@@ -10,13 +13,19 @@ const formatDateDDMMYYYY = (date: Date | string): string => {
   return `${day}/${month}/${year}`;
 };
 
-const formatCurrencyUSD = (amount: number): string => {
-  return new Intl.NumberFormat('en-US', {
-    style: 'currency',
-    currency: 'USD',
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  }).format(amount);
-};
+/** Intl money formatter (USD, es-PA) */
+const moneyFmt = new Intl.NumberFormat('es-PA', {
+  style: 'currency',
+  currency: 'USD',
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 2,
+});
 
-export { formatPercentage, formatDateDDMMYYYY, formatCurrencyUSD };
+/** Formatea a USD con 2 decimales. Acepta number o string numérico. */
+export function money(n: unknown): string {
+  const v = typeof n === 'number' ? n : Number(n ?? 0);
+  return moneyFmt.format(Number.isFinite(v) ? v : 0);
+}
+
+/** Alias compatible con tu código previo (si ya usabas formatCurrencyUSD) */
+export const formatCurrencyUSD = (amount: number | string): string => money(amount);
