@@ -95,6 +95,7 @@ const formatCurrency = (value: number | null | undefined) => {
   return new Intl.NumberFormat('es-PA', {
     style: 'currency',
     currency: 'USD',
+    currencyDisplay: 'narrowSymbol',
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
   }).format(safeValue);
@@ -148,18 +149,36 @@ export default function Calcular() {
     }
   }, [sucursalSeleccionada, sucursales, setSucursalSeleccionada]);
 
+  const filteredRows = useMemo(() => {
+    return rows.filter((row) => {
+      const employeeName = (row.empleado ?? '').trim();
+      return !/^reloj invu/i.test(employeeName);
+    });
+  }, [rows]);
+
   const totals = useMemo(() => {
-    return rows.reduce(
+    return filteredRows.reduce(
       (acc, row) => {
         acc.empleados += 1;
+        acc.base += Number(row.salario_base ?? 0);
         acc.bruto += Number(row.salario_quincenal ?? 0);
+        acc.seguroSocial += Number(row.seguro_social ?? 0);
+        acc.seguroEducativo += Number(row.seguro_educativo ?? 0);
         acc.deducciones += Number(row.total_deducciones ?? 0);
         acc.neto += Number(row.salario_neto_quincenal ?? 0);
         return acc;
       },
-      { empleados: 0, bruto: 0, deducciones: 0, neto: 0 }
+      {
+        empleados: 0,
+        base: 0,
+        bruto: 0,
+        seguroSocial: 0,
+        seguroEducativo: 0,
+        deducciones: 0,
+        neto: 0,
+      }
     );
-  }, [rows]);
+  }, [filteredRows]);
 
   const clearIntervalRef = useCallback(() => {
     if (intervalRef.current) {
@@ -255,8 +274,10 @@ export default function Calcular() {
     void fetchRows();
   }, [fetchRows]);
 
+  const hiddenClockEntries = useMemo(() => rows.length - filteredRows.length, [filteredRows, rows]);
+
   const handleDownloadCsv = useCallback(() => {
-    if (!rows.length || typeof window === 'undefined') return;
+    if (!filteredRows.length || typeof window === 'undefined') return;
 
     const header = [
       'Empleado',
@@ -269,7 +290,7 @@ export default function Calcular() {
       'Neto quincenal',
     ];
 
-    const csvRows = rows.map((row) =>
+    const csvRows = filteredRows.map((row) =>
       [
         toCsvValue(row.empleado),
         toCsvValue(row.sucursal),
@@ -293,7 +314,7 @@ export default function Calcular() {
     link.click();
     window.document.body.removeChild(link);
     window.URL.revokeObjectURL(url);
-  }, [currentSucursalName, rows]);
+  }, [currentSucursalName, filteredRows]);
 
   const handleToggleAutoRefresh = useCallback(() => {
     setAutoRefresh((prev) => !prev);
@@ -329,7 +350,8 @@ export default function Calcular() {
     }
   }, [lastUpdated]);
 
-  const showEmptyState = !loading && !error && !!currentSucursalId && rows.length === 0;
+  const showEmptyState =
+    !loading && !error && !!currentSucursalId && filteredRows.length === 0;
 
   return (
     <div className="space-y-6 p-6">
@@ -386,10 +408,10 @@ export default function Calcular() {
               type="button"
               onClick={handleDownloadCsv}
               className="inline-flex items-center gap-2 rounded-xl border px-4 py-2 text-sm font-medium text-slate-700 shadow-sm transition hover:bg-slate-50"
-              disabled={!rows.length}
+              disabled={!filteredRows.length}
             >
               <Download className="h-4 w-4" />
-              CSV
+              Descargar CSV
             </button>
 
             <button
@@ -425,71 +447,135 @@ export default function Calcular() {
         </div>
       ) : showEmptyState ? (
         <div className="rounded-2xl border border-dashed bg-white p-10 text-center text-slate-600 shadow-sm">
-          No hay empleados con planilla generada para esta sucursal.
+          No hay empleados visibles con planilla generada para esta sucursal.
+          {hiddenClockEntries > 0 && (
+            <span className="mt-2 block text-xs text-slate-400">
+              Se ocultaron {hiddenClockEntries === 1 ? '1 registro' : `${hiddenClockEntries} registros`} de Reloj INVU.
+            </span>
+          )}
         </div>
       ) : (
         <div className="space-y-4">
-          {rows.map((row) => (
-            <details key={row.empleado_id} className="group rounded-2xl border bg-white p-5 shadow-sm">
-              <summary className="flex cursor-pointer list-none flex-col gap-2 md:flex-row md:items-center md:justify-between">
+          <div className="grid gap-4 lg:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
+            <div className="rounded-2xl border bg-white shadow-sm">
+              <div className="flex flex-wrap items-center justify-between gap-3 border-b px-6 py-4">
                 <div>
-                  <p className="text-base font-semibold text-slate-900">{row.empleado}</p>
-                  <p className="text-sm text-slate-500">Neto quincenal: {formatCurrency(row.salario_neto_quincenal)}</p>
+                  <h2 className="text-lg font-semibold text-slate-900">Detalle de empleados</h2>
+                  {lastUpdatedLabel && (
+                    <p className="text-xs text-slate-500">Última actualización: {lastUpdatedLabel}</p>
+                  )}
+                  {hiddenClockEntries > 0 && (
+                    <p className="mt-1 text-xs text-slate-400">
+                      {hiddenClockEntries === 1
+                        ? '1 registro de Reloj INVU se ocultó del resumen.'
+                        : `${hiddenClockEntries} registros de Reloj INVU se ocultaron del resumen.`}
+                    </p>
+                  )}
                 </div>
-                <div className="text-sm text-slate-500 md:text-right">
-                  <p>Bruto: {formatCurrency(row.salario_quincenal)}</p>
-                  <p>Deducciones: {formatCurrency(row.total_deducciones)}</p>
+              </div>
+              <div className="relative">
+                <div className="max-h-[520px] overflow-auto">
+                  <table className="min-w-full border-separate border-spacing-0 text-sm">
+                    <thead className="sticky top-0 z-10 bg-slate-50 text-left text-xs uppercase tracking-wide text-slate-500">
+                      <tr>
+                        <th className="px-6 py-3 font-medium">Empleado</th>
+                        <th className="px-3 py-3 font-medium">Sucursal</th>
+                        <th className="px-3 py-3 font-medium text-right">Salario base</th>
+                        <th className="px-3 py-3 font-medium text-right">Bruto quincenal</th>
+                        <th className="px-3 py-3 font-medium text-right">Seguro social</th>
+                        <th className="px-3 py-3 font-medium text-right">Seguro educativo</th>
+                        <th className="px-3 py-3 font-medium text-right">Total deducciones</th>
+                        <th className="px-6 py-3 font-medium text-right">Neto quincenal</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100 bg-white text-slate-700">
+                      {filteredRows.map((row) => (
+                        <tr key={row.empleado_id} className="hover:bg-slate-50/60">
+                          <td className="px-6 py-4 align-middle font-medium text-slate-900">{row.empleado}</td>
+                          <td className="px-3 py-4 align-middle">{row.sucursal}</td>
+                          <td className="px-3 py-4 align-middle text-right font-medium text-slate-900">
+                            {formatCurrency(row.salario_base)}
+                          </td>
+                          <td className="px-3 py-4 align-middle text-right">{formatCurrency(row.salario_quincenal)}</td>
+                          <td className="px-3 py-4 align-middle text-right">{formatCurrency(row.seguro_social)}</td>
+                          <td className="px-3 py-4 align-middle text-right">{formatCurrency(row.seguro_educativo)}</td>
+                          <td className="px-3 py-4 align-middle text-right font-medium text-slate-900">
+                            {formatCurrency(row.total_deducciones)}
+                          </td>
+                          <td className="px-6 py-4 align-middle text-right font-semibold text-emerald-600">
+                            {formatCurrency(row.salario_neto_quincenal)}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                    <tfoot>
+                      <tr className="sticky bottom-0 bg-slate-100 text-sm font-semibold text-slate-900 shadow-[0_-4px_6px_-4px_rgba(15,23,42,0.25)]">
+                        <td className="px-6 py-4" colSpan={2}>
+                          Totales visibles ({totals.empleados})
+                        </td>
+                        <td className="px-3 py-4 text-right">{formatCurrency(totals.base)}</td>
+                        <td className="px-3 py-4 text-right">{formatCurrency(totals.bruto)}</td>
+                        <td className="px-3 py-4 text-right">{formatCurrency(totals.seguroSocial)}</td>
+                        <td className="px-3 py-4 text-right">{formatCurrency(totals.seguroEducativo)}</td>
+                        <td className="px-3 py-4 text-right">{formatCurrency(totals.deducciones)}</td>
+                        <td className="px-6 py-4 text-right text-emerald-700">{formatCurrency(totals.neto)}</td>
+                      </tr>
+                    </tfoot>
+                  </table>
                 </div>
-              </summary>
+              </div>
+            </div>
 
-              <div className="mt-4 grid gap-3 text-sm text-slate-600 md:grid-cols-2">
-                <div className="flex items-center justify-between rounded-xl bg-slate-50 px-4 py-3">
-                  <span>Salario base</span>
-                  <span className="font-medium text-slate-900">{formatCurrency(row.salario_base)}</span>
-                </div>
-                <div className="flex items-center justify-between rounded-xl bg-slate-50 px-4 py-3">
-                  <span>Bruto quincenal</span>
-                  <span className="font-medium text-slate-900">{formatCurrency(row.salario_quincenal)}</span>
-                </div>
-                <div className="flex items-center justify-between rounded-xl bg-slate-50 px-4 py-3">
-                  <span>Seguro social (9.75%)</span>
-                  <span className="font-medium text-slate-900">{formatCurrency(row.seguro_social)}</span>
-                </div>
-                <div className="flex items-center justify-between rounded-xl bg-slate-50 px-4 py-3">
-                  <span>Seguro educativo (1.25%)</span>
-                  <span className="font-medium text-slate-900">{formatCurrency(row.seguro_educativo)}</span>
-                </div>
-                <div className="flex items-center justify-between rounded-xl bg-slate-100 px-4 py-3 md:col-span-2">
-                  <span>Total deducciones</span>
-                  <span className="font-semibold text-slate-900">{formatCurrency(row.total_deducciones)}</span>
-                </div>
-                <div className="flex items-center justify-between rounded-xl bg-emerald-50 px-4 py-3 md:col-span-2">
-                  <span>Neto quincenal</span>
-                  <span className="font-semibold text-emerald-700">{formatCurrency(row.salario_neto_quincenal)}</span>
-                </div>
+            <div className="flex flex-col gap-5 rounded-2xl border bg-white p-6 shadow-sm">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <h2 className="text-lg font-semibold text-slate-900">Resumen de totales</h2>
+                <button
+                  type="button"
+                  onClick={handleDownloadCsv}
+                  className="inline-flex items-center gap-2 rounded-xl border px-4 py-2 text-sm font-medium text-slate-700 shadow-sm transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
+                  disabled={!filteredRows.length}
+                >
+                  <Download className="h-4 w-4" />
+                  Descargar CSV
+                </button>
               </div>
-            </details>
-          ))}
 
-          <div className="rounded-2xl border bg-white p-6 shadow-sm">
-            <h2 className="text-lg font-semibold text-slate-900">Totales</h2>
-            <div className="mt-4 grid gap-4 md:grid-cols-4">
-              <div className="rounded-xl bg-slate-50 p-4 text-center">
-                <p className="text-xs uppercase tracking-wide text-slate-500">Empleados</p>
-                <p className="mt-2 text-2xl font-semibold text-slate-900">{totals.empleados}</p>
+              <div className="grid gap-4 md:grid-cols-2">
+                <div className="rounded-xl bg-slate-50 p-4 text-center">
+                  <p className="text-xs uppercase tracking-wide text-slate-500">Empleados</p>
+                  <p className="mt-2 text-2xl font-semibold text-slate-900">{totals.empleados}</p>
+                </div>
+                <div className="rounded-xl bg-slate-50 p-4 text-center">
+                  <p className="text-xs uppercase tracking-wide text-slate-500">Salario base total</p>
+                  <p className="mt-2 text-2xl font-semibold text-slate-900">{formatCurrency(totals.base)}</p>
+                </div>
+                <div className="rounded-xl bg-slate-50 p-4 text-center">
+                  <p className="text-xs uppercase tracking-wide text-slate-500">Bruto total</p>
+                  <p className="mt-2 text-2xl font-semibold text-slate-900">{formatCurrency(totals.bruto)}</p>
+                </div>
+                <div className="rounded-xl bg-slate-50 p-4 text-center">
+                  <p className="text-xs uppercase tracking-wide text-slate-500">Seguro social</p>
+                  <p className="mt-2 text-2xl font-semibold text-slate-900">{formatCurrency(totals.seguroSocial)}</p>
+                </div>
+                <div className="rounded-xl bg-slate-50 p-4 text-center">
+                  <p className="text-xs uppercase tracking-wide text-slate-500">Seguro educativo</p>
+                  <p className="mt-2 text-2xl font-semibold text-slate-900">{formatCurrency(totals.seguroEducativo)}</p>
+                </div>
+                <div className="rounded-xl bg-emerald-50 p-4 text-center">
+                  <p className="text-xs uppercase tracking-wide text-emerald-600">Neto total</p>
+                  <p className="mt-2 text-2xl font-semibold text-emerald-700">{formatCurrency(totals.neto)}</p>
+                </div>
+                <div className="rounded-xl bg-slate-50 p-4 text-center md:col-span-2">
+                  <p className="text-xs uppercase tracking-wide text-slate-500">Deducciones</p>
+                  <p className="mt-2 text-2xl font-semibold text-slate-900">{formatCurrency(totals.deducciones)}</p>
+                </div>
               </div>
-              <div className="rounded-xl bg-slate-50 p-4 text-center">
-                <p className="text-xs uppercase tracking-wide text-slate-500">Bruto total</p>
-                <p className="mt-2 text-2xl font-semibold text-slate-900">{formatCurrency(totals.bruto)}</p>
-              </div>
-              <div className="rounded-xl bg-slate-50 p-4 text-center">
-                <p className="text-xs uppercase tracking-wide text-slate-500">Deducciones</p>
-                <p className="mt-2 text-2xl font-semibold text-slate-900">{formatCurrency(totals.deducciones)}</p>
-              </div>
-              <div className="rounded-xl bg-emerald-50 p-4 text-center">
-                <p className="text-xs uppercase tracking-wide text-emerald-600">Neto total</p>
-                <p className="mt-2 text-2xl font-semibold text-emerald-700">{formatCurrency(totals.neto)}</p>
-              </div>
+
+              {isDemo && (
+                <p className="text-xs text-slate-500">
+                  Exportar CSV en modo demo descarga datos simulados.
+                </p>
+              )}
             </div>
           </div>
         </div>
