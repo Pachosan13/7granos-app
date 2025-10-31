@@ -18,6 +18,12 @@ import { debugLog, getFunctionsBase } from '../utils/diagnostics';
 
 type SerieRow = { dia: string; fecha: string; ventas: number; tickets: number };
 
+type NullableNumber = number | string | null | undefined;
+
+type RpcParamValue = NullableNumber | boolean;
+
+type RpcParams = Record<string, RpcParamValue>;
+
 /* ========= helpers de fecha ========= */
 function todayYMD(tz = 'America/Panama') {
   const d = new Date(new Date().toLocaleString('en-US', { timeZone: tz }));
@@ -35,6 +41,34 @@ function addDays(ymd: string, days: number) {
   const mm = String(dt.getUTCMonth() + 1).padStart(2, '0');
   const dd = String(dt.getUTCDate()).padStart(2, '0');
   return `${yy}-${mm}-${dd}`;
+}
+
+function toNumber(value: NullableNumber): number {
+  if (value === null || value === undefined) return 0;
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : 0;
+}
+
+function normalizeParams(params: RpcParams): Record<string, RpcParamValue> {
+  return Object.fromEntries(
+    Object.entries(params).filter(([, value]) => value !== undefined)
+  ) as Record<string, RpcParamValue>;
+}
+
+async function rpcWithFallback<T>(fn: string, variants: RpcParams[]): Promise<T | null> {
+  let lastError: any = null;
+  for (let index = 0; index < variants.length; index += 1) {
+    const params = normalizeParams(variants[index]);
+    const response = await supabase.rpc<T>(fn, params as Record<string, unknown>);
+    if (!response.error) {
+      if (index > 0) {
+        console.warn(`[dashboard] ${fn} ejecutado con firma alternativa #${index + 1}`, params);
+      }
+      return response.data ?? null;
+    }
+    lastError = response.error;
+  }
+  throw lastError ?? new Error(`No se pudo ejecutar ${fn}`);
 }
 
 /* ========= dependencias (deben declararse ANTES de usarlas) ========= */
@@ -128,24 +162,46 @@ export default function DashboardInner() {
       setClientesActivos(tot.clientes);
 
       // 2) Serie (RPC)
-      const { data: serieRpc, error: serieErr } = await supabase.rpc('rpc_ui_series_14d', {
-        desde,
-        hasta,
-      });
-      if (serieErr) throw serieErr;
+      const serieRpc =
+        (await rpcWithFallback<any[]>('rpc_ui_series_14d', [
+          { p_desde: desde, p_hasta: hasta, p_sucursal_id: viewingAll ? null : selectedSucursalId },
+          { desde, hasta, p_sucursal_id: viewingAll ? null : selectedSucursalId },
+          { desde, hasta, sucursal_id: viewingAll ? null : selectedSucursalId },
+          { desde, hasta },
+        ])) ?? [];
 
-      const serieFiltrada = (serieRpc ?? []).filter((r: any) =>
-        viewingAll ? true : selectedSucursalName ? r.sucursal === selectedSucursalName : true
-      );
+      const normalizedSucursalName = selectedSucursalName?.toLowerCase().trim();
+      const serieFiltrada = serieRpc.filter((r: any) => {
+        if (viewingAll) return true;
+        const rowSucursalId = r.sucursal_id ?? r.sucursalId ?? r.sucursal ?? null;
+        const rowSucursalName = (r.sucursal_nombre ?? r.sucursalName ?? r.sucursal ?? '')
+          .toString()
+          .toLowerCase()
+          .trim();
+
+        if (selectedSucursalId && rowSucursalId && String(rowSucursalId) === String(selectedSucursalId)) {
+          return true;
+        }
+        if (normalizedSucursalName && rowSucursalName && rowSucursalName === normalizedSucursalName) {
+          return true;
+        }
+        return false;
+      });
 
       const map = new Map<string, { dia: string; fecha: string; ventas: number; tickets: number }>();
       for (const r of serieFiltrada) {
-        const key = r.dia;
-        if (!map.has(key))
-          map.set(key, { dia: key, fecha: formatDateDDMMYYYY(key), ventas: 0, tickets: 0 });
+        const key = String(r.d ?? r.dia ?? r.fecha ?? hoy);
+        if (!map.has(key)) {
+          map.set(key, {
+            dia: key,
+            fecha: formatDateDDMMYYYY(key),
+            ventas: 0,
+            tickets: 0,
+          });
+        }
         const e = map.get(key)!;
-        e.ventas += Number(r.ventas ?? 0);
-        e.tickets += Number(r.transacciones ?? 0);
+        e.ventas += toNumber(r.ventas ?? r.ventas_netas);
+        e.tickets += toNumber(r.transacciones ?? r.tx);
       }
       const serieOrdenada = Array.from(map.values()).sort((a, b) => a.dia.localeCompare(b.dia));
       setSerie(serieOrdenada);
