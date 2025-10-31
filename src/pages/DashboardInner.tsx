@@ -59,28 +59,15 @@ async function rpcWithFallback<T>(fn: string, variants: RpcParams[]): Promise<T 
   let lastError: any = null;
   for (let index = 0; index < variants.length; index += 1) {
     const params = normalizeParams(variants[index]);
-    debugLog('[Tablero] rpcWithFallback intento', { fn, variant: index + 1, params });
     const response = await supabase.rpc<T>(fn, params as Record<string, unknown>);
     if (!response.error) {
       if (index > 0) {
         console.warn(`[dashboard] ${fn} ejecutado con firma alternativa #${index + 1}`, params);
-        debugLog('[Tablero] rpcWithFallback variante resuelta', {
-          fn,
-          variant: index + 1,
-          params,
-        });
       }
       return response.data ?? null;
     }
     lastError = response.error;
-    debugLog('[Tablero] rpcWithFallback error', {
-      fn,
-      variant: index + 1,
-      params,
-      error: response.error,
-    });
   }
-  debugLog('[Tablero] rpcWithFallback agotado', { fn, lastError });
   throw lastError ?? new Error(`No se pudo ejecutar ${fn}`);
 }
 
