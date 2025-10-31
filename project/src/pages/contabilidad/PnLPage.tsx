@@ -191,30 +191,31 @@ export const PnLPage = () => {
     const sucursalId = selectedSucursal || null;
 
     try {
-      // a) Si hay sucursal específica, usamos RPC
       if (sucursalId) {
+        // Sucursal específica → RPC
         const data =
           (await rpcWithFallback<PnLRawRow[]>(
             'api_get_pyg',
             buildVariants(filterMes, sucursalId)
           )) ?? [];
         const normalizedRows = normalize(data);
-        // RPC puede devolver 1..n filas; mantenemos tal cual
         setRows(normalizedRows);
       } else {
-        // b) "Todas mis sucursales": vamos directo a la vista y agregamos
+        // Todas las sucursales → usar fila consolidada de la vista (sucursal_id IS NULL)
         const { data, error } = await supabase
           .from('v_pyg_comparativo')
           .select('*')
           .eq('mes', filterMes)
-          .order('sucursal_id', { ascending: true });
+          .is('sucursal_id', null)
+          .single();
 
-        if (error) throw error;
-        const normalized = normalize((data ?? []) as PnLRawRow[]);
-        setRows(normalized.length ? [aggregate(normalized)] : []);
+        if (error && error.details !== 'Results contain 0 rows') throw error;
+
+        const normalized = data ? normalize([data as PnLRawRow]) : [];
+        setRows(normalized);
       }
 
-      // Mes anterior (para pill de comparación)
+      // Mes anterior
       const prevMonth = getPreviousMonth(filterMes);
       if (prevMonth) {
         if (sucursalId) {
@@ -229,11 +230,13 @@ export const PnLPage = () => {
           const { data: prevData, error: prevErr } = await supabase
             .from('v_pyg_comparativo')
             .select('*')
-            .eq('mes', prevMonth);
+            .eq('mes', prevMonth)
+            .is('sucursal_id', null)
+            .single();
 
-          if (prevErr) throw prevErr;
-          const normPrev = normalize((prevData ?? []) as PnLRawRow[]);
-          setPreviousRow(normPrev.length ? aggregate(normPrev) : null);
+          if (prevErr && prevErr.details !== 'Results contain 0 rows') throw prevErr;
+          const normPrev = prevData ? normalize([prevData as PnLRawRow]) : [];
+          setPreviousRow(normPrev[0] ?? null);
         }
       } else {
         setPreviousRow(null);
@@ -318,7 +321,6 @@ export const PnLPage = () => {
       const sucursalId = selectedSucursal || null;
 
       if (!sucursalId) {
-        // No tiene sentido postear “todas” en automático
         pushToast({
           tone: 'warning',
           title: 'Selecciona una sucursal',
@@ -634,7 +636,7 @@ export default PnLPage;
 --------------------------------------------------------------------------- */
 const loadHistory = async (sucursalId: string | null, currentMesISO: string) => {
   try {
-    // Traemos últimos 6 meses de la vista y agregamos si es “todas”
+    // Últimos 6 <= mes actual
     let q = supabase
       .from('v_pyg_comparativo')
       .select('*')
@@ -642,7 +644,11 @@ const loadHistory = async (sucursalId: string | null, currentMesISO: string) => 
       .order('mes', { ascending: true })
       .limit(6);
 
-    if (sucursalId) q = q.eq('sucursal_id', sucursalId);
+    if (sucursalId) {
+      q = q.eq('sucursal_id', sucursalId);
+    } else {
+      q = q.is('sucursal_id', null);
+    }
 
     const { data, error } = await q;
     if (error || !data) {
@@ -652,17 +658,8 @@ const loadHistory = async (sucursalId: string | null, currentMesISO: string) => 
 
     const normalized = normalize(data as PnLRawRow[]);
     if (!sucursalId) {
-      // agrupamos por mes
-      const byMes = new Map<string, PnLRow[]>();
-      for (const r of normalized) {
-        const arr = byMes.get(r.mes) ?? [];
-        arr.push(r);
-        byMes.set(r.mes, arr);
-      }
-      const agg = Array.from(byMes.entries())
-        .map(([mes, arr]) => ({ ...aggregate(arr), mes }))
-        .sort((a, b) => a.mes.localeCompare(b.mes));
-      return agg;
+      // Ya viene consolidado por mes con sucursal_id NULL
+      return normalized.sort((a, b) => a.mes.localeCompare(b.mes));
     }
     return normalized.sort((a, b) => a.mes.localeCompare(b.mes));
   } catch (err) {
