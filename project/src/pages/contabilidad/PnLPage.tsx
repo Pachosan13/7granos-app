@@ -1,7 +1,19 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Loader2, TrendingDown, TrendingUp, Wallet, Wallet2 } from 'lucide-react';
+import {
+  ArrowDownRight,
+  ArrowUpRight,
+  BarChart3,
+  Download,
+  FileSpreadsheet,
+  Loader2,
+  TrendingDown,
+  TrendingUp,
+  Wallet,
+  Wallet2,
+} from 'lucide-react';
 import { useAuthOrg } from '../../context/AuthOrgContext';
 import { formatCurrencyUSD } from '../../lib/format';
+import { supabase } from '../../lib/supabase';
 import {
   formatDateIso,
   rpcWithFallback,
@@ -9,11 +21,28 @@ import {
   type RpcParams,
 } from './rpcHelpers';
 import {
+  exportToCsv,
+  exportToXlsx,
+  formatNumber,
+} from './exportUtils';
+import {
   ToastContainer,
   createToast,
   dismissToast,
   type ToastItem,
 } from '../../components/Toast';
+import {
+  ResponsiveContainer,
+  CartesianGrid,
+  XAxis,
+  YAxis,
+  Tooltip,
+  Legend,
+  BarChart,
+  Bar,
+  LineChart,
+  Line,
+} from 'recharts';
 
 interface PnLRawRow {
   mes?: string;
@@ -100,6 +129,8 @@ export const PnLPage = () => {
   const [mes, setMes] = useState('');
   const [selectedSucursal, setSelectedSucursal] = useState('');
   const [rows, setRows] = useState<PnLRow[]>([]);
+  const [previousRow, setPreviousRow] = useState<PnLRow | null>(null);
+  const [historyRows, setHistoryRows] = useState<PnLRow[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [posting, setPosting] = useState(false);
@@ -129,11 +160,40 @@ export const PnLPage = () => {
           'api_get_pyg',
           buildVariants(filterMes, sucursalId)
         )) ?? [];
-      setRows(normalize(data));
+      const normalizedRows = normalize(data);
+      setRows(normalizedRows);
+
+      const previousMonth = getPreviousMonth(filterMes);
+      let previousNormalizedRow: PnLRow | null = null;
+      if (previousMonth) {
+        try {
+          const previousData =
+            (await rpcWithFallback<PnLRawRow[]>(
+              'api_get_pyg',
+              buildVariants(previousMonth, sucursalId)
+            )) ?? [];
+          const normalizedPrev = normalize(previousData);
+          previousNormalizedRow = normalizedPrev[0] ?? null;
+          setPreviousRow(previousNormalizedRow);
+        } catch (prevErr) {
+          console.warn('Error cargando mes anterior de api_get_pyg', prevErr);
+          setPreviousRow(null);
+        }
+      } else {
+        setPreviousRow(null);
+      }
+
+      const fallbackHistory = previousNormalizedRow
+        ? [previousNormalizedRow, ...normalizedRows]
+        : normalizedRows;
+      const history = await loadHistory(sucursalId, fallbackHistory);
+      setHistoryRows(history);
     } catch (err: unknown) {
       console.error('Error cargando api_get_pyg', err);
       setRows([]);
       setError(getErrorMessage(err) ?? 'No fue posible obtener el estado de resultados.');
+      setPreviousRow(null);
+      setHistoryRows([]);
     } finally {
       setLoading(false);
     }
@@ -158,6 +218,33 @@ export const PnLPage = () => {
     return ((currentRow.utilidadOperativa ?? 0) / currentRow.ingresos) * 100;
   }, [currentRow]);
 
+  const comparisons = useMemo(() => {
+    const previous = previousRow ?? null;
+    const build = (current: number, prev: number) => {
+      const delta = current - prev;
+      const pct = prev === 0 ? null : (delta / prev) * 100;
+      return { current, prev, delta, pct };
+    };
+    return {
+      ingresos: build(currentRow?.ingresos ?? 0, previous?.ingresos ?? 0),
+      cogs: build(currentRow?.cogs ?? 0, previous?.cogs ?? 0),
+      gastos: build(currentRow?.gastosTotales ?? 0, previous?.gastosTotales ?? 0),
+      utilidad: build(currentRow?.utilidadOperativa ?? 0, previous?.utilidadOperativa ?? 0),
+      margen: build(netMargin, previous ? getNetMargin(previous) : 0),
+    };
+  }, [currentRow, netMargin, previousRow]);
+
+  const historyData = useMemo(
+    () =>
+      historyRows.map((row) => ({
+        mes: formatDateIso(row.mes),
+        ingresos: row.ingresos,
+        cogs: row.cogs,
+        utilidad: row.utilidadOperativa,
+      })),
+    [historyRows]
+  );
+
   const pushToast = useCallback(
     (toast: Omit<ToastItem, 'id'>) => createToast(setToasts, toast),
     []
@@ -178,10 +265,9 @@ export const PnLPage = () => {
       if (success) {
         pushToast({
           tone: 'success',
-          title: 'Posteo completado',
+          title: 'Mes posteado con éxito',
           description:
-            result?.msg ??
-            'Se generó el journal automático para el mes seleccionado.',
+            result?.msg ?? 'Se generó el journal automático para el mes seleccionado.',
         });
         fetchData();
       } else {
@@ -203,28 +289,76 @@ export const PnLPage = () => {
     }
   }, [fetchData, mes, pushToast, selectedSucursal]);
 
+  const handleExportCsv = () => {
+    if (rows.length === 0) return;
+    const csvRows = rows.map((row) => [
+      row.mes,
+      row.sucursalId ?? 'Todas',
+      formatNumber(row.ingresos),
+      formatNumber(row.cogs),
+      formatNumber(row.gastosTotales),
+      formatNumber(row.utilidadOperativa),
+    ]);
+    exportToCsv(
+      csvRows,
+      ['Mes', 'Sucursal', 'Ingresos', 'COGS', 'Gastos', 'Utilidad'],
+      { suffix: 'pnl' }
+    );
+  };
+
+  const handleExportXlsx = () => {
+    if (rows.length === 0) return;
+    const data = rows.map((row) => ({
+      Mes: row.mes,
+      Sucursal: row.sucursalId ?? 'Todas',
+      Ingresos: row.ingresos,
+      COGS: row.cogs,
+      Gastos: row.gastosTotales,
+      Utilidad: row.utilidadOperativa,
+    }));
+    exportToXlsx(data, 'P&L', { suffix: 'pnl' });
+  };
+
   return (
     <div className="space-y-6">
       <ToastContainer
         toasts={toasts}
         onDismiss={(id) => dismissToast(setToasts, id)}
       />
-      <header className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
+      <header className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
         <div>
           <h1 className="text-3xl font-bold text-bean">Estado de Resultados (P&amp;L)</h1>
           <p className="text-slate7g">
             Visualiza ingresos, COGS, gastos operativos y utilidad neta del mes.
           </p>
         </div>
-        <button
-          type="button"
-          onClick={handlePostMes}
-          disabled={posting || rows.length === 0}
-          className="inline-flex items-center gap-2 rounded-xl bg-accent px-4 py-2 text-white shadow disabled:opacity-60"
-        >
-          {posting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Wallet2 size={16} />}
-          {posting ? 'Posteando…' : 'Postear mes'}
-        </button>
+        <div className="flex flex-wrap items-center gap-3">
+          <button
+            type="button"
+            onClick={handleExportXlsx}
+            disabled={rows.length === 0}
+            className="inline-flex items-center gap-2 rounded-xl bg-bean px-4 py-2 text-white shadow disabled:opacity-60"
+          >
+            <FileSpreadsheet size={16} /> Exportar XLSX
+          </button>
+          <button
+            type="button"
+            onClick={handleExportCsv}
+            disabled={rows.length === 0}
+            className="inline-flex items-center gap-2 rounded-xl border border-sand px-4 py-2 text-sm text-bean shadow-sm disabled:opacity-60"
+          >
+            <Download size={16} /> CSV
+          </button>
+          <button
+            type="button"
+            onClick={handlePostMes}
+            disabled={posting || rows.length === 0}
+            className="inline-flex items-center gap-2 rounded-xl bg-accent px-4 py-2 text-white shadow disabled:opacity-60"
+          >
+            {posting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Wallet2 size={16} />}
+            {posting ? 'Posteando…' : 'Postear mes'}
+          </button>
+        </div>
       </header>
 
       <section className="rounded-2xl border border-sand bg-white p-4 shadow-sm">
@@ -265,7 +399,7 @@ export const PnLPage = () => {
         </div>
       </section>
 
-      <section className="grid gap-4 md:grid-cols-4">
+      <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
         <article className="rounded-2xl border border-sand bg-white p-4 shadow-sm">
           <div className="flex items-center justify-between text-slate-500">
             <span className="text-xs font-semibold uppercase tracking-wide">Ingresos</span>
@@ -274,6 +408,7 @@ export const PnLPage = () => {
           <p className="mt-3 text-2xl font-semibold text-slate-800">
             {formatCurrencyUSD(totals.ingresos)}
           </p>
+          <ComparisonPill comparison={comparisons.ingresos} label="vs mes anterior" />
         </article>
         <article className="rounded-2xl border border-sand bg-white p-4 shadow-sm">
           <div className="flex items-center justify-between text-slate-500">
@@ -283,6 +418,7 @@ export const PnLPage = () => {
           <p className="mt-3 text-2xl font-semibold text-slate-800">
             {formatCurrencyUSD(totals.cogs)}
           </p>
+          <ComparisonPill comparison={comparisons.cogs} label="vs mes anterior" negativeIsBad />
         </article>
         <article className="rounded-2xl border border-sand bg-white p-4 shadow-sm">
           <div className="flex items-center justify-between text-slate-500">
@@ -292,6 +428,11 @@ export const PnLPage = () => {
           <p className="mt-3 text-2xl font-semibold text-slate-800">
             {formatCurrencyUSD(totals.gastosTotales)}
           </p>
+          <ComparisonPill
+            comparison={comparisons.gastos}
+            label="vs mes anterior"
+            negativeIsBad
+          />
         </article>
         <article className="rounded-2xl border border-sand bg-white p-4 shadow-sm">
           <div className="flex items-center justify-between text-slate-500">
@@ -302,6 +443,69 @@ export const PnLPage = () => {
             {formatCurrencyUSD(totals.utilidadOperativa)}
           </p>
           <p className="text-xs text-slate-500">Margen neto: {netMargin.toFixed(1)}%</p>
+          <ComparisonPill comparison={comparisons.utilidad} label="Utilidad vs mes anterior" />
+          <ComparisonPill comparison={comparisons.margen} label="Margen vs mes anterior" isMargin />
+        </article>
+      </section>
+
+      <section className="grid gap-6 lg:grid-cols-2">
+        <article className="rounded-2xl border border-sand bg-white shadow-sm">
+          <header className="flex items-center justify-between border-b border-sand px-6 py-4">
+            <div>
+              <h2 className="text-lg font-semibold text-slate-800">Tendencia de ingresos vs utilidad</h2>
+              <p className="text-sm text-slate-500">Últimos periodos reportados</p>
+            </div>
+            <BarChart3 className="h-5 w-5 text-slate-400" />
+          </header>
+          <div className="h-72 px-2 py-4">
+            {historyData.length > 1 ? (
+              <ResponsiveContainer>
+                <BarChart data={historyData}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+                  <XAxis dataKey="mes" stroke="#475569" />
+                  <YAxis stroke="#475569" tickFormatter={(value) => formatAxisCurrency(value)} />
+                  <Tooltip formatter={(value: number) => formatCurrencyUSD(value)} />
+                  <Legend />
+                  <Bar dataKey="ingresos" fill="#2563eb" name="Ingresos" />
+                  <Bar dataKey="utilidad" fill="#16a34a" name="Utilidad" />
+                </BarChart>
+              </ResponsiveContainer>
+            ) : (
+              <EmptyState message="Aún no hay suficientes periodos para graficar." />
+            )}
+          </div>
+        </article>
+        <article className="rounded-2xl border border-sand bg-white shadow-sm">
+          <header className="flex items-center justify-between border-b border-sand px-6 py-4">
+            <div>
+              <h2 className="text-lg font-semibold text-slate-800">Margen neto histórico</h2>
+              <p className="text-sm text-slate-500">Tendencia porcentual por mes</p>
+            </div>
+            <ArrowUpRight className="h-5 w-5 text-slate-400" />
+          </header>
+          <div className="h-72 px-2 py-4">
+            {historyData.length > 1 ? (
+              <ResponsiveContainer>
+                <LineChart
+                  data={historyData.map((row) => ({
+                    mes: row.mes,
+                    margen: row.ingresos === 0 ? 0 : (row.utilidad / row.ingresos) * 100,
+                  }))}
+                >
+                  <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+                  <XAxis dataKey="mes" stroke="#475569" />
+                  <YAxis
+                    stroke="#475569"
+                    tickFormatter={(value) => `${value.toFixed(0)}%`}
+                  />
+                  <Tooltip formatter={(value: number) => `${value.toFixed(1)}%`} />
+                  <Line type="monotone" dataKey="margen" stroke="#f97316" strokeWidth={2} />
+                </LineChart>
+              </ResponsiveContainer>
+            ) : (
+              <EmptyState message="Se necesita al menos dos meses para calcular el margen." />
+            )}
+          </div>
         </article>
       </section>
 
@@ -349,17 +553,116 @@ export const PnLPage = () => {
             <Loader2 className="h-4 w-4 animate-spin" /> Cargando métricas…
           </div>
         )}
-        {!loading && rows.length === 0 && (
-          <div className="px-4 py-6 text-center text-sm text-slate-500">
-            No hay datos para el mes seleccionado.
-          </div>
+        {!loading && rows.length === 0 && !error && (
+          <EmptyState message="No hay datos para el mes seleccionado." />
         )}
-        {error && (
-          <div className="px-4 py-4 text-center text-sm text-rose-600">{error}</div>
-        )}
+        {error && <ErrorState message={error} />}
       </section>
     </div>
   );
 };
 
 export default PnLPage;
+
+const getPreviousMonth = (isoDate: string) => {
+  try {
+    const date = new Date(isoDate);
+    if (Number.isNaN(date.getTime())) return null;
+    date.setMonth(date.getMonth() - 1);
+    const yyyy = date.getFullYear();
+    const mm = String(date.getMonth() + 1).padStart(2, '0');
+    return `${yyyy}-${mm}-01`;
+  } catch {
+    return null;
+  }
+};
+
+const getNetMargin = (row: PnLRow) => {
+  if (!row.ingresos) return 0;
+  return (row.utilidadOperativa / row.ingresos) * 100;
+};
+
+const loadHistory = async (
+  sucursalId: string | null,
+  fallbackRows: PnLRow[]
+) => {
+  try {
+    let query = supabase.from('v_pyg_comparativo').select('*').order('mes', { ascending: true }).limit(6);
+    if (sucursalId) {
+      query = query.eq('sucursal_id', sucursalId);
+    } else {
+      query = query.is('sucursal_id', null);
+    }
+    const { data, error } = await query;
+    if (error || !data) {
+      if (error) {
+        console.warn('Error cargando v_pyg_comparativo', error);
+      }
+      return fallbackRows;
+    }
+    const normalized = normalize(data as PnLRawRow[]).sort((a, b) =>
+      a.mes.localeCompare(b.mes)
+    );
+    if (normalized.length === 0) return fallbackRows;
+    return normalized;
+  } catch (err) {
+    console.warn('Error inesperado cargando historial de P&L', err);
+    return fallbackRows;
+  }
+};
+
+interface Comparison {
+  current: number;
+  prev: number;
+  delta: number;
+  pct: number | null;
+}
+
+const ComparisonPill = ({
+  comparison,
+  label,
+  negativeIsBad,
+  isMargin,
+}: {
+  comparison: Comparison;
+  label: string;
+  negativeIsBad?: boolean;
+  isMargin?: boolean;
+}) => {
+  const isPositive = comparison.delta >= 0;
+  const isGood = negativeIsBad ? !isPositive : isPositive;
+  const tone = isGood ? 'text-emerald-600 bg-emerald-50' : 'text-rose-600 bg-rose-50';
+  const Icon = isPositive ? ArrowUpRight : ArrowDownRight;
+  const formatValue = (value: number) =>
+    isMargin ? `${value.toFixed(1)}%` : formatCurrencyUSD(value);
+  return (
+    <div className={`mt-3 inline-flex items-center gap-2 rounded-full px-3 py-1 text-xs font-medium ${tone}`}>
+      <Icon className="h-4 w-4" />
+      <span>
+        {label}: {formatValue(comparison.delta)}
+        {comparison.pct !== null ? ` (${comparison.pct.toFixed(1)}%)` : ''}
+      </span>
+    </div>
+  );
+};
+
+const EmptyState = ({ message }: { message: string }) => (
+  <div className="flex h-full flex-col items-center justify-center gap-2 px-6 py-8 text-center text-sm text-slate-500">
+    <Download className="h-5 w-5 text-slate-400" />
+    <span>{message}</span>
+  </div>
+);
+
+const ErrorState = ({ message }: { message: string }) => (
+  <div className="px-6 py-6 text-center text-sm text-rose-600">{message}</div>
+);
+
+const formatAxisCurrency = (value: number) => {
+  if (Math.abs(value) >= 1_000_000) {
+    return `${(value / 1_000_000).toFixed(1)}M`;
+  }
+  if (Math.abs(value) >= 1_000) {
+    return `${(value / 1_000).toFixed(0)}k`;
+  }
+  return value.toFixed(0);
+};

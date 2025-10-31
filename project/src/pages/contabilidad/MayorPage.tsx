@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Download, Filter, Loader2, Search } from 'lucide-react';
+import { Download, FileSpreadsheet, Filter, Loader2, Search } from 'lucide-react';
 import { supabase } from '../../lib/supabase';
 import { useAuthOrg } from '../../context/AuthOrgContext';
 import {
@@ -9,6 +9,7 @@ import {
   type RpcParams,
 } from './rpcHelpers';
 import { formatCurrencyUSD } from '../../lib/format';
+import { exportToCsv, exportToXlsx, formatNumber } from './exportUtils';
 
 interface AccountOption {
   id: string;
@@ -79,22 +80,6 @@ const buildVariants = (
   { desde, hasta, sucursalId, cuenta },
   { p_desde: desde, p_hasta: hasta, sucursal_id: sucursalId, cuenta },
 ];
-
-const toCsv = (rows: MayorRow[]) => {
-  const header = 'Fecha,Cuenta,Nombre cuenta,Concepto,Debe,Haber,Saldo';
-  const lines = rows.map((row) =>
-    [
-      row.fecha,
-      row.cuenta,
-      row.cuentaNombre.replaceAll(',', ' '),
-      row.descripcion.replaceAll(',', ' '),
-      row.debe.toFixed(2),
-      row.haber.toFixed(2),
-      row.saldo.toFixed(2),
-    ].join(',')
-  );
-  return [header, ...lines].join('\n');
-};
 
 export const MayorPage = () => {
   const { sucursales, sucursalSeleccionada } = useAuthOrg();
@@ -226,15 +211,34 @@ export const MayorPage = () => {
     );
   }, [rows]);
 
-  const handleExport = () => {
+  const handleExportCsv = () => {
     if (rows.length === 0) return;
-    const blob = new Blob([toCsv(rows)], { type: 'text/csv;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
-    const anchor = document.createElement('a');
-    anchor.href = url;
-    anchor.download = `mayor_${desde}_${hasta}.csv`;
-    anchor.click();
-    URL.revokeObjectURL(url);
+    const csvRows = rows.map((row) => [
+      row.fecha,
+      row.cuenta,
+      row.cuentaNombre.replaceAll(',', ' '),
+      row.descripcion.replaceAll(',', ' '),
+      formatNumber(row.debe),
+      formatNumber(row.haber),
+      formatNumber(row.saldo),
+    ]);
+    exportToCsv(csvRows, ['Fecha', 'Cuenta', 'Nombre cuenta', 'Concepto', 'Debe', 'Haber', 'Saldo'], {
+      suffix: 'mayor',
+    });
+  };
+
+  const handleExportXlsx = () => {
+    if (rows.length === 0) return;
+    const data = rows.map((row) => ({
+      Fecha: row.fecha,
+      Cuenta: row.cuenta,
+      'Nombre cuenta': row.cuentaNombre,
+      Concepto: row.descripcion,
+      Debe: row.debe,
+      Haber: row.haber,
+      Saldo: row.saldo,
+    }));
+    exportToXlsx(data, 'Mayor', { suffix: 'mayor' });
   };
 
   return (
@@ -243,15 +247,28 @@ export const MayorPage = () => {
         <div>
           <h1 className="text-3xl font-bold text-bean">Libro Mayor</h1>
           <p className="text-slate7g">Movimientos contables consolidados por sucursal.</p>
+          <p className="text-xs uppercase tracking-wide text-slate-500">
+            {rows.length} movimientos visibles
+          </p>
         </div>
-        <button
-          type="button"
-          onClick={handleExport}
-          disabled={rows.length === 0}
-          className="inline-flex items-center gap-2 rounded-xl bg-bean px-4 py-2 text-white shadow disabled:opacity-60"
-        >
-          <Download size={16} /> Exportar CSV
-        </button>
+        <div className="flex flex-wrap items-center gap-3">
+          <button
+            type="button"
+            onClick={handleExportXlsx}
+            disabled={rows.length === 0}
+            className="inline-flex items-center gap-2 rounded-xl bg-bean px-4 py-2 text-white shadow disabled:opacity-60"
+          >
+            <FileSpreadsheet size={16} /> Exportar XLSX
+          </button>
+          <button
+            type="button"
+            onClick={handleExportCsv}
+            disabled={rows.length === 0}
+            className="inline-flex items-center gap-2 rounded-xl border border-sand px-4 py-2 text-sm text-bean shadow-sm disabled:opacity-60"
+          >
+            <Download size={16} /> CSV
+          </button>
+        </div>
       </header>
 
       <section className="rounded-2xl border border-sand bg-white p-4 shadow-sm">

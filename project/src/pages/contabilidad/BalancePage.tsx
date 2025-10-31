@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Loader2, PieChart as PieChartIcon } from 'lucide-react';
+import { Download, FileSpreadsheet, Loader2, PieChart as PieChartIcon } from 'lucide-react';
 import {
   ResponsiveContainer,
   PieChart,
@@ -7,6 +7,11 @@ import {
   Cell,
   Tooltip,
   Legend,
+  LineChart,
+  Line,
+  CartesianGrid,
+  XAxis,
+  YAxis,
 } from 'recharts';
 import { useAuthOrg } from '../../context/AuthOrgContext';
 import { formatCurrencyUSD } from '../../lib/format';
@@ -16,6 +21,7 @@ import {
   toNumber,
   type RpcParams,
 } from './rpcHelpers';
+import { exportToCsv, exportToXlsx, formatNumber } from './exportUtils';
 
 interface BalanceRawRow {
   mes?: string;
@@ -82,6 +88,7 @@ export const BalancePage = () => {
   const [mes, setMes] = useState('');
   const [selectedSucursal, setSelectedSucursal] = useState('');
   const [rows, setRows] = useState<BalanceRow[]>([]);
+  const [historyTotals, setHistoryTotals] = useState<BalanceRow[][]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -109,11 +116,16 @@ export const BalancePage = () => {
           'api_get_balance',
           buildVariants(filterMes, sucursalId)
         )) ?? [];
-      setRows(normalize(data));
+      const normalized = normalize(data);
+      setRows(normalized);
+
+      const history = await loadBalanceHistory(filterMes, sucursalId);
+      setHistoryTotals(history);
     } catch (err: unknown) {
       console.error('Error cargando api_get_balance', err);
       setRows([]);
       setError(getErrorMessage(err) ?? 'No fue posible obtener el balance general.');
+      setHistoryTotals([]);
     } finally {
       setLoading(false);
     }
@@ -146,14 +158,64 @@ export const BalancePage = () => {
     [totals]
   );
 
+  const historyChartData = useMemo(() => {
+    return historyTotals
+      .map((historySet) => {
+        const month = historySet[0]?.mes ?? '';
+        const total = historySet.reduce((acc, row) => acc + row.balance, 0);
+        return { mes: formatDateIso(month), balance: total };
+      })
+      .filter((row) => row.mes);
+  }, [historyTotals]);
+
+  const handleExportCsv = () => {
+    if (rows.length === 0) return;
+    const csvRows = rows.map((row) => [
+      row.mes,
+      row.sucursalId ?? 'Todas',
+      row.type,
+      formatNumber(row.balance),
+    ]);
+    exportToCsv(csvRows, ['Mes', 'Sucursal', 'Tipo', 'Balance'], { suffix: 'balance' });
+  };
+
+  const handleExportXlsx = () => {
+    if (rows.length === 0) return;
+    const data = rows.map((row) => ({
+      Mes: row.mes,
+      Sucursal: row.sucursalId ?? 'Todas',
+      Tipo: row.type,
+      Balance: row.balance,
+    }));
+    exportToXlsx(data, 'Balance', { suffix: 'balance' });
+  };
+
   return (
     <div className="space-y-6">
-      <header className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
+      <header className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
         <div>
           <h1 className="text-3xl font-bold text-bean">Balance General</h1>
           <p className="text-slate7g">
             Distribución de activos, pasivos y patrimonio por sucursal y mes.
           </p>
+        </div>
+        <div className="flex flex-wrap items-center gap-3">
+          <button
+            type="button"
+            onClick={handleExportXlsx}
+            disabled={rows.length === 0}
+            className="inline-flex items-center gap-2 rounded-xl bg-bean px-4 py-2 text-white shadow disabled:opacity-60"
+          >
+            <FileSpreadsheet size={16} /> Exportar XLSX
+          </button>
+          <button
+            type="button"
+            onClick={handleExportCsv}
+            disabled={rows.length === 0}
+            className="inline-flex items-center gap-2 rounded-xl border border-sand px-4 py-2 text-sm text-bean shadow-sm disabled:opacity-60"
+          >
+            <Download size={16} /> CSV
+          </button>
         </div>
       </header>
 
@@ -192,6 +254,30 @@ export const BalancePage = () => {
               Actualizar
             </button>
           </div>
+        </div>
+      </section>
+
+      <section className="rounded-2xl border border-sand bg-white shadow-sm">
+        <header className="flex items-center justify-between border-b border-sand px-6 py-4">
+          <div>
+            <h2 className="text-lg font-semibold text-slate-800">Tendencia de balance total</h2>
+            <p className="text-sm text-slate-500">Histórico acumulado por mes</p>
+          </div>
+        </header>
+        <div className="h-72 px-2 py-4">
+          {historyChartData.length > 1 ? (
+            <ResponsiveContainer>
+              <LineChart data={historyChartData}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+                <XAxis dataKey="mes" stroke="#475569" />
+                <YAxis stroke="#475569" tickFormatter={(value) => formatAxisCurrency(value)} />
+                <Tooltip formatter={(value: number) => formatCurrencyUSD(value)} />
+                <Line type="monotone" dataKey="balance" stroke="#2563eb" strokeWidth={2} />
+              </LineChart>
+            </ResponsiveContainer>
+          ) : (
+            <EmptyState message="No hay suficientes meses para graficar la tendencia." />
+          )}
         </div>
       </section>
 
@@ -277,17 +363,70 @@ export const BalancePage = () => {
             <Loader2 className="h-4 w-4 animate-spin" /> Cargando balance…
           </div>
         )}
-        {!loading && rows.length === 0 && (
-          <div className="px-4 pb-6 text-center text-sm text-slate-500">
-            No hay balances registrados para el mes seleccionado.
-          </div>
+        {!loading && rows.length === 0 && !error && (
+          <EmptyState message="No hay balances registrados para el mes seleccionado." />
         )}
-        {error && (
-          <div className="px-4 pb-6 text-center text-sm text-rose-600">{error}</div>
-        )}
+        {error && <ErrorState message={error} />}
       </section>
     </div>
   );
 };
 
 export default BalancePage;
+
+const loadBalanceHistory = async (mes: string, sucursalId: string | null) => {
+  const months = buildMonthSequence(mes, 6);
+  const history: BalanceRow[][] = [];
+  for (const month of months) {
+    try {
+      const data =
+        (await rpcWithFallback<BalanceRawRow[]>(
+          'api_get_balance',
+          buildVariants(month, sucursalId)
+        )) ?? [];
+      history.push(normalize(data));
+    } catch (err) {
+      console.warn('Error cargando historial de balance para', month, err);
+    }
+  }
+  return history;
+};
+
+const buildMonthSequence = (mes: string, limit: number) => {
+  const dates: string[] = [];
+  try {
+    const base = new Date(mes);
+    if (Number.isNaN(base.getTime())) return dates;
+    for (let index = limit - 1; index >= 0; index -= 1) {
+      const copy = new Date(base);
+      copy.setMonth(copy.getMonth() - index);
+      const yyyy = copy.getFullYear();
+      const mm = String(copy.getMonth() + 1).padStart(2, '0');
+      dates.push(`${yyyy}-${mm}-01`);
+    }
+  } catch (err) {
+    console.warn('Error generando secuencia de meses', err);
+  }
+  return dates;
+};
+
+const EmptyState = ({ message }: { message: string }) => (
+  <div className="flex h-full flex-col items-center justify-center gap-2 px-6 py-8 text-center text-sm text-slate-500">
+    <Download className="h-5 w-5 text-slate-400" />
+    <span>{message}</span>
+  </div>
+);
+
+const ErrorState = ({ message }: { message: string }) => (
+  <div className="px-6 pb-6 text-center text-sm text-rose-600">{message}</div>
+);
+
+const formatAxisCurrency = (value: number) => {
+  if (Math.abs(value) >= 1_000_000) {
+    return `${(value / 1_000_000).toFixed(1)}M`;
+  }
+  if (Math.abs(value) >= 1_000) {
+    return `${(value / 1_000).toFixed(0)}k`;
+  }
+  return value.toFixed(0);
+};
