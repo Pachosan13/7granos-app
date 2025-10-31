@@ -20,11 +20,7 @@ import {
   toNumber,
   type RpcParams,
 } from './rpcHelpers';
-import {
-  exportToCsv,
-  exportToXlsx,
-  formatNumber,
-} from './exportUtils';
+import { exportToCsv, exportToXlsx, formatNumber } from './exportUtils';
 import {
   ToastContainer,
   createToast,
@@ -44,6 +40,9 @@ import {
   Line,
 } from 'recharts';
 
+/* ────────────────────────────────────────────────────────────────────────────
+   Tipos
+--------------------------------------------------------------------------- */
 interface PnLRawRow {
   mes?: string;
   periodo?: string;
@@ -53,10 +52,10 @@ interface PnLRawRow {
   cogs?: number | string | null;
   gastos_totales?: number | string | null;
   gastos?: number | string | null;
+  planilla?: number | string | null;
   utilidad_operativa?: number | string | null;
   utilidad?: number | string | null;
 }
-
 interface PnLRow {
   mes: string;
   sucursalId: string | null;
@@ -65,7 +64,6 @@ interface PnLRow {
   gastosTotales: number;
   utilidadOperativa: number;
 }
-
 interface PostJournalResult {
   ok?: boolean;
   msg?: string;
@@ -73,16 +71,16 @@ interface PostJournalResult {
   journalId?: string;
 }
 
+/* ────────────────────────────────────────────────────────────────────────────
+   Utilidades
+--------------------------------------------------------------------------- */
 const getErrorMessage = (error: unknown) => {
   if (error instanceof Error) return error.message;
   if (typeof error === 'string') return error;
   return 'Error desconocido';
 };
 
-const buildVariants = (
-  mes: string,
-  sucursalId: string | null
-): RpcParams[] => [
+const buildVariants = (mes: string, sucursalId: string | null): RpcParams[] => [
   { p_mes: mes, p_sucursal_id: sucursalId },
   { mes, p_sucursal_id: sucursalId },
   { mes, sucursal_id: sucursalId },
@@ -98,21 +96,21 @@ const buildPostVariants = (mes: string, sucursalId: string | null): RpcParams[] 
   { mes, sucursalId },
 ];
 
-const normalize = (rows: PnLRawRow[]): PnLRow[] => {
-  return rows.map((row) => {
+const normalize = (rows: PnLRawRow[]): PnLRow[] =>
+  rows.map((row) => {
     const mes = row.mes || row.periodo || '';
     const sucursalId =
       (row.sucursal_id ?? row.sucursalId ?? null) !== undefined
         ? (row.sucursal_id ?? row.sucursalId ?? null)
         : null;
+
     const ingresos = toNumber(row.ingresos);
     const cogs = toNumber(row.cogs);
-    const gastosTotales = toNumber(
-      row.gastos_totales ?? row.gastos ?? row.cogs ?? 0
-    );
+    const gastosTotales = toNumber(row.gastos_totales ?? row.gastos ?? 0);
     const utilidadOperativa = toNumber(
       row.utilidad_operativa ?? row.utilidad ?? ingresos - cogs - gastosTotales
     );
+
     return {
       mes: mes ? mes.slice(0, 10) : '',
       sucursalId: sucursalId ? String(sucursalId) : null,
@@ -122,12 +120,48 @@ const normalize = (rows: PnLRawRow[]): PnLRow[] => {
       utilidadOperativa,
     };
   });
+
+const aggregate = (rows: PnLRow[]): PnLRow => {
+  const agg = rows.reduce(
+    (acc, r) => {
+      acc.ingresos += r.ingresos || 0;
+      acc.cogs += r.cogs || 0;
+      acc.gastosTotales += r.gastosTotales || 0;
+      acc.utilidadOperativa += r.utilidadOperativa || 0;
+      return acc;
+    },
+    { ingresos: 0, cogs: 0, gastosTotales: 0, utilidadOperativa: 0 }
+  );
+  return {
+    mes: rows[0]?.mes ?? '',
+    sucursalId: null,
+    ...agg,
+  };
 };
 
+const getPreviousMonth = (isoDate: string) => {
+  try {
+    const date = new Date(isoDate);
+    if (Number.isNaN(date.getTime())) return null;
+    date.setMonth(date.getMonth() - 1);
+    const yyyy = date.getFullYear();
+    const mm = String(date.getMonth() + 1).padStart(2, '0');
+    return `${yyyy}-${mm}-01`;
+  } catch {
+    return null;
+  }
+};
+
+const getNetMargin = (row: PnLRow) =>
+  !row.ingresos ? 0 : (row.utilidadOperativa / row.ingresos) * 100;
+
+/* ────────────────────────────────────────────────────────────────────────────
+   Componente principal
+--------------------------------------------------------------------------- */
 export const PnLPage = () => {
   const { sucursales, sucursalSeleccionada } = useAuthOrg();
   const [mes, setMes] = useState('');
-  const [selectedSucursal, setSelectedSucursal] = useState('');
+  const [selectedSucursal, setSelectedSucursal] = useState(''); // '' = todas
   const [rows, setRows] = useState<PnLRow[]>([]);
   const [previousRow, setPreviousRow] = useState<PnLRow | null>(null);
   const [historyRows, setHistoryRows] = useState<PnLRow[]>([]);
@@ -148,52 +182,72 @@ export const PnLPage = () => {
     }
   }, [sucursalSeleccionada?.id]);
 
+  // carga P&L del mes actual
   const fetchData = useCallback(async () => {
     if (!mes) return;
     setLoading(true);
     setError(null);
-    try {
-      const filterMes = `${mes}-01`;
-      const sucursalId = selectedSucursal || null;
-      const data =
-        (await rpcWithFallback<PnLRawRow[]>(
-          'api_get_pyg',
-          buildVariants(filterMes, sucursalId)
-        )) ?? [];
-      const normalizedRows = normalize(data);
-      setRows(normalizedRows);
+    const filterMes = `${mes}-01`;
+    const sucursalId = selectedSucursal || null;
 
-      const previousMonth = getPreviousMonth(filterMes);
-      let previousNormalizedRow: PnLRow | null = null;
-      if (previousMonth) {
-        try {
-          const previousData =
+    try {
+      // a) Si hay sucursal específica, usamos RPC
+      if (sucursalId) {
+        const data =
+          (await rpcWithFallback<PnLRawRow[]>(
+            'api_get_pyg',
+            buildVariants(filterMes, sucursalId)
+          )) ?? [];
+        const normalizedRows = normalize(data);
+        // RPC puede devolver 1..n filas; mantenemos tal cual
+        setRows(normalizedRows);
+      } else {
+        // b) "Todas mis sucursales": vamos directo a la vista y agregamos
+        const { data, error } = await supabase
+          .from('v_pyg_comparativo')
+          .select('*')
+          .eq('mes', filterMes)
+          .order('sucursal_id', { ascending: true });
+
+        if (error) throw error;
+        const normalized = normalize((data ?? []) as PnLRawRow[]);
+        setRows(normalized.length ? [aggregate(normalized)] : []);
+      }
+
+      // Mes anterior (para pill de comparación)
+      const prevMonth = getPreviousMonth(filterMes);
+      if (prevMonth) {
+        if (sucursalId) {
+          const prev =
             (await rpcWithFallback<PnLRawRow[]>(
               'api_get_pyg',
-              buildVariants(previousMonth, sucursalId)
+              buildVariants(prevMonth, sucursalId)
             )) ?? [];
-          const normalizedPrev = normalize(previousData);
-          previousNormalizedRow = normalizedPrev[0] ?? null;
-          setPreviousRow(previousNormalizedRow);
-        } catch (prevErr) {
-          console.warn('Error cargando mes anterior de api_get_pyg', prevErr);
-          setPreviousRow(null);
+          const normPrev = normalize(prev);
+          setPreviousRow(normPrev[0] ?? null);
+        } else {
+          const { data: prevData, error: prevErr } = await supabase
+            .from('v_pyg_comparativo')
+            .select('*')
+            .eq('mes', prevMonth);
+
+          if (prevErr) throw prevErr;
+          const normPrev = normalize((prevData ?? []) as PnLRawRow[]);
+          setPreviousRow(normPrev.length ? aggregate(normPrev) : null);
         }
       } else {
         setPreviousRow(null);
       }
 
-      const fallbackHistory = previousNormalizedRow
-        ? [previousNormalizedRow, ...normalizedRows]
-        : normalizedRows;
-      const history = await loadHistory(sucursalId, fallbackHistory);
+      // Historial para gráficos (últimos 6)
+      const history = await loadHistory(sucursalId, filterMes);
       setHistoryRows(history);
     } catch (err: unknown) {
-      console.error('Error cargando api_get_pyg', err);
+      console.error('Error cargando P&L', err);
       setRows([]);
-      setError(getErrorMessage(err) ?? 'No fue posible obtener el estado de resultados.');
       setPreviousRow(null);
       setHistoryRows([]);
+      setError(getErrorMessage(err) ?? 'No fue posible obtener el estado de resultados.');
     } finally {
       setLoading(false);
     }
@@ -205,12 +259,18 @@ export const PnLPage = () => {
 
   const currentRow = useMemo(() => rows[0] ?? null, [rows]);
 
-  const totals = useMemo(() => {
-    if (!currentRow) {
-      return { ingresos: 0, cogs: 0, gastosTotales: 0, utilidadOperativa: 0 };
-    }
-    return currentRow;
-  }, [currentRow]);
+  const totals = useMemo(
+    () =>
+      currentRow ?? {
+        mes: '',
+        sucursalId: null,
+        ingresos: 0,
+        cogs: 0,
+        gastosTotales: 0,
+        utilidadOperativa: 0,
+      },
+    [currentRow]
+  );
 
   const netMargin = useMemo(() => {
     if (!currentRow) return 0;
@@ -256,6 +316,18 @@ export const PnLPage = () => {
     try {
       const filterMes = `${mes}-01`;
       const sucursalId = selectedSucursal || null;
+
+      if (!sucursalId) {
+        // No tiene sentido postear “todas” en automático
+        pushToast({
+          tone: 'warning',
+          title: 'Selecciona una sucursal',
+          description: 'Para postear, elige una sucursal específica.',
+        });
+        setPosting(false);
+        return;
+      }
+
       const result = await rpcWithFallback<PostJournalResult>(
         'api_post_journal_auto',
         buildPostVariants(filterMes, sucursalId)
@@ -428,11 +500,7 @@ export const PnLPage = () => {
           <p className="mt-3 text-2xl font-semibold text-slate-800">
             {formatCurrencyUSD(totals.gastosTotales)}
           </p>
-          <ComparisonPill
-            comparison={comparisons.gastos}
-            label="vs mes anterior"
-            negativeIsBad
-          />
+          <ComparisonPill comparison={comparisons.gastos} label="vs mes anterior" negativeIsBad />
         </article>
         <article className="rounded-2xl border border-sand bg-white p-4 shadow-sm">
           <div className="flex items-center justify-between text-slate-500">
@@ -461,13 +529,13 @@ export const PnLPage = () => {
             {historyData.length > 1 ? (
               <ResponsiveContainer>
                 <BarChart data={historyData}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
-                  <XAxis dataKey="mes" stroke="#475569" />
-                  <YAxis stroke="#475569" tickFormatter={(value) => formatAxisCurrency(value)} />
-                  <Tooltip formatter={(value: number) => formatCurrencyUSD(value)} />
+                  <CartesianGrid strokeDasharray="3 3" />
+                  <XAxis dataKey="mes" />
+                  <YAxis tickFormatter={(v) => formatAxisCurrency(v)} />
+                  <Tooltip formatter={(v: number) => formatCurrencyUSD(v)} />
                   <Legend />
-                  <Bar dataKey="ingresos" fill="#2563eb" name="Ingresos" />
-                  <Bar dataKey="utilidad" fill="#16a34a" name="Utilidad" />
+                  <Bar dataKey="ingresos" name="Ingresos" />
+                  <Bar dataKey="utilidad" name="Utilidad" />
                 </BarChart>
               </ResponsiveContainer>
             ) : (
@@ -492,14 +560,11 @@ export const PnLPage = () => {
                     margen: row.ingresos === 0 ? 0 : (row.utilidad / row.ingresos) * 100,
                   }))}
                 >
-                  <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
-                  <XAxis dataKey="mes" stroke="#475569" />
-                  <YAxis
-                    stroke="#475569"
-                    tickFormatter={(value) => `${value.toFixed(0)}%`}
-                  />
-                  <Tooltip formatter={(value: number) => `${value.toFixed(1)}%`} />
-                  <Line type="monotone" dataKey="margen" stroke="#f97316" strokeWidth={2} />
+                  <CartesianGrid strokeDasharray="3 3" />
+                  <XAxis dataKey="mes" />
+                  <YAxis tickFormatter={(v) => `${v.toFixed(0)}%`} />
+                  <Tooltip formatter={(v: number) => `${v.toFixed(1)}%`} />
+                  <Line type="monotone" dataKey="margen" strokeWidth={2} />
                 </LineChart>
               </ResponsiveContainer>
             ) : (
@@ -564,53 +629,51 @@ export const PnLPage = () => {
 
 export default PnLPage;
 
-const getPreviousMonth = (isoDate: string) => {
+/* ────────────────────────────────────────────────────────────────────────────
+   Auxiliares para historial
+--------------------------------------------------------------------------- */
+const loadHistory = async (sucursalId: string | null, currentMesISO: string) => {
   try {
-    const date = new Date(isoDate);
-    if (Number.isNaN(date.getTime())) return null;
-    date.setMonth(date.getMonth() - 1);
-    const yyyy = date.getFullYear();
-    const mm = String(date.getMonth() + 1).padStart(2, '0');
-    return `${yyyy}-${mm}-01`;
-  } catch {
-    return null;
-  }
-};
+    // Traemos últimos 6 meses de la vista y agregamos si es “todas”
+    let q = supabase
+      .from('v_pyg_comparativo')
+      .select('*')
+      .lte('mes', currentMesISO)
+      .order('mes', { ascending: true })
+      .limit(6);
 
-const getNetMargin = (row: PnLRow) => {
-  if (!row.ingresos) return 0;
-  return (row.utilidadOperativa / row.ingresos) * 100;
-};
+    if (sucursalId) q = q.eq('sucursal_id', sucursalId);
 
-const loadHistory = async (
-  sucursalId: string | null,
-  fallbackRows: PnLRow[]
-) => {
-  try {
-    let query = supabase.from('v_pyg_comparativo').select('*').order('mes', { ascending: true }).limit(6);
-    if (sucursalId) {
-      query = query.eq('sucursal_id', sucursalId);
-    } else {
-      query = query.is('sucursal_id', null);
-    }
-    const { data, error } = await query;
+    const { data, error } = await q;
     if (error || !data) {
-      if (error) {
-        console.warn('Error cargando v_pyg_comparativo', error);
-      }
-      return fallbackRows;
+      if (error) console.warn('Error cargando v_pyg_comparativo', error);
+      return [];
     }
-    const normalized = normalize(data as PnLRawRow[]).sort((a, b) =>
-      a.mes.localeCompare(b.mes)
-    );
-    if (normalized.length === 0) return fallbackRows;
-    return normalized;
+
+    const normalized = normalize(data as PnLRawRow[]);
+    if (!sucursalId) {
+      // agrupamos por mes
+      const byMes = new Map<string, PnLRow[]>();
+      for (const r of normalized) {
+        const arr = byMes.get(r.mes) ?? [];
+        arr.push(r);
+        byMes.set(r.mes, arr);
+      }
+      const agg = Array.from(byMes.entries())
+        .map(([mes, arr]) => ({ ...aggregate(arr), mes }))
+        .sort((a, b) => a.mes.localeCompare(b.mes));
+      return agg;
+    }
+    return normalized.sort((a, b) => a.mes.localeCompare(b.mes));
   } catch (err) {
     console.warn('Error inesperado cargando historial de P&L', err);
-    return fallbackRows;
+    return [];
   }
 };
 
+/* ────────────────────────────────────────────────────────────────────────────
+   UI helpers
+--------------------------------------------------------------------------- */
 interface Comparison {
   current: number;
   prev: number;
@@ -658,11 +721,7 @@ const ErrorState = ({ message }: { message: string }) => (
 );
 
 const formatAxisCurrency = (value: number) => {
-  if (Math.abs(value) >= 1_000_000) {
-    return `${(value / 1_000_000).toFixed(1)}M`;
-  }
-  if (Math.abs(value) >= 1_000) {
-    return `${(value / 1_000).toFixed(0)}k`;
-  }
+  if (Math.abs(value) >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
+  if (Math.abs(value) >= 1_000) return `${(value / 1_000).toFixed(0)}k`;
   return value.toFixed(0);
 };
