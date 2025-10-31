@@ -11,7 +11,7 @@ export const toNumber = (v: any): number => {
 
 export const formatDateIso = (d: any): string => {
   const x = d instanceof Date ? d : new Date(d);
-  // 'YYYY-MM-DD' (normalizado a UTC para evitar off-by-one)
+  // Normaliza a 'YYYY-MM-DD' en UTC para evitar off-by-one
   return new Date(Date.UTC(x.getFullYear(), x.getMonth(), x.getDate()))
     .toISOString()
     .slice(0, 10);
@@ -25,38 +25,54 @@ const normalizeValue = (k: string, v: any) => {
   return v;
 };
 
-// Mapea alias del UI → nombres que esperan las RPC en Postgres
+// Mapea alias del UI → nombres que esperan las RPC
 const mapParamNames = (p: RpcParams): RpcParams => {
   const out: RpcParams = { ...p };
-
   if ('mes' in out && !('p_mes' in out)) out.p_mes = out.mes;
   if ('sucursalId' in out && !('p_sucursal_id' in out)) out.p_sucursal_id = out.sucursalId;
   if ('desde' in out && !('p_desde' in out)) out.p_desde = out.desde;
   if ('hasta' in out && !('p_hasta' in out)) out.p_hasta = out.hasta;
   if ('cuenta' in out && !('p_cuenta' in out)) out.p_cuenta = out.cuenta;
-
   return out;
 };
 
-// Firma usada por el UI actual: rpcWithFallback('fn', payload, payloadAlt?, ...)
+// Lista blanca de parámetros que acepta cada función RPC
+const ALLOW: Record<string, string[]> = {
+  api_get_pyg: ['p_mes', 'p_sucursal_id'],
+  api_get_balance: ['p_mes', 'p_sucursal_id'],
+  api_get_mayor: ['p_desde', 'p_hasta', 'p_sucursal_id', 'p_cuenta'],
+};
+
+// Deja SOLO los parámetros permitidos para la función
+const cleanForFn = (fn: string, payload: RpcParams): RpcParams => {
+  const allowed = ALLOW[fn];
+  if (!allowed) return payload; // por si se usa con otra RPC
+  const cleaned: RpcParams = {};
+  for (const k of allowed) {
+    if (k in payload) cleaned[k] = payload[k];
+  }
+  return cleaned;
+};
+
+// Firma usada por el UI: rpcWithFallback('fn', payload, payloadAlt?, ...)
 export async function rpcWithFallback<T>(
   fn: string,
   ...variants: RpcParams[]
 ): Promise<T | null> {
   const tries: RpcParams[] = [];
 
-  // Para cada variante recibida, agregamos su versión mapeada y normalizada
+  // Para cada variante recibida, mapea → normaliza → filtra por función
   for (const v of variants.length ? variants : [{}]) {
     const mapped = mapParamNames(v || {});
     const normalized: RpcParams = {};
     for (const [k, val] of Object.entries(mapped)) {
       normalized[k] = normalizeValue(k, val);
     }
-    tries.push(normalized);
+    const cleaned = cleanForFn(fn, normalized);
+    tries.push(cleaned);
   }
 
-  // Intento “tal cual” primero (por compatibilidad con llamadas correctas ya existentes)
-  if (variants.length) tries.unshift(variants[0]);
+  // No hacemos intento “tal cual” para evitar enviar claves extra no permitidas
 
   let lastErr: any = null;
 
