@@ -1,3 +1,4 @@
+import { useMemo } from 'react';
 import {
   Home,
   Users,
@@ -6,14 +7,33 @@ import {
   Upload,
   TrendingUp,
   ShoppingCart,
-  FileText
+  FileText,
+  BarChart3,
+  PieChart,
 } from 'lucide-react';
-import { NavLink } from 'react-router-dom';
+import { NavLink, useLocation } from 'react-router-dom';
 
-const menuItems = [
+type MenuItem = {
+  to: string;
+  icon: React.ComponentType<{ size?: number }>;
+  label: string;
+  children?: MenuItem[];
+  depth?: number;
+};
+
+const menuItems: MenuItem[] = [
   { to: '/', icon: Home, label: 'Tablero' },
   { to: '/ventas', icon: TrendingUp, label: 'Ventas' },
-  { to: '/contabilidad', icon: Calculator, label: 'Contabilidad' },
+  {
+    to: '/contabilidad',
+    icon: Calculator,
+    label: 'Contabilidad',
+    children: [
+      { to: '/contabilidad/mayor', icon: FileText, label: 'Libro Mayor', depth: 1 },
+      { to: '/contabilidad/pnl', icon: BarChart3, label: 'P&L mensual', depth: 1 },
+      { to: '/contabilidad/balance', icon: PieChart, label: 'Balance general', depth: 1 },
+    ],
+  },
 
   // Compras
   { to: '/compras/proveedores', icon: ShoppingCart, label: 'Proveedores' },
@@ -24,6 +44,17 @@ const menuItems = [
   { to: '/admin', icon: Settings, label: 'Administración' },
 ];
 
+const flattenMenu = (items: MenuItem[]): MenuItem[] => {
+  const result: MenuItem[] = [];
+  items.forEach((item) => {
+    result.push(item);
+    if (item.children) {
+      item.children.forEach((child) => result.push({ ...child, depth: (child.depth ?? 1) }));
+    }
+  });
+  return result;
+};
+
 export const Sidebar = ({
   open,
   onClose,
@@ -31,6 +62,9 @@ export const Sidebar = ({
   open: boolean;
   onClose: () => void;
 }) => {
+  const location = useLocation();
+  const flatMenu = useMemo(() => flattenMenu(menuItems), []);
+
   return (
     <>
       {/* Overlay móvil */}
@@ -47,23 +81,30 @@ export const Sidebar = ({
         }`}
       >
         <nav className="p-6 space-y-2">
-          {menuItems.map((item) => (
-            <NavLink
-              key={item.to}
-              to={item.to}
-              onClick={onClose}
-              className={({ isActive }) =>
-                `flex items-center space-x-3 px-4 py-3 rounded-2xl transition-all duration-200 ${
-                  isActive
+          {flatMenu.map((item) => {
+            const isChild = (item.depth ?? 0) > 0;
+            const isActive = location.pathname === item.to;
+            const Icon = item.icon;
+            return (
+              <NavLink
+                key={item.to}
+                to={item.to}
+                onClick={onClose}
+                className={({ isActive: navActive }) => {
+                  const active = navActive || isActive;
+                  const base = 'flex items-center space-x-3 rounded-2xl transition-all duration-200';
+                  const padding = isChild ? 'pl-10 pr-4 py-2.5 text-sm' : 'px-4 py-3 font-medium';
+                  const state = active
                     ? 'bg-accent text-white shadow-md'
-                    : 'text-slate7g hover:text-bean hover:bg-off'
-                }`
-              }
-            >
-              <item.icon size={20} />
-              <span className="font-medium">{item.label}</span>
-            </NavLink>
-          ))}
+                    : 'text-slate7g hover:text-bean hover:bg-off';
+                  return `${base} ${padding} ${state}`;
+                }}
+              >
+                <Icon size={isChild ? 16 : 20} />
+                <span className={isChild ? 'font-medium' : 'font-semibold'}>{item.label}</span>
+              </NavLink>
+            );
+          })}
         </nav>
       </aside>
     </>
