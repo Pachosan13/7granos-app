@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import type { PostgrestError } from '@supabase/supabase-js';
 import { CalendarDays, Clock, RefreshCw, Store } from 'lucide-react';
 import { supabase, shouldUseDemoMode } from '../lib/supabase';
 import { formatCurrencyUSD } from '../lib/format';
@@ -26,6 +27,109 @@ interface SeriesPoint {
   ventas_netas: number;
   itbms?: number | null;
   tx: number;
+}
+
+type NullableNumber = number | string | null | undefined;
+
+interface SummaryRowPayload {
+  ventas_netas?: NullableNumber;
+  cogs?: NullableNumber;
+  gastos?: NullableNumber;
+  utilidad?: NullableNumber;
+  tx?: NullableNumber;
+  ticket_promedio?: NullableNumber;
+  margen_bruto_pct?: NullableNumber;
+  ventas_vs_semana_ant_pct?: NullableNumber;
+}
+
+interface SeriesRowPayload {
+  d?: string | null;
+  dia?: string | null;
+  ventas_netas?: NullableNumber;
+  ventas?: NullableNumber;
+  itbms?: NullableNumber;
+  tx?: NullableNumber;
+  transacciones?: NullableNumber;
+}
+
+interface RankingRowPayload {
+  sucursal_id?: string | number | null;
+  sucursal_nombre?: string | null;
+  ventas?: NullableNumber;
+  cogs?: NullableNumber;
+  gastos?: NullableNumber;
+  utilidad?: NullableNumber;
+  margen_pct?: NullableNumber;
+}
+
+interface TopProductRowPayload {
+  producto?: string | null;
+  qty?: NullableNumber;
+  ventas?: NullableNumber;
+}
+
+interface HeatmapRowPayload {
+  hora?: NullableNumber;
+  ventas?: NullableNumber;
+  tx?: NullableNumber;
+}
+
+interface AlertRowPayload {
+  code?: string | null;
+  level?: string | null;
+  message?: string | null;
+}
+
+interface PlanillaRowPayload {
+  total?: NullableNumber;
+  empleados?: NullableNumber;
+  costo_promedio?: NullableNumber;
+  horas_extra?: NullableNumber;
+  ausencias?: NullableNumber;
+}
+
+type RpcParamValue = string | number | boolean | null | undefined;
+type RpcParams = Record<string, RpcParamValue>;
+
+function toNumber(value: NullableNumber): number {
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? value : 0;
+  }
+  if (typeof value === 'string') {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : 0;
+  }
+  return 0;
+}
+
+function toNullableNumber(value: NullableNumber): number | null {
+  if (value === null || value === undefined) {
+    return null;
+  }
+  const numeric = toNumber(value);
+  return Number.isFinite(numeric) ? numeric : 0;
+}
+
+function normalizeParams(params: RpcParams): Record<string, RpcParamValue> {
+  return Object.fromEntries(
+    Object.entries(params).filter(([, value]) => value !== undefined)
+  ) as Record<string, RpcParamValue>;
+}
+
+async function rpcWithFallback<T>(fn: string, variants: RpcParams[]): Promise<T | null> {
+  let lastError: PostgrestError | Error | null = null;
+  for (let index = 0; index < variants.length; index += 1) {
+    const params = normalizeParams(variants[index]);
+    const response = await supabase.rpc<T>(fn, params as Record<string, unknown>);
+    if (!response.error) {
+      if (index > 0) {
+        console.warn(`[dashboard] ${fn} ejecutado con firma alternativa #${index + 1}`, params);
+      }
+      return response.data ?? null;
+    }
+    lastError = response.error;
+  }
+  throw lastError ?? new Error(`No se pudo ejecutar ${fn}`);
 }
 
 interface PlanillaSnapshot {
@@ -141,58 +245,100 @@ function buildDemoData(): {
 }
 
 async function fetchSummary(desde: string, hasta: string, sucursalId: string | null): Promise<Summary7d | null> {
-  const { data, error } = await supabase.rpc('api_dashboard_summary_7d', {
-    p_desde: desde,
-    p_hasta: hasta,
-    p_sucursal_id: sucursalId,
-  });
-  if (error) throw error;
-  return data?.[0] ?? null;
+  const payload =
+    (await rpcWithFallback<SummaryRowPayload[]>(
+      'api_dashboard_summary_7d',
+      [
+        { p_desde: desde, p_hasta: hasta, p_sucursal_id: sucursalId },
+        { desde, hasta, p_sucursal_id: sucursalId },
+        { desde, hasta, sucursal_id: sucursalId },
+        { desde, hasta },
+      ]
+    )) ?? [];
+
+  const row = payload[0];
+  if (!row) {
+    return null;
+  }
+
+  return {
+    ventas_netas: toNumber(row.ventas_netas),
+    cogs: toNumber(row.cogs),
+    gastos: toNumber(row.gastos),
+    utilidad: toNumber(row.utilidad),
+    tx: toNumber(row.tx),
+    ticket_promedio: toNumber(row.ticket_promedio),
+    margen_bruto_pct: toNumber(row.margen_bruto_pct),
+    ventas_vs_semana_ant_pct: toNullableNumber(row.ventas_vs_semana_ant_pct),
+  };
 }
 
 async function fetchSeries(desde: string, hasta: string, sucursalId: string | null): Promise<SeriesPoint[]> {
-  const { data, error } = await supabase.rpc('rpc_ui_series_14d', {
-    p_desde: desde,
-    p_hasta: hasta,
-    p_sucursal_id: sucursalId,
-  });
-  if (error) throw error;
-  return (data ?? []).map((row: any) => ({
-    d: row.d,
-    ventas_netas: Number(row.ventas_netas ?? 0),
-    itbms: Number(row.itbms ?? 0),
-    tx: Number(row.tx ?? 0),
-  }));
+  const payload =
+    (await rpcWithFallback<SeriesRowPayload[]>(
+      'rpc_ui_series_14d',
+      [
+        { p_desde: desde, p_hasta: hasta, p_sucursal_id: sucursalId },
+        { desde, hasta, p_sucursal_id: sucursalId },
+        { desde, hasta, sucursal_id: sucursalId },
+        { desde, hasta },
+      ]
+    )) ?? [];
+
+  return payload
+    .map<SeriesPoint | null>((row) => {
+      const dateValue = row.d ?? row.dia ?? null;
+      if (!dateValue) {
+        return null;
+      }
+      return {
+        d: dateValue,
+        ventas_netas: toNumber(row.ventas_netas ?? row.ventas),
+        itbms: toNullableNumber(row.itbms),
+        tx: toNumber(row.tx ?? row.transacciones),
+      };
+    })
+    .filter((row): row is SeriesPoint => Boolean(row));
 }
 
 async function fetchRanking(desde: string, hasta: string): Promise<LeaderboardRow[]> {
-  const { data, error } = await supabase.rpc('api_dashboard_ranking_7d', {
-    p_desde: desde,
-    p_hasta: hasta,
-  });
-  if (error) throw error;
-  return (data ?? []).map((row: any) => ({
+  const payload =
+    (await rpcWithFallback<RankingRowPayload[]>(
+      'api_dashboard_ranking_7d',
+      [
+        { p_desde: desde, p_hasta: hasta },
+        { desde, hasta },
+      ]
+    )) ?? [];
+
+  return payload.map((row) => ({
     sucursal_id: String(row.sucursal_id ?? 'sin-id'),
-    ventas: Number(row.ventas ?? 0),
-    cogs: Number(row.cogs ?? 0),
-    gastos: Number(row.gastos ?? 0),
-    utilidad: Number(row.utilidad ?? 0),
-    margen_pct: Number(row.margen_pct ?? 0),
+    sucursal_nombre: row.sucursal_nombre ?? undefined,
+    ventas: toNumber(row.ventas),
+    cogs: toNumber(row.cogs),
+    gastos: toNumber(row.gastos),
+    utilidad: toNumber(row.utilidad),
+    margen_pct: toNumber(row.margen_pct),
   }));
 }
 
 async function fetchTopProducts(desde: string, hasta: string, sucursalId: string | null): Promise<TopProductItem[]> {
   try {
-    const { data, error } = await supabase.rpc('api_dashboard_top_productos_7d', {
-      p_desde: desde,
-      p_hasta: hasta,
-      p_sucursal_id: sucursalId,
-    });
-    if (error) throw error;
-    return (data ?? []).map((row: any) => ({
+    const payload =
+      (await rpcWithFallback<TopProductRowPayload[]>(
+        'api_dashboard_top_productos_7d',
+        [
+          { p_desde: desde, p_hasta: hasta, p_sucursal_id: sucursalId },
+          { desde, hasta, p_sucursal_id: sucursalId },
+          { desde, hasta, sucursal_id: sucursalId },
+          { desde, hasta },
+        ]
+      )) ?? [];
+
+    return payload.map((row) => ({
       producto: row.producto ?? 'Producto',
-      qty: Number(row.qty ?? 0),
-      ventas: Number(row.ventas ?? 0),
+      qty: toNumber(row.qty),
+      ventas: toNumber(row.ventas),
     }));
   } catch (err) {
     console.warn('[dashboard] api_dashboard_top_productos_7d no disponible', err);
@@ -202,16 +348,21 @@ async function fetchTopProducts(desde: string, hasta: string, sucursalId: string
 
 async function fetchHeatmap(desde: string, hasta: string, sucursalId: string | null): Promise<HeatmapPoint[]> {
   try {
-    const { data, error } = await supabase.rpc('api_dashboard_heatmap_hora_7d', {
-      p_desde: desde,
-      p_hasta: hasta,
-      p_sucursal_id: sucursalId,
-    });
-    if (error) throw error;
-    return (data ?? []).map((row: any) => ({
-      hora: Number(row.hora ?? 0),
-      ventas: Number(row.ventas ?? 0),
-      tx: Number(row.tx ?? 0),
+    const payload =
+      (await rpcWithFallback<HeatmapRowPayload[]>(
+        'api_dashboard_heatmap_hora_7d',
+        [
+          { p_desde: desde, p_hasta: hasta, p_sucursal_id: sucursalId },
+          { desde, hasta, p_sucursal_id: sucursalId },
+          { desde, hasta, sucursal_id: sucursalId },
+          { desde, hasta },
+        ]
+      )) ?? [];
+
+    return payload.map((row) => ({
+      hora: toNumber(row.hora),
+      ventas: toNumber(row.ventas),
+      tx: toNumber(row.tx),
     }));
   } catch (err) {
     console.warn('[dashboard] api_dashboard_heatmap_hora_7d no disponible', err);
@@ -221,13 +372,18 @@ async function fetchHeatmap(desde: string, hasta: string, sucursalId: string | n
 
 async function fetchAlerts(desde: string, hasta: string, sucursalId: string | null): Promise<AlertItem[]> {
   try {
-    const { data, error } = await supabase.rpc('api_dashboard_alertas_7d', {
-      p_desde: desde,
-      p_hasta: hasta,
-      p_sucursal_id: sucursalId,
-    });
-    if (error) throw error;
-    return (data ?? []).map((row: any) => ({
+    const payload =
+      (await rpcWithFallback<AlertRowPayload[]>(
+        'api_dashboard_alertas_7d',
+        [
+          { p_desde: desde, p_hasta: hasta, p_sucursal_id: sucursalId },
+          { desde, hasta, p_sucursal_id: sucursalId },
+          { desde, hasta, sucursal_id: sucursalId },
+          { desde, hasta },
+        ]
+      )) ?? [];
+
+    return payload.map((row) => ({
       code: String(row.code ?? 'alert'),
       level: row.level === 'warn' ? 'warn' : 'info',
       message: row.message ?? '',
@@ -240,13 +396,29 @@ async function fetchAlerts(desde: string, hasta: string, sucursalId: string | nu
 
 async function fetchPlanillaSnapshot(desde: string, hasta: string, sucursalId: string | null): Promise<PlanillaSnapshot | null> {
   try {
-    const { data, error } = await supabase.rpc('api_dashboard_planilla_snapshot', {
-      p_desde: desde,
-      p_hasta: hasta,
-      p_sucursal_id: sucursalId,
-    });
-    if (error) throw error;
-    return data?.[0] ?? null;
+    const payload =
+      (await rpcWithFallback<PlanillaRowPayload[]>(
+        'api_dashboard_planilla_snapshot',
+        [
+          { p_desde: desde, p_hasta: hasta, p_sucursal_id: sucursalId },
+          { desde, hasta, p_sucursal_id: sucursalId },
+          { desde, hasta, sucursal_id: sucursalId },
+          { desde, hasta },
+        ]
+      )) ?? [];
+
+    const row = payload[0];
+    if (!row) {
+      return null;
+    }
+
+    return {
+      total: toNumber(row.total),
+      empleados: toNumber(row.empleados),
+      costo_promedio: toNumber(row.costo_promedio),
+      horas_extra: toNumber(row.horas_extra),
+      ausencias: toNumber(row.ausencias),
+    };
   } catch (err) {
     console.warn('[dashboard] api_dashboard_planilla_snapshot no disponible', err);
     return null;
@@ -343,9 +515,10 @@ export default function DashboardExecutive() {
       setPlanillaSnapshot(planillaData);
       setRange(effectiveRange);
       setUsedFallback(fallback);
-    } catch (err: any) {
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : 'No se pudieron cargar los datos del tablero.';
       console.error('[dashboard] Error cargando datos', err);
-      setError(err?.message ?? 'No se pudieron cargar los datos del tablero.');
+      setError(message);
       setSummary(null);
       setSeries([]);
       setRanking([]);
