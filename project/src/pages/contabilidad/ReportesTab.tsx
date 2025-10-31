@@ -1,7 +1,8 @@
+// src/pages/contabilidad/ReportesTab.tsx
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { supabase } from '../../lib/supabase';
 import { postJournalsInRange } from '../../lib/contabilidad';
-import { money } from '../../lib/format';
+import { formatCurrencyUSD as money } from '../../lib/format';
 
 type Row = {
   mes: string; // YYYY-MM-01
@@ -21,7 +22,7 @@ export const ReportesTab = () => {
   const [loading, setLoading] = useState(false);
   const [posting, setPosting] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
-  const [previewMode, setPreviewMode] = useState(false);
+  const [previewMode, setPreviewMode] = useState(true);
   const [fetchError, setFetchError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -72,9 +73,7 @@ export const ReportesTab = () => {
     }
   }, [desdeMes, hastaMes, previewMode]);
 
-  useEffect(() => {
-    fetchData();
-  }, [fetchData]);
+  useEffect(() => { fetchData(); }, [fetchData]);
 
   const grouped = useMemo(() => {
     const byMes: Record<string, Row[]> = {};
@@ -85,7 +84,7 @@ export const ReportesTab = () => {
     return byMes;
   }, [rows]);
 
-  const totalize = (arr: Row[]) =>
+  const sum = (arr: Row[]) =>
     arr.reduce(
       (acc, r) => {
         acc.ingresos += Number(r.ingresos || 0);
@@ -98,7 +97,6 @@ export const ReportesTab = () => {
       { ingresos: 0, cogs: 0, gastos: 0, margen_bruto: 0, utilidad_operativa: 0 }
     );
 
-  // ✅ Postear meses completos (primer día al último día)
   const postMonths = async () => {
     if (!desdeMes || !hastaMes) return;
     setPosting(true);
@@ -106,7 +104,7 @@ export const ReportesTab = () => {
     try {
       const [y2, m2] = hastaMes.split('-').map(Number);
       const desde = `${desdeMes}-01`;
-      const lastDay = new Date(y2, m2, 0).getDate(); // último día del mes hastaMes
+      const lastDay = new Date(y2, m2, 0).getDate();
       const hasta = `${hastaMes}-${String(lastDay).padStart(2, '0')}`;
 
       await postJournalsInRange({ desde, hasta, sucursalId: null });
@@ -119,7 +117,7 @@ export const ReportesTab = () => {
     }
   };
 
-  const viewBadge = previewMode ? 'Preview P&L (lectura)' : 'Posteado (legacy)';
+  const viewBadge = previewMode ? 'PREVIEW P&L (LECTURA)' : 'POSTEADO (LEGACY)';
 
   return (
     <div className="space-y-6">
@@ -128,35 +126,16 @@ export const ReportesTab = () => {
         <div className="flex items-end gap-2 flex-wrap">
           <div className="flex flex-col">
             <label className="text-xs text-slate-700">Desde (mes)</label>
-            <input
-              type="month"
-              value={desdeMes}
-              onChange={(e) => setDesdeMes(e.target.value)}
-              className="border rounded px-2 py-1"
-            />
+            <input type="month" value={desdeMes} onChange={(e) => setDesdeMes(e.target.value)} className="border rounded px-2 py-1" />
           </div>
           <div className="flex flex-col">
             <label className="text-xs text-slate-700">Hasta (mes)</label>
-            <input
-              type="month"
-              value={hastaMes}
-              onChange={(e) => setHastaMes(e.target.value)}
-              className="border rounded px-2 py-1"
-            />
+            <input type="month" value={hastaMes} onChange={(e) => setHastaMes(e.target.value)} className="border rounded px-2 py-1" />
           </div>
-          <button
-            onClick={fetchData}
-            className="px-3 py-2 rounded bg-bean text-white"
-            disabled={loading || posting}
-          >
+          <button onClick={fetchData} className="px-3 py-2 rounded bg-bean text-white" disabled={loading || posting}>
             {loading ? 'Cargando…' : 'Actualizar'}
           </button>
-          <button
-            onClick={postMonths}
-            className="px-3 py-2 rounded bg-accent text-white"
-            disabled={posting || loading}
-            title="Postea journals de los meses seleccionados vía RPC"
-          >
+          <button onClick={postMonths} className="px-3 py-2 rounded bg-accent text-white" disabled={posting || loading}>
             {posting ? 'Posteando…' : 'Postear meses'}
           </button>
           {msg && <span className="text-sm">{msg}</span>}
@@ -182,11 +161,21 @@ export const ReportesTab = () => {
 
       {/* Tablas por mes */}
       {Object.entries(grouped).map(([mes, arr]) => {
-        const tot = totalize(arr);
-        const niceMes = new Date(mes).toLocaleDateString('es-PA', {
-          year: 'numeric',
-          month: 'long',
-        });
+        // 1) Detectar fila consolidada (sucursal_id = NULL)
+        const consolidated = arr.find((r) => r.sucursal_id === null) || null;
+        // 2) Filas de sucursales reales (sin NULL)
+        const branches = arr.filter((r) => r.sucursal_id !== null);
+        // 3) Totales: si hay consolidado, úsalo; si no, suma branches
+        const totals = consolidated ?? {
+          mes,
+          sucursal_id: null,
+          ...sum(branches),
+          margen_bruto: sum(branches).margen_bruto,
+          utilidad_operativa: sum(branches).utilidad_operativa,
+        };
+
+        const niceMes = new Date(mes).toLocaleDateString('es-PA', { year: 'numeric', month: 'long' });
+
         return (
           <div key={mes} className="rounded-2xl border shadow-sm overflow-hidden">
             <div className="px-4 py-3 bg-off border-b">
@@ -205,27 +194,27 @@ export const ReportesTab = () => {
                   </tr>
                 </thead>
                 <tbody>
-                  {arr.map((r, i) => (
+                  {branches.map((r, i) => (
                     <tr key={i} className="border-t">
                       <td className="p-2">
-                        {r.sucursal_id ? sucursales[r.sucursal_id] ?? r.sucursal_id : 'Consolidado'}
+                        {r.sucursal_id ? (sucursales[r.sucursal_id] ?? r.sucursal_id) : 'Consolidado'}
                       </td>
-                      <td className="p-2 text-right">{money(r.ingresos)}</td>
-                      <td className="p-2 text-right">{money(r.cogs)}</td>
-                      <td className="p-2 text-right">{money(r.gastos)}</td>
-                      <td className="p-2 text-right">{money(r.margen_bruto)}</td>
-                      <td className="p-2 text-right">{money(r.utilidad_operativa)}</td>
+                      <td className="p-2 text-right">{money(Number(r.ingresos || 0))}</td>
+                      <td className="p-2 text-right">{money(Number(r.cogs || 0))}</td>
+                      <td className="p-2 text-right">{money(Number(r.gastos || 0))}</td>
+                      <td className="p-2 text-right">{money(Number(r.margen_bruto || 0))}</td>
+                      <td className="p-2 text-right">{money(Number(r.utilidad_operativa || 0))}</td>
                     </tr>
                   ))}
                 </tbody>
                 <tfoot>
                   <tr className="bg-gray-50 border-t font-semibold">
-                    <td className="p-2 text-right">Total</td>
-                    <td className="p-2 text-right">{money(tot.ingresos)}</td>
-                    <td className="p-2 text-right">{money(tot.cogs)}</td>
-                    <td className="p-2 text-right">{money(tot.gastos)}</td>
-                    <td className="p-2 text-right">{money(tot.margen_bruto)}</td>
-                    <td className="p-2 text-right">{money(tot.utilidad_operativa)}</td>
+                    <td className="p-2 text-right">{consolidated ? 'Consolidado' : 'Total'}</td>
+                    <td className="p-2 text-right">{money(Number(totals.ingresos || 0))}</td>
+                    <td className="p-2 text-right">{money(Number(totals.cogs || 0))}</td>
+                    <td className="p-2 text-right">{money(Number(totals.gastos || 0))}</td>
+                    <td className="p-2 text-right">{money(Number(totals.margen_bruto || 0))}</td>
+                    <td className="p-2 text-right">{money(Number(totals.utilidad_operativa || 0))}</td>
                   </tr>
                 </tfoot>
               </table>
