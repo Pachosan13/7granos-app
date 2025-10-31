@@ -25,6 +25,7 @@ export const ReportesTab = () => {
   const [previewMode, setPreviewMode] = useState(true);
   const [fetchError, setFetchError] = useState<string | null>(null);
 
+  // Mes actual por defecto
   useEffect(() => {
     const today = new Date();
     const y = today.getFullYear();
@@ -34,6 +35,7 @@ export const ReportesTab = () => {
     setHastaMes(ym);
   }, []);
 
+  // Mapa id -> nombre de sucursal
   useEffect(() => {
     (async () => {
       const { data } = await supabase.from('sucursal').select('id,nombre');
@@ -73,13 +75,15 @@ export const ReportesTab = () => {
     }
   }, [desdeMes, hastaMes, previewMode]);
 
-  useEffect(() => { fetchData(); }, [fetchData]);
+  useEffect(() => {
+    fetchData();
+  }, [fetchData]);
 
+  // Agrupa filas por mes
   const grouped = useMemo(() => {
     const byMes: Record<string, Row[]> = {};
     for (const r of rows) {
-      byMes[r.mes] ||= [];
-      byMes[r.mes].push(r);
+      (byMes[r.mes] ||= []).push(r);
     }
     return byMes;
   }, [rows]);
@@ -97,6 +101,7 @@ export const ReportesTab = () => {
       { ingresos: 0, cogs: 0, gastos: 0, margen_bruto: 0, utilidad_operativa: 0 }
     );
 
+  // Postear meses completos (1er al último día)
   const postMonths = async () => {
     if (!desdeMes || !hastaMes) return;
     setPosting(true);
@@ -126,20 +131,40 @@ export const ReportesTab = () => {
         <div className="flex items-end gap-2 flex-wrap">
           <div className="flex flex-col">
             <label className="text-xs text-slate-700">Desde (mes)</label>
-            <input type="month" value={desdeMes} onChange={(e) => setDesdeMes(e.target.value)} className="border rounded px-2 py-1" />
+            <input
+              type="month"
+              value={desdeMes}
+              onChange={(e) => setDesdeMes(e.target.value)}
+              className="border rounded px-2 py-1"
+            />
           </div>
           <div className="flex flex-col">
             <label className="text-xs text-slate-700">Hasta (mes)</label>
-            <input type="month" value={hastaMes} onChange={(e) => setHastaMes(e.target.value)} className="border rounded px-2 py-1" />
+            <input
+              type="month"
+              value={hastaMes}
+              onChange={(e) => setHastaMes(e.target.value)}
+              className="border rounded px-2 py-1"
+            />
           </div>
-          <button onClick={fetchData} className="px-3 py-2 rounded bg-bean text-white" disabled={loading || posting}>
+          <button
+            onClick={fetchData}
+            className="px-3 py-2 rounded bg-bean text-white"
+            disabled={loading || posting}
+          >
             {loading ? 'Cargando…' : 'Actualizar'}
           </button>
-          <button onClick={postMonths} className="px-3 py-2 rounded bg-accent text-white" disabled={posting || loading}>
+          <button
+            onClick={postMonths}
+            className="px-3 py-2 rounded bg-accent text-white"
+            disabled={posting || loading}
+            title="Postea journals de los meses seleccionados vía RPC"
+          >
             {posting ? 'Posteando…' : 'Postear meses'}
           </button>
           {msg && <span className="text-sm">{msg}</span>}
         </div>
+
         <div className="flex items-center justify-between gap-2 flex-wrap">
           <label className="inline-flex items-center gap-2 text-sm text-slate-700">
             <input
@@ -152,6 +177,7 @@ export const ReportesTab = () => {
           </label>
           <span className="text-xs uppercase tracking-wide text-slate-500">{viewBadge}</span>
         </div>
+
         {fetchError && (
           <div className="rounded border border-amber-400 bg-amber-50 px-3 py-2 text-sm text-amber-800">
             {fetchError}
@@ -161,20 +187,22 @@ export const ReportesTab = () => {
 
       {/* Tablas por mes */}
       {Object.entries(grouped).map(([mes, arr]) => {
-        // 1) Detectar fila consolidada (sucursal_id = NULL)
+        // 1) Fila consolidada (sucursal_id = NULL)
         const consolidated = arr.find((r) => r.sucursal_id === null) || null;
-        // 2) Filas de sucursales reales (sin NULL)
+        // 2) Sucursales reales
         const branches = arr.filter((r) => r.sucursal_id !== null);
-        // 3) Totales: si hay consolidado, úsalo; si no, suma branches
+        // 3) Totales (si hay consolidado lo usamos; si no, sum(branches))
+        const branchTotals = sum(branches);
         const totals = consolidated ?? {
           mes,
           sucursal_id: null,
-          ...sum(branches),
-          margen_bruto: sum(branches).margen_bruto,
-          utilidad_operativa: sum(branches).utilidad_operativa,
+          ...branchTotals,
         };
 
-        const niceMes = new Date(mes).toLocaleDateString('es-PA', { year: 'numeric', month: 'long' });
+        const niceMes = new Date(mes).toLocaleDateString('es-PA', {
+          year: 'numeric',
+          month: 'long',
+        });
 
         return (
           <div key={mes} className="rounded-2xl border shadow-sm overflow-hidden">
@@ -197,7 +225,7 @@ export const ReportesTab = () => {
                   {branches.map((r, i) => (
                     <tr key={i} className="border-t">
                       <td className="p-2">
-                        {r.sucursal_id ? (sucursales[r.sucursal_id] ?? r.sucursal_id) : 'Consolidado'}
+                        {r.sucursal_id ? sucursales[r.sucursal_id] ?? r.sucursal_id : 'Consolidado'}
                       </td>
                       <td className="p-2 text-right">{money(Number(r.ingresos || 0))}</td>
                       <td className="p-2 text-right">{money(Number(r.cogs || 0))}</td>
@@ -235,3 +263,4 @@ export const ReportesTab = () => {
     </div>
   );
 };
+
