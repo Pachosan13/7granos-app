@@ -52,7 +52,6 @@ interface PnLRawRow {
   cogs?: number | string | null;
   gastos_totales?: number | string | null;
   gastos?: number | string | null;
-  planilla?: number | string | null;
   utilidad_operativa?: number | string | null;
   utilidad?: number | string | null;
 }
@@ -72,7 +71,7 @@ interface PostJournalResult {
 }
 
 /* ────────────────────────────────────────────────────────────────────────────
-   Utilidades
+   Utils
 --------------------------------------------------------------------------- */
 const getErrorMessage = (error: unknown) => {
   if (error instanceof Error) return error.message;
@@ -141,11 +140,11 @@ const aggregate = (rows: PnLRow[]): PnLRow => {
 
 const getPreviousMonth = (isoDate: string) => {
   try {
-    const date = new Date(isoDate);
-    if (Number.isNaN(date.getTime())) return null;
-    date.setMonth(date.getMonth() - 1);
-    const yyyy = date.getFullYear();
-    const mm = String(date.getMonth() + 1).padStart(2, '0');
+    const d = new Date(isoDate);
+    if (Number.isNaN(d.getTime())) return null;
+    d.setMonth(d.getMonth() - 1);
+    const yyyy = d.getFullYear();
+    const mm = String(d.getMonth() + 1).padStart(2, '0');
     return `${yyyy}-${mm}-01`;
   } catch {
     return null;
@@ -156,7 +155,7 @@ const getNetMargin = (row: PnLRow) =>
   !row.ingresos ? 0 : (row.utilidadOperativa / row.ingresos) * 100;
 
 /* ────────────────────────────────────────────────────────────────────────────
-   Componente principal
+   Componente
 --------------------------------------------------------------------------- */
 export const PnLPage = () => {
   const { sucursales, sucursalSeleccionada } = useAuthOrg();
@@ -182,7 +181,6 @@ export const PnLPage = () => {
     }
   }, [sucursalSeleccionada?.id]);
 
-  // carga P&L del mes actual
   const fetchData = useCallback(async () => {
     if (!mes) return;
     setLoading(true);
@@ -191,28 +189,25 @@ export const PnLPage = () => {
     const sucursalId = selectedSucursal || null;
 
     try {
+      // a) Sucursal específica -> RPC
       if (sucursalId) {
-        // Sucursal específica → RPC
         const data =
           (await rpcWithFallback<PnLRawRow[]>(
             'api_get_pyg',
             buildVariants(filterMes, sucursalId)
           )) ?? [];
-        const normalizedRows = normalize(data);
-        setRows(normalizedRows);
+        setRows(normalize(data));
       } else {
-        // Todas las sucursales → usar fila consolidada de la vista (sucursal_id IS NULL)
+        // b) Todas -> vista y agregamos en cliente (nunca pedimos "sucursal_id is null")
         const { data, error } = await supabase
           .from('v_pyg_comparativo')
           .select('*')
           .eq('mes', filterMes)
-          .is('sucursal_id', null)
-          .single();
+          .order('sucursal_id', { ascending: true });
 
-        if (error && error.details !== 'Results contain 0 rows') throw error;
-
-        const normalized = data ? normalize([data as PnLRawRow]) : [];
-        setRows(normalized);
+        if (error) throw error;
+        const normalized = normalize((data ?? []) as PnLRawRow[]);
+        setRows(normalized.length ? [aggregate(normalized)] : []);
       }
 
       // Mes anterior
@@ -224,25 +219,22 @@ export const PnLPage = () => {
               'api_get_pyg',
               buildVariants(prevMonth, sucursalId)
             )) ?? [];
-          const normPrev = normalize(prev);
-          setPreviousRow(normPrev[0] ?? null);
+          setPreviousRow(normalize(prev)[0] ?? null);
         } else {
           const { data: prevData, error: prevErr } = await supabase
             .from('v_pyg_comparativo')
             .select('*')
-            .eq('mes', prevMonth)
-            .is('sucursal_id', null)
-            .single();
+            .eq('mes', prevMonth);
 
-          if (prevErr && prevErr.details !== 'Results contain 0 rows') throw prevErr;
-          const normPrev = prevData ? normalize([prevData as PnLRawRow]) : [];
-          setPreviousRow(normPrev[0] ?? null);
+          if (prevErr) throw prevErr;
+          const normPrev = normalize((prevData ?? []) as PnLRawRow[]);
+          setPreviousRow(normPrev.length ? aggregate(normPrev) : null);
         }
       } else {
         setPreviousRow(null);
       }
 
-      // Historial para gráficos (últimos 6)
+      // Historial (últimos 6)
       const history = await loadHistory(sucursalId, filterMes);
       setHistoryRows(history);
     } catch (err: unknown) {
@@ -278,7 +270,7 @@ export const PnLPage = () => {
   const netMargin = useMemo(() => {
     if (!currentRow) return 0;
     if (currentRow.ingresos === 0) return 0;
-    return ((currentRow.utilidadOperativa ?? 0) / currentRow.ingresos) * 100;
+    return (currentRow.utilidadOperativa / currentRow.ingresos) * 100;
   }, [currentRow]);
 
   const comparisons = useMemo(() => {
@@ -340,8 +332,7 @@ export const PnLPage = () => {
         pushToast({
           tone: 'success',
           title: 'Mes posteado con éxito',
-          description:
-            result?.msg ?? 'Se generó el journal automático para el mes seleccionado.',
+          description: result?.msg ?? 'Se generó el journal automático para el mes seleccionado.',
         });
         fetchData();
       } else {
@@ -356,7 +347,7 @@ export const PnLPage = () => {
       pushToast({
         tone: 'error',
         title: 'No se pudo postear el mes',
-        description: getErrorMessage(err) ?? 'Revisa la definición de la RPC en Supabase.',
+        description: getErrorMessage(err),
       });
     } finally {
       setPosting(false);
@@ -442,7 +433,7 @@ export const PnLPage = () => {
             <input
               type="month"
               value={mes}
-              onChange={(event) => setMes(event.target.value)}
+              onChange={(e) => setMes(e.target.value)}
               className="rounded-xl border border-sand px-3 py-2"
             />
           </label>
@@ -450,13 +441,13 @@ export const PnLPage = () => {
             Sucursal
             <select
               value={selectedSucursal}
-              onChange={(event) => setSelectedSucursal(event.target.value)}
+              onChange={(e) => setSelectedSucursal(e.target.value)}
               className="rounded-xl border border-sand px-3 py-2"
             >
               <option value="">Todas mis sucursales</option>
-              {sucursales.map((sucursal) => (
-                <option key={sucursal.id} value={sucursal.id}>
-                  {sucursal.nombre}
+              {sucursales.map((s) => (
+                <option key={s.id} value={s.id}>
+                  {s.nombre}
                 </option>
               ))}
             </select>
@@ -474,36 +465,26 @@ export const PnLPage = () => {
       </section>
 
       <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-        <article className="rounded-2xl border border-sand bg-white p-4 shadow-sm">
-          <div className="flex items-center justify-between text-slate-500">
-            <span className="text-xs font-semibold uppercase tracking-wide">Ingresos</span>
-            <TrendingUp className="h-4 w-4" />
-          </div>
-          <p className="mt-3 text-2xl font-semibold text-slate-800">
-            {formatCurrencyUSD(totals.ingresos)}
-          </p>
-          <ComparisonPill comparison={comparisons.ingresos} label="vs mes anterior" />
-        </article>
-        <article className="rounded-2xl border border-sand bg-white p-4 shadow-sm">
-          <div className="flex items-center justify-between text-slate-500">
-            <span className="text-xs font-semibold uppercase tracking-wide">COGS</span>
-            <TrendingDown className="h-4 w-4" />
-          </div>
-          <p className="mt-3 text-2xl font-semibold text-slate-800">
-            {formatCurrencyUSD(totals.cogs)}
-          </p>
-          <ComparisonPill comparison={comparisons.cogs} label="vs mes anterior" negativeIsBad />
-        </article>
-        <article className="rounded-2xl border border-sand bg-white p-4 shadow-sm">
-          <div className="flex items-center justify-between text-slate-500">
-            <span className="text-xs font-semibold uppercase tracking-wide">Gastos</span>
-            <Wallet className="h-4 w-4" />
-          </div>
-          <p className="mt-3 text-2xl font-semibold text-slate-800">
-            {formatCurrencyUSD(totals.gastosTotales)}
-          </p>
-          <ComparisonPill comparison={comparisons.gastos} label="vs mes anterior" negativeIsBad />
-        </article>
+        <CardMetric
+          title="Ingresos"
+          icon="up"
+          value={totals.ingresos}
+          comp={comparisons.ingresos}
+        />
+        <CardMetric
+          title="COGS"
+          icon="down"
+          value={totals.cogs}
+          comp={comparisons.cogs}
+          negativeIsBad
+        />
+        <CardMetric
+          title="Gastos"
+          icon="wallet"
+          value={totals.gastosTotales}
+          comp={comparisons.gastos}
+          negativeIsBad
+        />
         <article className="rounded-2xl border border-sand bg-white p-4 shadow-sm">
           <div className="flex items-center justify-between text-slate-500">
             <span className="text-xs font-semibold uppercase tracking-wide">Utilidad</span>
@@ -557,9 +538,9 @@ export const PnLPage = () => {
             {historyData.length > 1 ? (
               <ResponsiveContainer>
                 <LineChart
-                  data={historyData.map((row) => ({
-                    mes: row.mes,
-                    margen: row.ingresos === 0 ? 0 : (row.utilidad / row.ingresos) * 100,
+                  data={historyData.map((r) => ({
+                    mes: r.mes,
+                    margen: r.ingresos === 0 ? 0 : (r.utilidad / r.ingresos) * 100,
                   }))}
                 >
                   <CartesianGrid strokeDasharray="3 3" />
@@ -632,11 +613,10 @@ export const PnLPage = () => {
 export default PnLPage;
 
 /* ────────────────────────────────────────────────────────────────────────────
-   Auxiliares para historial
+   Historial
 --------------------------------------------------------------------------- */
 const loadHistory = async (sucursalId: string | null, currentMesISO: string) => {
   try {
-    // Últimos 6 <= mes actual
     let q = supabase
       .from('v_pyg_comparativo')
       .select('*')
@@ -644,11 +624,7 @@ const loadHistory = async (sucursalId: string | null, currentMesISO: string) => 
       .order('mes', { ascending: true })
       .limit(6);
 
-    if (sucursalId) {
-      q = q.eq('sucursal_id', sucursalId);
-    } else {
-      q = q.is('sucursal_id', null);
-    }
+    if (sucursalId) q = q.eq('sucursal_id', sucursalId); // nunca usamos is.null
 
     const { data, error } = await q;
     if (error || !data) {
@@ -658,8 +634,17 @@ const loadHistory = async (sucursalId: string | null, currentMesISO: string) => 
 
     const normalized = normalize(data as PnLRawRow[]);
     if (!sucursalId) {
-      // Ya viene consolidado por mes con sucursal_id NULL
-      return normalized.sort((a, b) => a.mes.localeCompare(b.mes));
+      // agregamos por mes
+      const byMes = new Map<string, PnLRow[]>();
+      for (const r of normalized) {
+        const arr = byMes.get(r.mes) ?? [];
+        arr.push(r);
+        byMes.set(r.mes, arr);
+      }
+      const agg = Array.from(byMes.entries())
+        .map(([mes, arr]) => ({ ...aggregate(arr), mes }))
+        .sort((a, b) => a.mes.localeCompare(b.mes));
+      return agg;
     }
     return normalized.sort((a, b) => a.mes.localeCompare(b.mes));
   } catch (err) {
@@ -677,6 +662,34 @@ interface Comparison {
   delta: number;
   pct: number | null;
 }
+
+const CardMetric = ({
+  title,
+  icon,
+  value,
+  comp,
+  negativeIsBad,
+}: {
+  title: string;
+  icon: 'up' | 'down' | 'wallet';
+  value: number;
+  comp: Comparison;
+  negativeIsBad?: boolean;
+}) => {
+  const Icon = icon === 'up' ? TrendingUp : icon === 'down' ? TrendingDown : Wallet;
+  return (
+    <article className="rounded-2xl border border-sand bg-white p-4 shadow-sm">
+      <div className="flex items-center justify-between text-slate-500">
+        <span className="text-xs font-semibold uppercase tracking-wide">{title}</span>
+        <Icon className="h-4 w-4" />
+      </div>
+      <p className="mt-3 text-2xl font-semibold text-slate-800">
+        {formatCurrencyUSD(value)}
+      </p>
+      <ComparisonPill comparison={comp} label="vs mes anterior" negativeIsBad={negativeIsBad} />
+    </article>
+  );
+};
 
 const ComparisonPill = ({
   comparison,
