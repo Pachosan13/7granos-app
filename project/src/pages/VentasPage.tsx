@@ -31,6 +31,9 @@ type NormalizedSerieRow = {
 };
 type ChartSerieRow = NormalizedSerieRow & { fecha: string; tickets: number };
 
+/* ──────────────────────────────────────────────────────────
+   Utilidades de fecha/formatos
+   ────────────────────────────────────────────────────────── */
 function todayYMD(tz = 'America/Panama') {
   const d = new Date(new Date().toLocaleString('en-US', { timeZone: tz }));
   const y = d.getFullYear();
@@ -53,7 +56,10 @@ function formatDateDDMMYYYY(ymd: string) {
   return `${d}/${m}/${y}`;
 }
 
-export function VentasPage() {
+/* ──────────────────────────────────────────────────────────
+   Página
+   ────────────────────────────────────────────────────────── */
+export default function VentasPage() {
   const { sucursales, sucursalSeleccionada } = useAuthOrg();
   const functionsBase = useMemo(() => getFunctionsBase(), []);
 
@@ -62,7 +68,7 @@ export function VentasPage() {
   const [desde, setDesde] = useState(addDays(hoy, -7));
   const [hasta, setHasta] = useState(hoy);
 
-  // Filtro de sucursal (por ID)
+  // Filtro de sucursal (por UUID)
   const [selectedSucursalId, setSelectedSucursalId] = useState<string | null>(
     sucursalSeleccionada?.id ? String(sucursalSeleccionada.id) : null
   );
@@ -244,7 +250,9 @@ export function VentasPage() {
     }
   }, [individual, mapReady, desde, hasta, viewingAll, selectedSucursalId, selectedSucursalName, sucursalesMap, pushToast]);
 
-  // ====== SYNC (igual que antes) ======
+  /* ────────────────────────────────────────────────────────
+     SYNC (igual que antes)
+     ──────────────────────────────────────────────────────── */
   const handleSync = useCallback(async () => {
     const base = functionsBase;
     if (!base) {
@@ -280,33 +288,13 @@ export function VentasPage() {
         } catch { /* sigue */ }
       }
       if (!resp) throw new Error('No fue posible ejecutar la sincronización');
-      if (!resp.ok) {
-        const txt = await resp.text().catch(() => '');
-        let friendly = `HTTP ${resp.status}`;
-        if (resp.status === 401 || resp.status === 403) friendly = 'Sesión caducada o permisos insuficientes.';
-        else if (resp.status === 404) friendly = 'Recurso de sincronización no encontrado.';
-        else if (resp.status >= 500) friendly = 'Servicio remoto con errores, reintenta en unos minutos.';
-        throw new Error(`${friendly}${txt ? ` · ${txt.slice(0, 120)}` : ''}`);
-      }
-      let bannerStats: SyncBranchStat[] = []; let when = new Date().toISOString();
-      try {
-        const js = await resp.json();
-        if (js?.desde) when = js.desde;
-        if (Array.isArray(js?.branches)) {
-          bannerStats = js.branches.map((b: any) => ({
-            name: String(b.name ?? b.branch ?? 'Sucursal'),
-            orders: Number(b.orders ?? b.count ?? 0),
-            sales: typeof b.sales === 'number' ? b.sales : undefined,
-          }));
-        }
-      } catch { /* ignore */ }
-      if (bannerStats.length > 0) {
-        setSyncBanner({ when, stats: bannerStats, visible: true, kind: 'ok' });
-        setTimeout(() => setSyncBanner(s => (s ? { ...s, visible: false } : s)), 12000);
-      } else {
-        setSyncBanner({ when, stats: [], visible: true, kind: 'ok', message: 'Sincronización completada.' });
-        setTimeout(() => setSyncBanner(s => (s ? { ...s, visible: false } : s)), 6000);
-      }
+
+      // Banner resumido
+      let when = new Date().toISOString();
+      try { const js = await resp.json(); if (js?.desde) when = js.desde; } catch {}
+      setSyncBanner({ when, stats: [], visible: true, kind: 'ok', message: 'Sincronización completada.' });
+      setTimeout(() => setSyncBanner(s => (s ? { ...s, visible: false } : s)), 6000);
+
       await loadData();
     } catch (e: any) {
       setSyncBanner({ when: new Date().toISOString(), stats: [], visible: true, kind: 'warn', message: e?.message ?? 'Error desconocido en sincronización' });
@@ -316,7 +304,9 @@ export function VentasPage() {
     }
   }, [functionsBase, hoy, loadData]);
 
-  // Realtime (siempre recargar al evento)
+  /* ────────────────────────────────────────────────────────
+     Realtime + efectos
+     ──────────────────────────────────────────────────────── */
   const rt: any = useRealtimeVentas({
     enabled: true, debounceMs: 1500,
     onUpdate: () => { debugLog('[VentasPage] realtime update'); loadData(); },
@@ -351,6 +341,9 @@ export function VentasPage() {
       ? 'bg-amber-50 dark:bg-amber-900/20 border-amber-200 dark:border-amber-700 text-amber-800 dark:text-amber-300'
       : 'bg-green-50 dark:bg-green-900/20 border-green-200 dark:border-green-700 text-green-800 dark:text-green-300';
 
+  /* ────────────────────────────────────────────────────────
+     Render
+     ──────────────────────────────────────────────────────── */
   return (
     <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 dark:from-gray-900 dark:to-gray-800">
       <div className="p-6 lg:p-8 space-y-6">
@@ -371,6 +364,11 @@ export function VentasPage() {
               {syncing ? 'Sincronizando…' : 'Sincronizar ahora'}
             </button>
           </div>
+          {syncBanner?.visible && (
+            <div className={`mt-4 text-sm rounded-xl border px-4 py-3 ${bannerClass}`}>
+              {syncBanner.message ?? `Actualizado: ${new Date(syncBanner.when).toLocaleString()}`}
+            </div>
+          )}
         </div>
 
         {/* Filtros */}
@@ -438,7 +436,9 @@ export function VentasPage() {
           <div className="p-6 border-b border-gray-100 dark:border-gray-700 flex items-center justify-between">
             <div>
               <h3 className="text-xl font-bold text-gray-900 dark:text-white">Serie de ventas</h3>
-              <p className="text-sm text-gray-500 dark:text-gray-400">Fuente: RPC rpc_ui_series_14d</p>
+              <p className="text-sm text-gray-500 dark:text-gray-400">
+                Fuente: {viewingAll ? 'RPC rpc_ui_series_14d(desde,hasta)' : 'RPC rpc_ui_series_14d(p_desde,p_hasta,p_sucursal_id)'}
+              </p>
             </div>
           </div>
           <div className="h-80 px-6 pb-6">
@@ -458,7 +458,7 @@ export function VentasPage() {
                     labelFormatter={(label) => `Día: ${label}`}
                   />
                   <Area yAxisId="left" type="monotone" dataKey="ventas" name="Ventas" fill="#3b82f6" stroke="#2563eb" strokeWidth={2} activeDot={{ r: 5 }} />
-                  <Bar yAxisId="right" dataKey="tickets" name="Tickets" fill="#10b981" opacity={0.75} barSize={24} />
+                  <Bar yAxisId="right" dataKey="tickets" name="Tickets" opacity={0.75} barSize={24} />
                 </ComposedChart>
               </ResponsiveContainer>
             )}
@@ -506,5 +506,3 @@ export function VentasPage() {
     </div>
   );
 }
-
-export default VentasPage;
