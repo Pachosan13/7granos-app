@@ -1,6 +1,6 @@
 // src/pages/VentasPage.tsx
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { RefreshCw, TrendingUp, DollarSign, Receipt, Building2, Calendar, X } from 'lucide-react';
+import { RefreshCw, TrendingUp, DollarSign, Receipt, Building2, Calendar } from 'lucide-react';
 import {
   ResponsiveContainer,
   ComposedChart,
@@ -17,18 +17,19 @@ import { KPICard } from '../components/KPICard';
 import { RealtimeStatusIndicator } from '../components/RealtimeStatusIndicator';
 import { useRealtimeVentas } from '../hooks/useRealtimeVentas';
 import { debugLog, getFunctionsBase } from '../utils/diagnostics';
-
-type SerieRow = {
-  dia: string;                 // 'YYYY-MM-DD'
-  sucursal: string;            // nombre
-  ventas: number;
-  itbms: number;
-  transacciones: number;
-  propina: number;
-};
+import { ToastContainer, createToast, dismissToast, type ToastItem } from '../components/Toast';
 
 type SucursalRow = { nombre: string; ventas: number; transacciones: number; ticketPromedio: number; };
 type SyncBranchStat = { name: string; orders: number; sales?: number };
+
+type NormalizedSerieRow = {
+  dia: string;
+  ventas: number;
+  itbms: number;
+  tx: number;
+  sucursal: string | null;
+};
+type ChartSerieRow = NormalizedSerieRow & { fecha: string; tickets: number };
 
 function todayYMD(tz = 'America/Panama') {
   const d = new Date(new Date().toLocaleString('en-US', { timeZone: tz }));
@@ -68,6 +69,10 @@ export function VentasPage() {
   const viewingAll = selectedSucursalId === null;
   const selectedSucursalName =
     viewingAll ? null : (sucursales.find(s => String(s.id) === selectedSucursalId)?.nombre ?? null);
+  const individual = !viewingAll;
+
+  const [sucursalesMap, setSucursalesMap] = useState<Map<string, string>>(new Map());
+  const [mapReady, setMapReady] = useState(false);
 
   // Estado UI
   const [loading, setLoading] = useState(true);
@@ -76,72 +81,159 @@ export function VentasPage() {
   const [totalTransacciones, setTotalTransacciones] = useState(0);
   const [totalITBMS, setTotalITBMS] = useState(0);
   const [rows, setRows] = useState<SucursalRow[]>([]);
-  const [seriesData, setSeriesData] = useState<any[]>([]);
+  const [seriesData, setSeriesData] = useState<ChartSerieRow[]>([]);
   const [showDebug, setShowDebug] = useState(false);
   const [debugInfo, setDebugInfo] = useState<any>(null);
   const [syncBanner, setSyncBanner] = useState<{
     when: string; stats: SyncBranchStat[]; visible: boolean; kind?: 'ok' | 'warn'; message?: string;
   } | null>(null);
+  const [toasts, setToasts] = useState<ToastItem[]>([]);
+  const pushToast = useCallback((toast: Omit<ToastItem, 'id'>) => createToast(setToasts, toast), []);
 
   const headerNote = viewingAll
     ? `Viendo datos de todas las sucursales (${sucursales.length} sucursales)`
     : `Viendo únicamente: ${selectedSucursalName ?? 'Sucursal'}`;
 
+  useEffect(() => {
+    let alive = true;
+    const loadSucursalesMap = async () => {
+      try {
+        const { data, error } = await supabase.from('sucursal').select('id,nombre');
+        if (!alive) return;
+        if (error) throw error;
+        setSucursalesMap(new Map((data ?? []).map((s) => [s.nombre, s.id])));
+      } catch (err) {
+        if (!alive) return;
+        const message = err instanceof Error ? err.message : 'Error desconocido';
+        debugLog('[VentasPage] loadSucursalesMap error:', err);
+        pushToast({ title: 'No se pudo cargar sucursales', description: message, tone: 'error' });
+      } finally {
+        if (alive) setMapReady(true);
+      }
+    };
+    loadSucursalesMap();
+    return () => {
+      alive = false;
+    };
+  }, [pushToast]);
+
   // ====== CARGA PRINCIPAL DESDE RPC ======
   const loadData = useCallback(async () => {
+    if (individual && !mapReady) {
+      return;
+    }
     setLoading(true);
     try {
-      // Llamamos a la RPC (ya probada por cURL)
-      const { data, error } = await supabase.rpc<SerieRow>('rpc_ui_series_14d', {
-        desde, hasta,
-      });
-      if (error) throw error;
-
-      // Filtrado por sucursal (la RPC devuelve nombre; hacemos match por nombre)
-      const filtered: SerieRow[] = (data ?? []).filter(row =>
-        viewingAll ? true : (selectedSucursalName ? row.sucursal === selectedSucursalName : true)
-      );
-
-      // Serie para el gráfico (sumamos ventas/tickets por día)
-      const byDay = new Map<string, { dia: string; fecha: string; ventas: number; tickets: number }>();
-      for (const r of filtered) {
-        const cur = byDay.get(r.dia) ?? { dia: r.dia, fecha: formatDateDDMMYYYY(r.dia), ventas: 0, tickets: 0 };
-        cur.ventas += Number(r.ventas ?? 0);
-        cur.tickets += Number(r.transacciones ?? 0);
-        byDay.set(r.dia, cur);
+      let sucursalUuid: string | null = null;
+      if (individual) {
+        sucursalUuid = selectedSucursalName ? sucursalesMap.get(selectedSucursalName) ?? null : null;
+        if (!sucursalUuid) {
+          pushToast({ title: 'Sucursal sin UUID', description: 'No se encontró el identificador de la sucursal seleccionada.', tone: 'error' });
+          throw new Error('Sucursal sin UUID');
+        }
       }
-      const serie = Array.from(byDay.values()).sort((a, b) => a.dia.localeCompare(b.dia));
+
+      const serieArgs = individual
+        ? { p_desde: desde, p_hasta: hasta, p_sucursal_id: sucursalUuid }
+        : { desde, hasta };
+      const kpiArgs = individual
+        ? { p_desde: desde, p_hasta: hasta, p_sucursal_id: sucursalUuid }
+        : { p_desde: desde, p_hasta: hasta };
+
+      if (import.meta.env.DEV) {
+        console.debug('RPC args rpc_ui_series_14d', serieArgs);
+        console.debug('RPC args rpc_ui_kpis_resumen', kpiArgs);
+      }
+
+      const [{ data: serieData, error: serieError }, { data: kpiData, error: kpiError }] = await Promise.all([
+        supabase.rpc('rpc_ui_series_14d', serieArgs as Record<string, string>),
+        supabase.rpc('rpc_ui_kpis_resumen', kpiArgs as Record<string, string>),
+      ]);
+
+      if (serieError) throw serieError;
+      if (kpiError) throw kpiError;
+
+      const serieRows = Array.isArray(serieData) ? (serieData as Record<string, unknown>[]) : [];
+      const toNumber = (value: unknown) => {
+        if (typeof value === 'number') return Number.isFinite(value) ? value : 0;
+        const parsed = Number(value ?? 0);
+        return Number.isFinite(parsed) ? parsed : 0;
+      };
+      const toString = (value: unknown) => (typeof value === 'string' ? value : '');
+      const toStringOrNull = (value: unknown) => (typeof value === 'string' ? value : null);
+
+      const normalizedSerie: NormalizedSerieRow[] = serieRows.map((row) => {
+        if (individual) {
+          const dia = toString(row.d);
+          return {
+            dia,
+            ventas: toNumber(row.ventas_netas ?? row.ventas),
+            itbms: toNumber(row.itbms),
+            tx: toNumber(row.tx ?? row.transacciones),
+            sucursal: selectedSucursalName ?? null,
+          };
+        }
+        const dia = toString(row.dia);
+        const rawSucursal = 'sucursal' in row ? row.sucursal : undefined;
+        const rawNombre = 'nombre' in row ? row.nombre : undefined;
+        const sucursalNombre = toStringOrNull(rawSucursal ?? rawNombre);
+        return {
+          dia,
+          ventas: toNumber(row.ventas ?? row.ventas_netas),
+          itbms: toNumber(row.itbms),
+          tx: toNumber(row.transacciones ?? row.tx),
+          sucursal: sucursalNombre,
+        };
+      });
+
+      const serie = normalizedSerie
+        .map((row) => ({
+          ...row,
+          fecha: row.dia ? formatDateDDMMYYYY(row.dia) : '',
+          tickets: row.tx,
+        }))
+        .sort((a, b) => a.dia.localeCompare(b.dia));
       setSeriesData(serie);
 
-      // Tabla por sucursal
-      const bySucursal = new Map<string, { nombre: string; ventas: number; transacciones: number }>();
-      for (const r of filtered) {
-        const cur = bySucursal.get(r.sucursal) ?? { nombre: r.sucursal, ventas: 0, transacciones: 0 };
-        cur.ventas += Number(r.ventas ?? 0);
-        cur.transacciones += Number(r.transacciones ?? 0);
-        bySucursal.set(r.sucursal, cur);
-      }
-      const rowsList = Array.from(bySucursal.values())
-        .map(e => ({ ...e, ticketPromedio: e.transacciones > 0 ? e.ventas / e.transacciones : 0 }))
-        .sort((a, b) => b.ventas - a.ventas);
-      setRows(rowsList);
+      const kpiRow = (Array.isArray(kpiData) ? (kpiData[0] as Record<string, unknown> | undefined) : undefined) ?? {};
+      const ventasTotal = toNumber((kpiRow as Record<string, unknown>).ventas ?? (kpiRow as Record<string, unknown>).ventas_netas);
+      const itbmsTotal = toNumber((kpiRow as Record<string, unknown>).itbms);
+      const txTotal = toNumber((kpiRow as Record<string, unknown>).tx ?? (kpiRow as Record<string, unknown>).transacciones);
+      setTotalVentas(ventasTotal);
+      setTotalITBMS(itbmsTotal);
+      setTotalTransacciones(txTotal);
 
-      // KPIs (totales del período)
-      let sumVentas = 0, sumTickets = 0, sumITBMS = 0;
-      for (const r of filtered) {
-        sumVentas += Number(r.ventas ?? 0);
-        sumTickets += Number(r.transacciones ?? 0);
-        sumITBMS += Number(r.itbms ?? 0);
+      if (individual) {
+        const nombre = selectedSucursalName ?? 'Sucursal';
+        setRows([
+          {
+            nombre,
+            ventas: ventasTotal,
+            transacciones: txTotal,
+            ticketPromedio: txTotal > 0 ? ventasTotal / txTotal : 0,
+          },
+        ]);
+      } else {
+        const bySucursal = new Map<string, { nombre: string; ventas: number; transacciones: number }>();
+        for (const r of normalizedSerie) {
+          const nombre = r.sucursal ?? 'Sin sucursal';
+          const cur = bySucursal.get(nombre) ?? { nombre, ventas: 0, transacciones: 0 };
+          cur.ventas += r.ventas;
+          cur.transacciones += r.tx;
+          bySucursal.set(nombre, cur);
+        }
+        const rowsList = Array.from(bySucursal.values())
+          .map((e) => ({ ...e, ticketPromedio: e.transacciones > 0 ? e.ventas / e.transacciones : 0 }))
+          .sort((a, b) => b.ventas - a.ventas);
+        setRows(rowsList);
       }
-      setTotalVentas(sumVentas);
-      setTotalTransacciones(sumTickets);
-      setTotalITBMS(sumITBMS);
 
       setDebugInfo({
-        filtro: { desde, hasta, viewingAll, selectedSucursalId, selectedSucursalName },
-        rowsCount: filtered.length,
-        sample: filtered[0] ?? null,
+        filtro: { desde, hasta, viewingAll, selectedSucursalId, selectedSucursalName, individual, sucursalUuid },
+        rowsCount: normalizedSerie.length,
         seriePreview: serie.slice(0, 3),
+        serieRawSample: serieRows[0] ?? null,
+        kpi: kpiRow,
       });
     } catch (e) {
       debugLog('[VentasPage] loadData error:', e);
@@ -150,7 +242,7 @@ export function VentasPage() {
     } finally {
       setLoading(false);
     }
-  }, [desde, hasta, viewingAll, selectedSucursalId, selectedSucursalName]);
+  }, [individual, mapReady, desde, hasta, viewingAll, selectedSucursalId, selectedSucursalName, sucursalesMap, pushToast]);
 
   // ====== SYNC (igual que antes) ======
   const handleSync = useCallback(async () => {
@@ -410,6 +502,7 @@ export function VentasPage() {
           )}
         </div>
       </div>
+      <ToastContainer toasts={toasts} onDismiss={(id) => dismissToast(setToasts, id)} />
     </div>
   );
 }
