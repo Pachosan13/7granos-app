@@ -1,0 +1,4 @@
+{"sucursal":"museo","start_ts":1761782400,"end_ts":1762041599,"mode":"ingest_detalle","data":{
+  "ok": false,
+  "error": "Error: INVU 404: {\"error\":true,\"message\":\"Parametros incorrectos\"}"
+}}

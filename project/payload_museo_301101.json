@@ -1,0 +1,4 @@
+{"sucursal":"museo","start_ts":,"end_ts":,"mode":"ingest_totales","data":{
+  "ok": false,
+  "error": "SyntaxError: Unexpected token ',', ...\"start_ts\":,\"end_ts\":\"... is not valid JSON"
+}}
