@@ -1,6 +1,6 @@
 // src/pages/VentasPage.tsx
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { RefreshCw, TrendingUp, DollarSign, Receipt, Building2, Calendar, X } from 'lucide-react';
+import { RefreshCw, TrendingUp, DollarSign, Receipt, Building2, Calendar } from 'lucide-react';
 import {
   ResponsiveContainer,
   ComposedChart,
@@ -18,18 +18,33 @@ import { RealtimeStatusIndicator } from '../components/RealtimeStatusIndicator';
 import { useRealtimeVentas } from '../hooks/useRealtimeVentas';
 import { debugLog, getFunctionsBase } from '../utils/diagnostics';
 
-type SerieRow = {
-  dia: string;                 // 'YYYY-MM-DD'
-  sucursal: string;            // nombre
+/* ──────────────────────────────────────────────────────────
+   Tipos que devuelve cada variante de RPC
+   - Todas:   rpc_ui_series_14d(desde, hasta)
+   - Individ: rpc_ui_series_14d(p_desde, p_hasta, p_sucursal_id uuid)
+   ────────────────────────────────────────────────────────── */
+type SerieAllRow = {
+  dia: string;          // 'YYYY-MM-DD'
+  sucursal: string;     // nombre
   ventas: number;
   itbms: number;
   transacciones: number;
   propina: number;
 };
 
+type SerieOneRow = {
+  d: string;            // 'YYYY-MM-DD'
+  ventas_netas: number;
+  itbms: number;
+  tx: number;
+};
+
 type SucursalRow = { nombre: string; ventas: number; transacciones: number; ticketPromedio: number; };
 type SyncBranchStat = { name: string; orders: number; sales?: number };
 
+/* ──────────────────────────────────────────────────────────
+   Utilidades de fecha/formatos
+   ────────────────────────────────────────────────────────── */
 function todayYMD(tz = 'America/Panama') {
   const d = new Date(new Date().toLocaleString('en-US', { timeZone: tz }));
   const y = d.getFullYear();
@@ -52,7 +67,10 @@ function formatDateDDMMYYYY(ymd: string) {
   return `${d}/${m}/${y}`;
 }
 
-export function VentasPage() {
+/* ──────────────────────────────────────────────────────────
+   Página
+   ────────────────────────────────────────────────────────── */
+export default function VentasPage() {
   const { sucursales, sucursalSeleccionada } = useAuthOrg();
   const functionsBase = useMemo(() => getFunctionsBase(), []);
 
@@ -61,7 +79,7 @@ export function VentasPage() {
   const [desde, setDesde] = useState(addDays(hoy, -7));
   const [hasta, setHasta] = useState(hoy);
 
-  // Filtro de sucursal (por ID)
+  // Filtro de sucursal (por UUID)
   const [selectedSucursalId, setSelectedSucursalId] = useState<string | null>(
     sucursalSeleccionada?.id ? String(sucursalSeleccionada.id) : null
   );
@@ -87,62 +105,110 @@ export function VentasPage() {
     ? `Viendo datos de todas las sucursales (${sucursales.length} sucursales)`
     : `Viendo únicamente: ${selectedSucursalName ?? 'Sucursal'}`;
 
-  // ====== CARGA PRINCIPAL DESDE RPC ======
+  /* ────────────────────────────────────────────────────────
+     CARGA PRINCIPAL — llama la RPC correcta según el modo
+     ──────────────────────────────────────────────────────── */
   const loadData = useCallback(async () => {
     setLoading(true);
     try {
-      // Llamamos a la RPC (ya probada por cURL)
-      const { data, error } = await supabase.rpc<SerieRow>('rpc_ui_series_14d', {
-        desde, hasta,
-      });
-      if (error) throw error;
+      if (viewingAll) {
+        // MODO TODAS — usa la variante por NOMBRE
+        const { data, error } = await supabase.rpc<SerieAllRow>('rpc_ui_series_14d', {
+          desde, hasta,
+        });
+        if (error) throw error;
 
-      // Filtrado por sucursal (la RPC devuelve nombre; hacemos match por nombre)
-      const filtered: SerieRow[] = (data ?? []).filter(row =>
-        viewingAll ? true : (selectedSucursalName ? row.sucursal === selectedSucursalName : true)
-      );
+        const all: SerieAllRow[] = data ?? [];
 
-      // Serie para el gráfico (sumamos ventas/tickets por día)
-      const byDay = new Map<string, { dia: string; fecha: string; ventas: number; tickets: number }>();
-      for (const r of filtered) {
-        const cur = byDay.get(r.dia) ?? { dia: r.dia, fecha: formatDateDDMMYYYY(r.dia), ventas: 0, tickets: 0 };
-        cur.ventas += Number(r.ventas ?? 0);
-        cur.tickets += Number(r.transacciones ?? 0);
-        byDay.set(r.dia, cur);
+        // Serie por día (suma todas las sucursales)
+        const byDay = new Map<string, { dia: string; fecha: string; ventas: number; tickets: number }>();
+        for (const r of all) {
+          const cur = byDay.get(r.dia) ?? { dia: r.dia, fecha: formatDateDDMMYYYY(r.dia), ventas: 0, tickets: 0 };
+          cur.ventas += Number(r.ventas ?? 0);
+          cur.tickets += Number(r.transacciones ?? 0);
+          byDay.set(r.dia, cur);
+        }
+        const serie = Array.from(byDay.values()).sort((a, b) => a.dia.localeCompare(b.dia));
+        setSeriesData(serie);
+
+        // Tabla por sucursal
+        const bySucursal = new Map<string, { nombre: string; ventas: number; transacciones: number }>();
+        for (const r of all) {
+          const cur = bySucursal.get(r.sucursal) ?? { nombre: r.sucursal, ventas: 0, transacciones: 0 };
+          cur.ventas += Number(r.ventas ?? 0);
+          cur.transacciones += Number(r.transacciones ?? 0);
+          bySucursal.set(r.sucursal, cur);
+        }
+        const rowsList = Array.from(bySucursal.values())
+          .map(e => ({ ...e, ticketPromedio: e.transacciones > 0 ? e.ventas / e.transacciones : 0 }))
+          .sort((a, b) => b.ventas - a.ventas);
+        setRows(rowsList);
+
+        // KPIs
+        let sumVentas = 0, sumTickets = 0, sumITBMS = 0;
+        for (const r of all) {
+          sumVentas += Number(r.ventas ?? 0);
+          sumTickets += Number(r.transacciones ?? 0);
+          sumITBMS += Number(r.itbms ?? 0);
+        }
+        setTotalVentas(sumVentas);
+        setTotalTransacciones(sumTickets);
+        setTotalITBMS(sumITBMS);
+
+        setDebugInfo({
+          modo: 'todas',
+          filtro: { desde, hasta },
+          rowsCount: all.length,
+          sample: all[0] ?? null,
+          seriePreview: serie.slice(0, 3),
+        });
+      } else {
+        // MODO INDIVIDUAL — usa la variante por UUID
+        const { data, error } = await supabase.rpc<SerieOneRow>('rpc_ui_series_14d', {
+          p_desde: desde,
+          p_hasta: hasta,
+          p_sucursal_id: selectedSucursalId,
+        });
+        if (error) throw error;
+
+        const one: SerieOneRow[] = data ?? [];
+
+        // Serie por día
+        const serie = one
+          .map(r => ({
+            dia: r.d,
+            fecha: formatDateDDMMYYYY(r.d),
+            ventas: Number(r.ventas_netas ?? 0),
+            tickets: Number(r.tx ?? 0),
+          }))
+          .sort((a, b) => a.dia.localeCompare(b.dia));
+        setSeriesData(serie);
+
+        // Tabla (una sola sucursal)
+        const ventasTotal = serie.reduce((acc, r) => acc + r.ventas, 0);
+        const txTotal = serie.reduce((acc, r) => acc + r.tickets, 0);
+        setRows([
+          {
+            nombre: selectedSucursalName ?? 'Sucursal',
+            ventas: ventasTotal,
+            transacciones: txTotal,
+            ticketPromedio: txTotal > 0 ? ventasTotal / txTotal : 0,
+          },
+        ]);
+
+        // KPIs
+        setTotalVentas(ventasTotal);
+        setTotalTransacciones(txTotal);
+        setTotalITBMS(one.reduce((acc, r) => acc + Number(r.itbms ?? 0), 0));
+
+        setDebugInfo({
+          modo: 'individual',
+          filtro: { desde, hasta, selectedSucursalId, selectedSucursalName },
+          rowsCount: one.length,
+          sample: one[0] ?? null,
+          seriePreview: serie.slice(0, 3),
+        });
       }
-      const serie = Array.from(byDay.values()).sort((a, b) => a.dia.localeCompare(b.dia));
-      setSeriesData(serie);
-
-      // Tabla por sucursal
-      const bySucursal = new Map<string, { nombre: string; ventas: number; transacciones: number }>();
-      for (const r of filtered) {
-        const cur = bySucursal.get(r.sucursal) ?? { nombre: r.sucursal, ventas: 0, transacciones: 0 };
-        cur.ventas += Number(r.ventas ?? 0);
-        cur.transacciones += Number(r.transacciones ?? 0);
-        bySucursal.set(r.sucursal, cur);
-      }
-      const rowsList = Array.from(bySucursal.values())
-        .map(e => ({ ...e, ticketPromedio: e.transacciones > 0 ? e.ventas / e.transacciones : 0 }))
-        .sort((a, b) => b.ventas - a.ventas);
-      setRows(rowsList);
-
-      // KPIs (totales del período)
-      let sumVentas = 0, sumTickets = 0, sumITBMS = 0;
-      for (const r of filtered) {
-        sumVentas += Number(r.ventas ?? 0);
-        sumTickets += Number(r.transacciones ?? 0);
-        sumITBMS += Number(r.itbms ?? 0);
-      }
-      setTotalVentas(sumVentas);
-      setTotalTransacciones(sumTickets);
-      setTotalITBMS(sumITBMS);
-
-      setDebugInfo({
-        filtro: { desde, hasta, viewingAll, selectedSucursalId, selectedSucursalName },
-        rowsCount: filtered.length,
-        sample: filtered[0] ?? null,
-        seriePreview: serie.slice(0, 3),
-      });
     } catch (e) {
       debugLog('[VentasPage] loadData error:', e);
       setRows([]); setSeriesData([]); setTotalVentas(0); setTotalTransacciones(0); setTotalITBMS(0);
@@ -152,7 +218,9 @@ export function VentasPage() {
     }
   }, [desde, hasta, viewingAll, selectedSucursalId, selectedSucursalName]);
 
-  // ====== SYNC (igual que antes) ======
+  /* ────────────────────────────────────────────────────────
+     SYNC (igual que antes)
+     ──────────────────────────────────────────────────────── */
   const handleSync = useCallback(async () => {
     const base = functionsBase;
     if (!base) {
@@ -188,33 +256,13 @@ export function VentasPage() {
         } catch { /* sigue */ }
       }
       if (!resp) throw new Error('No fue posible ejecutar la sincronización');
-      if (!resp.ok) {
-        const txt = await resp.text().catch(() => '');
-        let friendly = `HTTP ${resp.status}`;
-        if (resp.status === 401 || resp.status === 403) friendly = 'Sesión caducada o permisos insuficientes.';
-        else if (resp.status === 404) friendly = 'Recurso de sincronización no encontrado.';
-        else if (resp.status >= 500) friendly = 'Servicio remoto con errores, reintenta en unos minutos.';
-        throw new Error(`${friendly}${txt ? ` · ${txt.slice(0, 120)}` : ''}`);
-      }
-      let bannerStats: SyncBranchStat[] = []; let when = new Date().toISOString();
-      try {
-        const js = await resp.json();
-        if (js?.desde) when = js.desde;
-        if (Array.isArray(js?.branches)) {
-          bannerStats = js.branches.map((b: any) => ({
-            name: String(b.name ?? b.branch ?? 'Sucursal'),
-            orders: Number(b.orders ?? b.count ?? 0),
-            sales: typeof b.sales === 'number' ? b.sales : undefined,
-          }));
-        }
-      } catch { /* ignore */ }
-      if (bannerStats.length > 0) {
-        setSyncBanner({ when, stats: bannerStats, visible: true, kind: 'ok' });
-        setTimeout(() => setSyncBanner(s => (s ? { ...s, visible: false } : s)), 12000);
-      } else {
-        setSyncBanner({ when, stats: [], visible: true, kind: 'ok', message: 'Sincronización completada.' });
-        setTimeout(() => setSyncBanner(s => (s ? { ...s, visible: false } : s)), 6000);
-      }
+
+      // Banner resumido
+      let when = new Date().toISOString();
+      try { const js = await resp.json(); if (js?.desde) when = js.desde; } catch {}
+      setSyncBanner({ when, stats: [], visible: true, kind: 'ok', message: 'Sincronización completada.' });
+      setTimeout(() => setSyncBanner(s => (s ? { ...s, visible: false } : s)), 6000);
+
       await loadData();
     } catch (e: any) {
       setSyncBanner({ when: new Date().toISOString(), stats: [], visible: true, kind: 'warn', message: e?.message ?? 'Error desconocido en sincronización' });
@@ -224,7 +272,9 @@ export function VentasPage() {
     }
   }, [functionsBase, hoy, loadData]);
 
-  // Realtime (siempre recargar al evento)
+  /* ────────────────────────────────────────────────────────
+     Realtime + efectos
+     ──────────────────────────────────────────────────────── */
   const rt: any = useRealtimeVentas({
     enabled: true, debounceMs: 1500,
     onUpdate: () => { debugLog('[VentasPage] realtime update'); loadData(); },
@@ -259,6 +309,9 @@ export function VentasPage() {
       ? 'bg-amber-50 dark:bg-amber-900/20 border-amber-200 dark:border-amber-700 text-amber-800 dark:text-amber-300'
       : 'bg-green-50 dark:bg-green-900/20 border-green-200 dark:border-green-700 text-green-800 dark:text-green-300';
 
+  /* ────────────────────────────────────────────────────────
+     Render
+     ──────────────────────────────────────────────────────── */
   return (
     <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 dark:from-gray-900 dark:to-gray-800">
       <div className="p-6 lg:p-8 space-y-6">
@@ -279,6 +332,11 @@ export function VentasPage() {
               {syncing ? 'Sincronizando…' : 'Sincronizar ahora'}
             </button>
           </div>
+          {syncBanner?.visible && (
+            <div className={`mt-4 text-sm rounded-xl border px-4 py-3 ${bannerClass}`}>
+              {syncBanner.message ?? `Actualizado: ${new Date(syncBanner.when).toLocaleString()}`}
+            </div>
+          )}
         </div>
 
         {/* Filtros */}
@@ -346,7 +404,9 @@ export function VentasPage() {
           <div className="p-6 border-b border-gray-100 dark:border-gray-700 flex items-center justify-between">
             <div>
               <h3 className="text-xl font-bold text-gray-900 dark:text-white">Serie de ventas</h3>
-              <p className="text-sm text-gray-500 dark:text-gray-400">Fuente: RPC rpc_ui_series_14d</p>
+              <p className="text-sm text-gray-500 dark:text-gray-400">
+                Fuente: {viewingAll ? 'RPC rpc_ui_series_14d(desde,hasta)' : 'RPC rpc_ui_series_14d(p_desde,p_hasta,p_sucursal_id)'}
+              </p>
             </div>
           </div>
           <div className="h-80 px-6 pb-6">
@@ -366,7 +426,7 @@ export function VentasPage() {
                     labelFormatter={(label) => `Día: ${label}`}
                   />
                   <Area yAxisId="left" type="monotone" dataKey="ventas" name="Ventas" fill="#3b82f6" stroke="#2563eb" strokeWidth={2} activeDot={{ r: 5 }} />
-                  <Bar yAxisId="right" dataKey="tickets" name="Tickets" fill="#10b981" opacity={0.75} barSize={24} />
+                  <Bar yAxisId="right" dataKey="tickets" name="Tickets" opacity={0.75} barSize={24} />
                 </ComposedChart>
               </ResponsiveContainer>
             )}
@@ -413,5 +473,3 @@ export function VentasPage() {
     </div>
   );
 }
-
-export default VentasPage;
