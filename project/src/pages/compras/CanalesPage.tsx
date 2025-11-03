@@ -1,5 +1,4 @@
-// project/src/pages/compras/CanalesPage.tsx
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   AlertTriangle,
   CheckCircle2,
@@ -10,44 +9,19 @@ import {
   ShieldAlert,
   Table,
   UploadCloud,
-  Info,
-  PlusCircle,
-  Trash2,
 } from 'lucide-react';
 import { supabase, shouldUseDemoMode, isSupabaseConfigured } from '../../lib/supabase';
 import { formatCurrencyUSD } from '../../lib/format';
 import { useAuthOrg } from '../../context/AuthOrgContext';
 import { ToastContainer, ToastItem, createToast, dismissToast } from '../../components/Toast';
 
-/* ────────────────────────────────────────────────────────────────────────────
-   Tipos
---------------------------------------------------------------------------- */
-type UUID = string;
-
-type CanalLiteral =
-  | 'pedidosya'
-  | 'ubereats'
-  | 'didifood'
-  | 'glovo'
-  | 'otro';
-
-const CANAL_LABEL: Record<CanalLiteral, string> = {
-  pedidosya: 'PedidosYa',
-  ubereats: 'UberEats',
-  didifood: 'DidiFood',
-  glovo: 'Glovo',
-  otro: 'Otro',
-};
-const CANAL_OPTIONS: CanalLiteral[] = ['pedidosya', 'ubereats', 'didifood', 'glovo', 'otro'];
-
 interface ParsedRow {
-  proveedor: string;        // p. ej., "PedidosYa"
-  canal?: string | null;    // opcional en parser; aquí lo normalizamos
-  sucursal_slug: string;    // "costa", "cangrejo", ...
-  fecha: string;            // YYYY-MM-DD
-  subtotal: number;         // antes "bruto"
-  itbms: number;            // antes "comision"
-  total: number;            // antes "neto"
+  proveedor: string;
+  sucursal_slug: string;
+  fecha: string;
+  bruto: number;
+  comision: number;
+  neto: number;
   referencia?: string | null;
   raw?: Record<string, unknown> | null;
 }
@@ -56,7 +30,6 @@ interface IngestResponse {
   ok: boolean;
   upserted?: number;
   message?: string;
-  error?: string;
 }
 
 interface ParseResponse {
@@ -64,20 +37,18 @@ interface ParseResponse {
   rows?: ParsedRow[];
   warnings?: string[];
   message?: string;
-  error?: string;
 }
 
 interface CanalRecord {
-  id: UUID;
+  id: string;
   fecha: string;
-  subtotal: number;
-  itbms: number;
-  total: number;
+  bruto: number;
+  comision: number;
+  neto: number;
   referencia: string | null;
   proveedor_nombre: string | null;
-  sucursal_id: UUID;
+  sucursal_id: string;
   sucursal_nombre: string | null;
-  canal: CanalLiteral | 'otro';
   raw: Record<string, unknown> | null;
 }
 
@@ -86,23 +57,26 @@ interface Range {
   hasta: string;
 }
 
-/* ────────────────────────────────────────────────────────────────────────────
-   Utilidades de fecha / formato
---------------------------------------------------------------------------- */
+const CANAL_OPTIONS = ['Todos', 'PedidosYa', 'UberEats', 'DidiFood', 'Glovo', 'Otro'] as const;
+type CanalOption = (typeof CANAL_OPTIONS)[number];
+
 function todayIso() {
   const now = new Date();
   return now.toISOString().slice(0, 10);
 }
+
 function addDays(base: string, offset: number) {
   const parsed = new Date(`${base}T00:00:00`);
   parsed.setDate(parsed.getDate() + offset);
   return parsed.toISOString().slice(0, 10);
 }
+
 function lastSixtyDayRange(): Range {
   const hasta = todayIso();
   const desde = addDays(hasta, -59);
   return { desde, hasta };
 }
+
 function toBase64(file: File) {
   return new Promise<string>((resolve, reject) => {
     const reader = new FileReader();
@@ -119,78 +93,69 @@ function toBase64(file: File) {
     reader.readAsDataURL(file);
   });
 }
+
 function formatMoney(value: number | null | undefined) {
   return formatCurrencyUSD(Number.isFinite(value ?? 0) ? (value ?? 0) : 0);
 }
-function normCanal(s: string | null | undefined): CanalLiteral {
-  const v = (s ?? '').toLowerCase().trim();
-  if (v.includes('pedido')) return 'pedidosya';
-  if (v.includes('uber')) return 'ubereats';
-  if (v.includes('didi')) return 'didifood';
-  if (v.includes('glovo')) return 'glovo';
-  return 'otro';
-}
 
-/* ────────────────────────────────────────────────────────────────────────────
-   Demo (cuando Supabase no está configurado)
---------------------------------------------------------------------------- */
 const demoRows: ParsedRow[] = [
   {
     proveedor: 'PedidosYa',
-    canal: 'pedidosya',
     sucursal_slug: 'costa',
     fecha: addDays(todayIso(), -2),
-    subtotal: 280.45,
-    itbms: 0,
-    total: 280.45,
+    bruto: 280.45,
+    comision: 52.12,
+    neto: 228.33,
     referencia: 'SIM-001',
     raw: { fuente: 'demo' },
   },
   {
     proveedor: 'PedidosYa',
-    canal: 'pedidosya',
     sucursal_slug: 'costa',
     fecha: addDays(todayIso(), -1),
-    subtotal: 305.9,
-    itbms: 0,
-    total: 305.9,
+    bruto: 305.9,
+    comision: 58.15,
+    neto: 247.75,
     referencia: 'SIM-002',
     raw: { fuente: 'demo' },
   },
 ];
 
-/* ────────────────────────────────────────────────────────────────────────────
-   Helpers
---------------------------------------------------------------------------- */
-function sum<T>(rows: readonly T[], fn: (r: T) => number) {
-  return rows.reduce((acc, r) => acc + (Number.isFinite(fn(r)) ? fn(r) : 0), 0);
-}
-function classNames(...xs: Array<string | false | null | undefined>) {
-  return xs.filter(Boolean).join(' ');
+const demoRecords: CanalRecord[] = demoRows.map((row, index) => ({
+  id: `demo-${index}`,
+  fecha: row.fecha,
+  bruto: row.bruto,
+  comision: row.comision,
+  neto: row.neto,
+  referencia: row.referencia ?? null,
+  proveedor_nombre: row.proveedor,
+  sucursal_id: row.sucursal_slug,
+  sucursal_nombre: row.sucursal_slug,
+  raw: row.raw ?? null,
+}));
+
+function sum(records: CanalRecord[], selector: (record: CanalRecord) => number) {
+  return records.reduce((acc, record) => acc + selector(record), 0);
 }
 
-/* ────────────────────────────────────────────────────────────────────────────
-   Página principal
---------------------------------------------------------------------------- */
 export default function CanalesPage() {
   const { sucursales, sucursalSeleccionada, setSucursalSeleccionada, isAdmin } = useAuthOrg();
-
-  const [selectedCanal, setSelectedCanal] = useState<CanalLiteral>('pedidosya');
+  const [selectedCanal, setSelectedCanal] = useState<CanalOption>('PedidosYa');
   const [selectedSucursalId, setSelectedSucursalId] = useState<string | null>(sucursalSeleccionada?.id ?? null);
   const [file, setFile] = useState<File | null>(null);
   const [preview, setPreview] = useState<ParsedRow[]>([]);
   const [parsing, setParsing] = useState(false);
   const [ingesting, setIngesting] = useState(false);
-
   const [listLoading, setListLoading] = useState(false);
   const [listError, setListError] = useState<string | null>(null);
   const [records, setRecords] = useState<CanalRecord[]>([]);
-
   const [toasts, setToasts] = useState<ToastItem[]>([]);
-  const pushToast = useCallback((t: Omit<ToastItem, 'id'>) => createToast(setToasts, t), []);
+
+  const pushToast = useCallback((toast: Omit<ToastItem, 'id'>) => createToast(setToasts, toast), []);
   const closeToast = useCallback((id: string) => dismissToast(setToasts, id), []);
 
   const range = useMemo(() => lastSixtyDayRange(), []);
+
   const sucursalesOptions = useMemo(() => sucursales ?? [], [sucursales]);
 
   useEffect(() => {
@@ -198,83 +163,58 @@ export default function CanalesPage() {
     setSelectedSucursalId(sucursalSeleccionada.id);
   }, [sucursalSeleccionada?.id]);
 
-  /* ──────────────────────────────────────────────────────────────────────
-     Cargar historial
-  ----------------------------------------------------------------------- */
   const refreshList = useCallback(async () => {
     setListLoading(true);
     setListError(null);
     try {
       if (shouldUseDemoMode || !isSupabaseConfigured) {
-        // Demo -> convertimos demoRows a CanalRecord-esque
-        const demoMapped: CanalRecord[] = demoRows.map((r, i) => ({
-          id: `demo-${i}`,
-          fecha: r.fecha,
-          subtotal: r.subtotal,
-          itbms: r.itbms,
-          total: r.total,
-          referencia: r.referencia ?? null,
-          proveedor_nombre: r.proveedor,
-          sucursal_id: r.sucursal_slug as unknown as UUID,
-          sucursal_nombre: r.sucursal_slug,
-          canal: normCanal(r.canal ?? r.proveedor),
-          raw: r.raw ?? null,
-        }));
-        const filtered =
-          selectedCanal ? demoMapped.filter(d => d.canal === selectedCanal) : demoMapped;
-        setRecords(filtered);
+        setRecords(demoRecords);
         return;
       }
 
       let query = supabase
         .from('ext_ventas_canal')
         .select(
-          `
-          id,
-          fecha,
-          subtotal,
-          itbms,
-          total,
-          referencia,
-          canal,
-          raw,
-          sucursal_id,
-          proveedor_id,
-          proveedor:ext_ventas_proveedor(id, nombre),
-          sucursal:sucursal(id, nombre)
-          `
+          'id, fecha, bruto, comision, neto, referencia, raw, sucursal_id, proveedor_id, proveedor:ext_ventas_proveedor(id, nombre), sucursal:sucursal(id, nombre)'
         )
         .gte('fecha', range.desde)
         .lte('fecha', range.hasta)
         .order('fecha', { ascending: false })
-        .limit(400);
+        .limit(200);
 
-      if (selectedSucursalId) query = query.eq('sucursal_id', selectedSucursalId);
-      if (selectedCanal) query = query.eq('canal', selectedCanal);
+      if (selectedSucursalId) {
+        query = query.eq('sucursal_id', selectedSucursalId);
+      }
 
       const { data, error } = await query;
-      if (error) throw new Error(error.message);
+
+      if (error) {
+        throw new Error(error.message);
+      }
 
       const mapped: CanalRecord[] = (data ?? []).map((row: any) => ({
         id: row.id,
         fecha: row.fecha,
-        subtotal: Number(row.subtotal) || 0,
-        itbms: Number(row.itbms) || 0,
-        total: Number(row.total) || 0,
+        bruto: Number(row.bruto) || 0,
+        comision: Number(row.comision) || 0,
+        neto: Number(row.neto) || 0,
         referencia: row.referencia ?? null,
         proveedor_nombre: row.proveedor?.nombre ?? null,
         sucursal_id: row.sucursal?.id ?? selectedSucursalId ?? 'sin-sucursal',
         sucursal_nombre: row.sucursal?.nombre ?? null,
-        canal: (row.canal as CanalLiteral) ?? 'otro',
         raw: row.raw ?? null,
       }));
 
-      setRecords(mapped);
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : 'No se pudo cargar el historial.';
-      setListError(msg);
+      const filtered = selectedCanal !== 'Todos'
+        ? mapped.filter((item) => (item.proveedor_nombre ?? '').toLowerCase() === selectedCanal.toLowerCase())
+        : mapped;
+
+      setRecords(filtered);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'No se pudo cargar el historial.';
       setRecords([]);
-      pushToast({ title: 'Error cargando registros', description: msg, tone: 'error' });
+      setListError(message);
+      pushToast({ title: 'Error cargando registros', description: message, tone: 'error' });
     } finally {
       setListLoading(false);
     }
@@ -284,11 +224,8 @@ export default function CanalesPage() {
     refreshList();
   }, [refreshList]);
 
-  /* ──────────────────────────────────────────────────────────────────────
-     Acciones de archivo
-  ----------------------------------------------------------------------- */
-  const handleFile = useCallback((f: File | null) => {
-    setFile(f);
+  const handleFile = useCallback((inputFile: File | null) => {
+    setFile(inputFile);
     setPreview([]);
   }, []);
 
@@ -297,21 +234,16 @@ export default function CanalesPage() {
       pushToast({ title: 'Selecciona un PDF', description: 'Selecciona un archivo para procesar.', tone: 'warning' });
       return;
     }
+
     if (!selectedSucursalId) {
-      pushToast({ title: 'Selecciona una sucursal', description: 'Elige la sucursal destino.', tone: 'warning' });
+      pushToast({ title: 'Selecciona una sucursal', description: 'Necesitas elegir la sucursal destino.', tone: 'warning' });
       return;
     }
 
     setParsing(true);
     try {
       if (shouldUseDemoMode || !isSupabaseConfigured) {
-        // Demo
-        setPreview(
-          demoRows.map((r) => ({
-            ...r,
-            canal: 'pedidosya',
-          }))
-        );
+        setPreview(demoRows);
         pushToast({
           title: 'Modo demo',
           description: 'Se generaron filas de ejemplo porque Supabase no está configurado.',
@@ -323,7 +255,7 @@ export default function CanalesPage() {
       const base64 = await toBase64(file);
       const payload = {
         base64,
-        canal: selectedCanal, // pista al parser
+        canal: selectedCanal,
         sucursal_id: selectedSucursalId,
         file_name: file.name,
       };
@@ -331,28 +263,32 @@ export default function CanalesPage() {
       const { data, error } = await supabase.functions.invoke<ParseResponse>('ext-canal-parse-pdf', {
         body: payload,
       });
-      if (error) throw error;
-      if (!data?.ok) throw new Error(data?.message ?? data?.error ?? 'El parser no devolvió resultado.');
 
-      // Normalizamos canal en las filas (por si el parser no lo incluyó)
-      const normalized = (data.rows ?? []).map((r) => ({
-        ...r,
-        canal: normCanal(r.canal ?? r.proveedor),
-      }));
-      setPreview(normalized);
+      if (error) {
+        throw error;
+      }
 
+      if (!data?.ok) {
+        throw new Error(data?.message ?? 'El parser no devolvió resultado.');
+      }
+
+      setPreview(data.rows ?? []);
       if (data.warnings?.length) {
-        pushToast({ title: 'Parser con advertencias', description: data.warnings.join('\n'), tone: 'warning' });
+        pushToast({
+          title: 'Parser con advertencias',
+          description: data.warnings.join('\n'),
+          tone: 'warning',
+        });
       } else {
         pushToast({
           title: 'PDF procesado',
-          description: `Se detectaron ${normalized.length} filas listas para ingerir.`,
+          description: `Se detectaron ${data.rows?.length ?? 0} filas listas para ingerir.`,
           tone: 'success',
         });
       }
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : 'No se pudo parsear el PDF.';
-      pushToast({ title: 'Error al parsear', description: msg, tone: 'error' });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'No se pudo parsear el PDF.';
+      pushToast({ title: 'Error al parsear', description: message, tone: 'error' });
     } finally {
       setParsing(false);
     }
@@ -372,104 +308,84 @@ export default function CanalesPage() {
         return;
       }
 
-      // IMPORTANTE: la función ext-canal-ingest espera { data: [...] } y requiere "canal" NOT NULL
-      const payload = {
-        data: preview.map((r) => ({
-          proveedor: r.proveedor,
-          canal: normCanal(r.canal ?? r.proveedor), // <— siempre enviamos canal
-          sucursal_slug: r.sucursal_slug,
-          fecha: r.fecha,
-          subtotal: r.subtotal,
-          itbms: r.itbms,
-          total: r.total,
-          referencia: r.referencia ?? null,
-          raw: r.raw ?? null,
-        })),
-      };
-
       const { data, error } = await supabase.functions.invoke<IngestResponse>('ext-canal-ingest', {
-        body: payload,
+        body: { rows: preview },
       });
-      if (error) throw error;
-      if (!data?.ok) throw new Error(data?.message ?? data?.error ?? 'No se pudo guardar.');
+
+      if (error) {
+        throw error;
+      }
+
+      if (!data?.ok) {
+        throw new Error(data?.message ?? 'No se pudo guardar.');
+      }
 
       pushToast({
         title: 'Ingesta completada',
-        description: `${data.upserted ?? payload.data.length} filas guardadas.`,
+        description: `${data.upserted ?? preview.length} filas guardadas exitosamente.`,
         tone: 'success',
       });
       setPreview([]);
       setFile(null);
       await refreshList();
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : 'No se pudo guardar en la base de datos.';
-      pushToast({ title: 'Error al guardar', description: msg, tone: 'error' });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'No se pudo guardar en la base de datos.';
+      pushToast({ title: 'Error al guardar', description: message, tone: 'error' });
     } finally {
       setIngesting(false);
     }
   }, [preview, pushToast, refreshList]);
 
-  /* ──────────────────────────────────────────────────────────────────────
-     Derivados
-  ----------------------------------------------------------------------- */
-  const totals = useMemo(
-    () => ({
-      subtotal: sum(records, (r) => r.subtotal),
-      itbms: sum(records, (r) => r.itbms),
-      total: sum(records, (r) => r.total),
-    }),
-    [records]
-  );
+  const totals = useMemo(() => ({
+    bruto: sum(records, (row) => row.bruto),
+    comision: sum(records, (row) => row.comision),
+    neto: sum(records, (row) => row.neto),
+  }), [records]);
+
   const emptyState = !listLoading && records.length === 0;
 
-  /* ──────────────────────────────────────────────────────────────────────
-     Render
-  ----------------------------------------------------------------------- */
   return (
     <div className="space-y-8 p-4">
-      {/* Header */}
       <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
         <div>
           <h1 className="text-2xl font-bold text-bean">Canales externos</h1>
           <p className="text-sm text-slate-600">
-            Sube reportes en PDF (PedidosYa, etc.) para registrar ventas y comisiones por sucursal.
+            Sube reportes en PDF (PedidosYa) para registrar ventas y comisiones por sucursal.
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-3">
-          {/* Canal */}
           <label className="flex flex-col text-sm text-slate-600">
             <span className="mb-1 font-medium text-slate-500">Canal</span>
             <select
               value={selectedCanal}
-              onChange={(e) => setSelectedCanal(e.target.value as CanalLiteral)}
+              onChange={(event) => setSelectedCanal(event.target.value as CanalOption)}
               className="rounded-xl border border-slate-200 px-3 py-2 text-sm shadow-sm focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/30"
             >
-              {CANAL_OPTIONS.map((opt) => (
-                <option key={opt} value={opt}>
-                  {CANAL_LABEL[opt]}
+              {CANAL_OPTIONS.map((option) => (
+                <option key={option} value={option}>
+                  {option}
                 </option>
               ))}
             </select>
           </label>
 
-          {/* Sucursal */}
           {isAdmin ? (
             <label className="flex flex-col text-sm text-slate-600">
               <span className="mb-1 font-medium text-slate-500">Sucursal</span>
               <select
                 value={selectedSucursalId ?? ''}
-                onChange={(e) => {
-                  const val = e.target.value || null;
-                  setSelectedSucursalId(val);
-                  const branch = sucursalesOptions.find((s) => s.id === val) ?? null;
+                onChange={(event) => {
+                  const value = event.target.value || null;
+                  setSelectedSucursalId(value);
+                  const branch = sucursalesOptions.find((item) => item.id === value) ?? null;
                   setSucursalSeleccionada(branch ?? null);
                 }}
                 className="rounded-xl border border-slate-200 px-3 py-2 text-sm shadow-sm focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/30"
               >
                 <option value="">Todas</option>
-                {sucursalesOptions.map((s) => (
-                  <option key={s.id} value={s.id}>
-                    {s.nombre}
+                {sucursalesOptions.map((sucursal) => (
+                  <option key={sucursal.id} value={sucursal.id}>
+                    {sucursal.nombre}
                   </option>
                 ))}
               </select>
@@ -477,13 +393,12 @@ export default function CanalesPage() {
           ) : (
             <div className="flex items-center gap-2 rounded-full bg-slate-100 px-4 py-2 text-sm text-slate-600">
               <Table className="h-4 w-4" />
-              {sucursalesOptions.find((x) => x.id === selectedSucursalId)?.nombre ?? 'Sucursal asignada'}
+              {sucursalesOptions.find((item) => item.id === selectedSucursalId)?.nombre ?? 'Sucursal asignada'}
             </div>
           )}
         </div>
       </div>
 
-      {/* Banner demo */}
       {shouldUseDemoMode || !isSupabaseConfigured ? (
         <div className="flex items-start gap-3 rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
           <AlertTriangle className="mt-0.5 h-4 w-4" />
@@ -495,7 +410,6 @@ export default function CanalesPage() {
       ) : null}
 
       <div className="grid gap-6 lg:grid-cols-[2fr_3fr]">
-        {/* Panel de carga/preview/ingesta */}
         <section className="space-y-4 rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
           <header className="flex items-center gap-3 text-slate-700">
             <UploadCloud className="h-5 w-5 text-accent" />
@@ -515,7 +429,7 @@ export default function CanalesPage() {
               type="file"
               accept="application/pdf"
               className="hidden"
-              onChange={(e) => handleFile(e.target.files?.[0] ?? null)}
+              onChange={(event) => handleFile(event.target.files?.[0] ?? null)}
             />
           </label>
 
@@ -571,22 +485,20 @@ export default function CanalesPage() {
                     <tr>
                       <th className="px-3 py-2">Fecha</th>
                       <th className="px-3 py-2">Sucursal</th>
-                      <th className="px-3 py-2">Canal</th>
-                      <th className="px-3 py-2 text-right">Subtotal</th>
-                      <th className="px-3 py-2 text-right">ITBMS</th>
-                      <th className="px-3 py-2 text-right">Total</th>
+                      <th className="px-3 py-2 text-right">Bruto</th>
+                      <th className="px-3 py-2 text-right">Comisión</th>
+                      <th className="px-3 py-2 text-right">Neto</th>
                       <th className="px-3 py-2">Referencia</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {preview.map((row, idx) => (
-                      <tr key={`${row.fecha}-${row.referencia ?? idx}`} className="border-t border-slate-100">
+                    {preview.map((row, index) => (
+                      <tr key={`${row.fecha}-${row.referencia ?? index}`} className="border-t border-slate-100">
                         <td className="px-3 py-2 font-medium text-slate-700">{row.fecha}</td>
                         <td className="px-3 py-2">{row.sucursal_slug}</td>
-                        <td className="px-3 py-2">{CANAL_LABEL[normCanal(row.canal ?? row.proveedor)]}</td>
-                        <td className="px-3 py-2 text-right font-semibold text-slate-700">{formatMoney(row.subtotal)}</td>
-                        <td className="px-3 py-2 text-right text-slate-600">{formatMoney(row.itbms)}</td>
-                        <td className="px-3 py-2 text-right text-emerald-600">{formatMoney(row.total)}</td>
+                        <td className="px-3 py-2 text-right font-semibold text-slate-700">{formatMoney(row.bruto)}</td>
+                        <td className="px-3 py-2 text-right text-rose-600">{formatMoney(row.comision)}</td>
+                        <td className="px-3 py-2 text-right text-emerald-600">{formatMoney(row.neto)}</td>
                         <td className="px-3 py-2">{row.referencia ?? '—'}</td>
                       </tr>
                     ))}
@@ -597,7 +509,6 @@ export default function CanalesPage() {
           ) : null}
         </section>
 
-        {/* Panel de KPIs + tabla */}
         <section className="space-y-4">
           <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
             <header className="flex flex-wrap items-center justify-between gap-3">
@@ -621,19 +532,18 @@ export default function CanalesPage() {
               </button>
             </header>
 
-            {/* KPIs */}
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
               <div className="rounded-xl bg-slate-50 p-4 text-sm">
-                <p className="text-slate-500">Subtotal</p>
-                <p className="text-lg font-semibold text-slate-800">{formatMoney(totals.subtotal)}</p>
+                <p className="text-slate-500">Bruto</p>
+                <p className="text-lg font-semibold text-slate-800">{formatMoney(totals.bruto)}</p>
               </div>
               <div className="rounded-xl bg-slate-50 p-4 text-sm">
-                <p className="text-slate-500">ITBMS</p>
-                <p className="text-lg font-semibold text-slate-700">{formatMoney(totals.itbms)}</p>
+                <p className="text-slate-500">Comisión</p>
+                <p className="text-lg font-semibold text-rose-600">{formatMoney(totals.comision)}</p>
               </div>
               <div className="rounded-xl bg-slate-50 p-4 text-sm">
-                <p className="text-slate-500">Total</p>
-                <p className="text-lg font-semibold text-emerald-600">{formatMoney(totals.total)}</p>
+                <p className="text-slate-500">Neto</p>
+                <p className="text-lg font-semibold text-emerald-600">{formatMoney(totals.neto)}</p>
               </div>
             </div>
 
@@ -647,31 +557,29 @@ export default function CanalesPage() {
               </div>
             ) : null}
 
-            {/* Tabla */}
-            <div className="mt-4 max-h-96 overflow-auto rounded-xl border border-slate-100">
+            <div className="mt-4 max-h-80 overflow-auto rounded-xl border border-slate-100">
               <table className="min-w-full text-left text-xs text-slate-600">
                 <thead className="bg-slate-100 text-[11px] uppercase tracking-wide text-slate-500">
                   <tr>
                     <th className="px-3 py-2">Fecha</th>
                     <th className="px-3 py-2">Sucursal</th>
                     <th className="px-3 py-2">Proveedor</th>
-                    <th className="px-3 py-2">Canal</th>
-                    <th className="px-3 py-2 text-right">Subtotal</th>
-                    <th className="px-3 py-2 text-right">ITBMS</th>
-                    <th className="px-3 py-2 text-right">Total</th>
+                    <th className="px-3 py-2 text-right">Bruto</th>
+                    <th className="px-3 py-2 text-right">Comisión</th>
+                    <th className="px-3 py-2 text-right">Neto</th>
                     <th className="px-3 py-2">Referencia</th>
                   </tr>
                 </thead>
                 <tbody>
                   {listLoading ? (
                     <tr>
-                      <td colSpan={8} className="px-3 py-6 text-center text-sm text-slate-500">
+                      <td colSpan={7} className="px-3 py-6 text-center text-sm text-slate-500">
                         Cargando registros…
                       </td>
                     </tr>
                   ) : emptyState ? (
                     <tr>
-                      <td colSpan={8} className="px-3 py-6 text-center text-sm text-slate-500">
+                      <td colSpan={7} className="px-3 py-6 text-center text-sm text-slate-500">
                         No hay registros para mostrar.
                       </td>
                     </tr>
@@ -681,10 +589,9 @@ export default function CanalesPage() {
                         <td className="px-3 py-2 font-medium text-slate-700">{row.fecha}</td>
                         <td className="px-3 py-2">{row.sucursal_nombre ?? '—'}</td>
                         <td className="px-3 py-2">{row.proveedor_nombre ?? '—'}</td>
-                        <td className="px-3 py-2">{CANAL_LABEL[row.canal] ?? 'Otro'}</td>
-                        <td className="px-3 py-2 text-right font-semibold text-slate-700">{formatMoney(row.subtotal)}</td>
-                        <td className="px-3 py-2 text-right text-slate-600">{formatMoney(row.itbms)}</td>
-                        <td className="px-3 py-2 text-right text-emerald-700">{formatMoney(row.total)}</td>
+                        <td className="px-3 py-2 text-right font-semibold text-slate-700">{formatMoney(row.bruto)}</td>
+                        <td className="px-3 py-2 text-right text-rose-600">{formatMoney(row.comision)}</td>
+                        <td className="px-3 py-2 text-right text-emerald-600">{formatMoney(row.neto)}</td>
                         <td className="px-3 py-2">{row.referencia ?? '—'}</td>
                       </tr>
                     ))
@@ -694,18 +601,6 @@ export default function CanalesPage() {
             </div>
           </div>
         </section>
-      </div>
-
-      <div className="rounded-2xl border border-slate-200 bg-white p-4 text-xs text-slate-500">
-        <div className="mb-2 flex items-center gap-2 font-medium text-slate-700">
-          <Info className="h-4 w-4" />
-          Notas
-        </div>
-        <ul className="list-disc space-y-1 pl-6">
-          <li>Este módulo guarda en <code>ext_ventas_canal</code> y enlaza con <code>sucursal</code> y <code>ext_ventas_proveedor</code>.</li>
-          <li>La ingesta usa la Function <code>ext-canal-ingest</code> y requiere un body <code>{'{ data: [...] }'}</code> y campo <code>canal</code> NO nulo.</li>
-          <li>Si el parser no define canal, el front lo infiere desde el proveedor.</li>
-        </ul>
       </div>
 
       <ToastContainer toasts={toasts} onDismiss={closeToast} />
