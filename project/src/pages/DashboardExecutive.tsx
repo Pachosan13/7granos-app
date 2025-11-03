@@ -182,6 +182,19 @@ function formatRangeLabel(desde: string, hasta: string) {
   return `${startLabel} – ${endLabel}`;
 }
 
+function safeFormatRangeLabel(desde: string, hasta: string) {
+  if (!desde || !hasta) {
+    return 'Rango pendiente';
+  }
+  try {
+    return formatRangeLabel(desde, hasta);
+  } catch {
+    const start = desde || '—';
+    const end = hasta || '—';
+    return `${start} – ${end}`;
+  }
+}
+
 function buildDemoData(): {
   summary: Summary7d;
   series: SeriesPoint[];
@@ -454,7 +467,7 @@ export default function DashboardExecutive() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [usedFallback, setUsedFallback] = useState(false);
-  const [range, setRange] = useState({ desde: '', hasta: '' });
+  const [range, setRange] = useState(() => sevenDayWindow(true));
 
   const selectedSucursalId = sucursalSeleccionada?.id ?? null;
 
@@ -539,6 +552,7 @@ export default function DashboardExecutive() {
   const sucursalesOptions = useMemo(() => sucursales ?? [], [sucursales]);
 
   const cashflow = useMemo(() => computeCashflow(summary), [summary]);
+  const rangeLabel = useMemo(() => safeFormatRangeLabel(range.desde, range.hasta), [range.desde, range.hasta]);
 
   return (
     <div className="min-h-screen bg-slate-50 pb-16 pt-8">
@@ -576,10 +590,10 @@ export default function DashboardExecutive() {
           <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
             <div className="flex flex-wrap items-center gap-3 text-sm text-slate-600">
               <span className="inline-flex items-center gap-2 rounded-full bg-slate-100 px-3 py-1 font-medium text-slate-700">
-                <CalendarDays className="h-4 w-4" /> {formatRangeLabel(range.desde, range.hasta)}
+                <CalendarDays className="h-4 w-4" /> {rangeLabel}
               </span>
               <span className="inline-flex items-center gap-2 text-slate-500">
-                Ventana de 7 días ({range.desde} → {range.hasta})
+                Ventana de 7 días ({range.desde || '—'} → {range.hasta || '—'})
               </span>
             </div>
             {isAdmin ? (
