@@ -218,7 +218,16 @@ export default function ProveedoresPage() {
             ) : (
               filtered.map((p) => (
                 <tr key={p.id} className="border-t hover:bg-accent/5 transition">
-                  <td className="p-3">{p.nombre}</td>
+                  <td className="p-3">
+                    <div className="flex items-center gap-2">
+                      <span>{p.nombre}</span>
+                      {p.nombre?.trim().toLowerCase() === 'pedidosya' ? (
+                        <span className="inline-flex items-center gap-1 rounded-full bg-emerald-100 px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-emerald-700">
+                          Canal de ventas
+                        </span>
+                      ) : null}
+                    </div>
+                  </td>
                   <td className="p-3">{p.ruc || '—'}</td>
                   <td className="p-3">
                     {p.contacto?.tel || p.contacto?.email
