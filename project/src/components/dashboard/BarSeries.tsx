@@ -27,7 +27,17 @@ export function BarSeries({ data }: BarSeriesProps) {
     <ResponsiveContainer width="100%" height="100%">
       <ComposedChart data={data} margin={{ top: 20, right: 16, left: 0, bottom: 0 }}>
         <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
-        <XAxis dataKey="d" stroke="#64748b" fontSize={12} tickFormatter={(value) => value.slice(5)} />
+        <XAxis
+          dataKey="d"
+          stroke="#64748b"
+          fontSize={12}
+          tickFormatter={(value) => {
+            if (typeof value !== 'string') {
+              return String(value ?? '');
+            }
+            return value.length > 5 ? value.slice(5) : value;
+          }}
+        />
         <YAxis
           yAxisId="left"
           stroke="#64748b"
@@ -43,7 +53,20 @@ export function BarSeries({ data }: BarSeriesProps) {
             }
             return [Number(value).toLocaleString('es-PA'), 'Transacciones'];
           }}
-          labelFormatter={(label) => new Date(label).toLocaleDateString('es-PA', { day: '2-digit', month: 'short' })}
+          labelFormatter={(label) => {
+            if (typeof label !== 'string') {
+              return String(label ?? '—');
+            }
+            const parsed = new Date(label);
+            if (Number.isNaN(parsed.getTime())) {
+              return label;
+            }
+            try {
+              return parsed.toLocaleDateString('es-PA', { day: '2-digit', month: 'short' });
+            } catch {
+              return label;
+            }
+          }}
         />
         <Area
           yAxisId="left"

@@ -38,6 +38,7 @@ import * as BalancePageMod from './pages/contabilidad/BalancePage';
 import * as IniciarSesionMod from './pages/Auth/IniciarSesion';
 import * as GastosFijosListaMod from './pages/gastos-fijos/Lista';
 import * as GastosFijosImportarMod from './pages/gastos-fijos/Importar';
+import * as CanalesPageMod from './pages/compras/CanalesPage';
 
 // Payroll
 import * as PeriodosMod from './pages/payroll/Periodos';
@@ -68,6 +69,7 @@ const ContabilidadBalance = pick(BalancePageMod, ['default', 'BalancePage'], 'Co
 const IniciarSesion = pick(IniciarSesionMod, ['default', 'IniciarSesion'], 'IniciarSesion');
 const GastosFijosLista = pick(GastosFijosListaMod, ['default'], 'GastosFijosLista');
 const GastosFijosImportar = pick(GastosFijosImportarMod, ['default'], 'GastosFijosImportar');
+const CanalesPage = pick(CanalesPageMod, ['default', 'CanalesPage'], 'CanalesPage');
 
 // Payroll (no ocultes si no hay variable; solo si es 'false')
 const Periodos = pick(PeriodosMod, ['default', 'Periodos'], 'Periodos');
@@ -108,6 +110,7 @@ export const App = () => (
                 {/* Compras */}
                 <Route path="/compras/captura" element={<CapturaComprasPage />} />
                 <Route path="/compras/proveedores" element={<ProveedoresPage />} />
+                <Route path="/compras/canales" element={<CanalesPage />} />
 
                 {/* Administración (si ya la usabas así) */}
                 <Route path="/admin/*" element={<AdminLayout />} />
