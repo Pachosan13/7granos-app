@@ -15,14 +15,18 @@ import { formatCurrencyUSD } from '../../lib/format';
 import { useAuthOrg } from '../../context/AuthOrgContext';
 import { ToastContainer, ToastItem, createToast, dismissToast } from '../../components/Toast';
 
+/* ────────────────────────────────────────────────────────────────────────────
+   Tipos
+--------------------------------------------------------------------------- */
+
 interface ParsedRow {
-  proveedor: string;
-  sucursal_slug: string;
-  fecha: string;
-  bruto: number;
-  comision: number;
-  neto: number;
-  referencia?: string | null;
+  proveedor: string;          // Texto del canal detectado (p.ej., "PedidosYa")
+  sucursal_slug: string;      // slug/alias de sucursal (p.ej., "costa")
+  fecha: string;              // YYYY-MM-DD
+  subtotal: number;           // ≈ bruto (antes de impuesto/comisión)
+  itbms: number;              // impuesto si aplica (o 0)
+  total: number;              // total neto reportado
+  referencia?: string | null; // id de reporte/factura
   raw?: Record<string, unknown> | null;
 }
 
@@ -39,26 +43,28 @@ interface ParseResponse {
   message?: string;
 }
 
+// Coincide con columnas de ext_ventas_canal + relaciones
 interface CanalRecord {
   id: string;
   fecha: string;
-  bruto: number;
-  comision: number;
-  neto: number;
+  subtotal: number;
+  itbms: number;
+  total: number;
   referencia: string | null;
   proveedor_nombre: string | null;
-  sucursal_id: string;
+  sucursal_id: string | null;
   sucursal_nombre: string | null;
   raw: Record<string, unknown> | null;
 }
 
-interface Range {
-  desde: string;
-  hasta: string;
-}
+interface Range { desde: string; hasta: string; }
 
 const CANAL_OPTIONS = ['Todos', 'PedidosYa', 'UberEats', 'DidiFood', 'Glovo', 'Otro'] as const;
 type CanalOption = (typeof CANAL_OPTIONS)[number];
+
+/* ────────────────────────────────────────────────────────────────────────────
+   Helpers fecha / formato
+--------------------------------------------------------------------------- */
 
 function todayIso() {
   const now = new Date();
@@ -94,18 +100,21 @@ function toBase64(file: File) {
   });
 }
 
-function formatMoney(value: number | null | undefined) {
-  return formatCurrencyUSD(Number.isFinite(value ?? 0) ? (value ?? 0) : 0);
+function money(n: number | null | undefined) {
+  return formatCurrencyUSD(Number.isFinite(n ?? 0) ? (n ?? 0) : 0);
 }
 
-const demoRows: ParsedRow[] = [
+/* ────────────────────────────────────────────────────────────────────────────
+   Datos demo (coinciden con subtotal/itbms/total)
+--------------------------------------------------------------------------- */
+const demoParsed: ParsedRow[] = [
   {
     proveedor: 'PedidosYa',
     sucursal_slug: 'costa',
     fecha: addDays(todayIso(), -2),
-    bruto: 280.45,
-    comision: 52.12,
-    neto: 228.33,
+    subtotal: 280.45,
+    itbms: 0,
+    total: 280.45,
     referencia: 'SIM-001',
     raw: { fuente: 'demo' },
   },
@@ -113,49 +122,55 @@ const demoRows: ParsedRow[] = [
     proveedor: 'PedidosYa',
     sucursal_slug: 'costa',
     fecha: addDays(todayIso(), -1),
-    bruto: 305.9,
-    comision: 58.15,
-    neto: 247.75,
+    subtotal: 305.9,
+    itbms: 0,
+    total: 305.9,
     referencia: 'SIM-002',
     raw: { fuente: 'demo' },
   },
 ];
 
-const demoRecords: CanalRecord[] = demoRows.map((row, index) => ({
-  id: `demo-${index}`,
-  fecha: row.fecha,
-  bruto: row.bruto,
-  comision: row.comision,
-  neto: row.neto,
-  referencia: row.referencia ?? null,
-  proveedor_nombre: row.proveedor,
-  sucursal_id: row.sucursal_slug,
-  sucursal_nombre: row.sucursal_slug,
-  raw: row.raw ?? null,
+const demoRecords: CanalRecord[] = demoParsed.map((r, i) => ({
+  id: `demo-${i}`,
+  fecha: r.fecha,
+  subtotal: r.subtotal,
+  itbms: r.itbms,
+  total: r.total,
+  referencia: r.referencia ?? null,
+  proveedor_nombre: r.proveedor,
+  sucursal_id: r.sucursal_slug,
+  sucursal_nombre: r.sucursal_slug,
+  raw: r.raw ?? null,
 }));
 
-function sum(records: CanalRecord[], selector: (record: CanalRecord) => number) {
-  return records.reduce((acc, record) => acc + selector(record), 0);
+function sum(records: CanalRecord[], pick: (r: CanalRecord) => number) {
+  return records.reduce((acc, r) => acc + pick(r), 0);
 }
+
+/* ────────────────────────────────────────────────────────────────────────────
+   Componente principal
+--------------------------------------------------------------------------- */
 
 export default function CanalesPage() {
   const { sucursales, sucursalSeleccionada, setSucursalSeleccionada, isAdmin } = useAuthOrg();
+
   const [selectedCanal, setSelectedCanal] = useState<CanalOption>('PedidosYa');
   const [selectedSucursalId, setSelectedSucursalId] = useState<string | null>(sucursalSeleccionada?.id ?? null);
+
   const [file, setFile] = useState<File | null>(null);
   const [preview, setPreview] = useState<ParsedRow[]>([]);
   const [parsing, setParsing] = useState(false);
   const [ingesting, setIngesting] = useState(false);
+
   const [listLoading, setListLoading] = useState(false);
   const [listError, setListError] = useState<string | null>(null);
   const [records, setRecords] = useState<CanalRecord[]>([]);
-  const [toasts, setToasts] = useState<ToastItem[]>([]);
 
-  const pushToast = useCallback((toast: Omit<ToastItem, 'id'>) => createToast(setToasts, toast), []);
+  const [toasts, setToasts] = useState<ToastItem[]>([]);
+  const pushToast = useCallback((t: Omit<ToastItem, 'id'>) => createToast(setToasts, t), []);
   const closeToast = useCallback((id: string) => dismissToast(setToasts, id), []);
 
   const range = useMemo(() => lastSixtyDayRange(), []);
-
   const sucursalesOptions = useMemo(() => sucursales ?? [], [sucursales]);
 
   useEffect(() => {
@@ -163,6 +178,7 @@ export default function CanalesPage() {
     setSelectedSucursalId(sucursalSeleccionada.id);
   }, [sucursalSeleccionada?.id]);
 
+  /* ───────────────  Cargar historial  ─────────────── */
   const refreshList = useCallback(async () => {
     setListLoading(true);
     setListError(null);
@@ -172,60 +188,60 @@ export default function CanalesPage() {
         return;
       }
 
-      let query = supabase
+      // Selección con relaciones a proveedor y sucursal
+      let q = supabase
         .from('ext_ventas_canal')
         .select(
-          'id, fecha, bruto, comision, neto, referencia, raw, sucursal_id, proveedor_id, proveedor:ext_ventas_proveedor(id, nombre), sucursal:sucursal(id, nombre)'
+          'id, fecha, subtotal, itbms, total, referencia, raw, proveedor:ext_ventas_proveedor(id,nombre), sucursal:sucursal(id,nombre)'
         )
         .gte('fecha', range.desde)
         .lte('fecha', range.hasta)
         .order('fecha', { ascending: false })
         .limit(200);
 
-      if (selectedSucursalId) {
-        query = query.eq('sucursal_id', selectedSucursalId);
-      }
+      if (selectedSucursalId) q = q.eq('sucursal_id', selectedSucursalId);
 
-      const { data, error } = await query;
-
-      if (error) {
-        throw new Error(error.message);
-      }
+      const { data, error } = await q;
+      if (error) throw new Error(error.message);
 
       const mapped: CanalRecord[] = (data ?? []).map((row: any) => ({
         id: row.id,
         fecha: row.fecha,
-        bruto: Number(row.bruto) || 0,
-        comision: Number(row.comision) || 0,
-        neto: Number(row.neto) || 0,
+        subtotal: Number(row.subtotal) || 0,
+        itbms: Number(row.itbms) || 0,
+        total: Number(row.total) || 0,
         referencia: row.referencia ?? null,
         proveedor_nombre: row.proveedor?.nombre ?? null,
-        sucursal_id: row.sucursal?.id ?? selectedSucursalId ?? 'sin-sucursal',
+        sucursal_id: row.sucursal?.id ?? selectedSucursalId ?? null,
         sucursal_nombre: row.sucursal?.nombre ?? null,
         raw: row.raw ?? null,
       }));
 
-      const filtered = selectedCanal !== 'Todos'
-        ? mapped.filter((item) => (item.proveedor_nombre ?? '').toLowerCase() === selectedCanal.toLowerCase())
-        : mapped;
+      const filtered =
+        selectedCanal !== 'Todos'
+          ? mapped.filter(
+              (r) => (r.proveedor_nombre ?? '').toLowerCase() === selectedCanal.toLowerCase()
+            )
+          : mapped;
 
       setRecords(filtered);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'No se pudo cargar el historial.';
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : 'No se pudo cargar el historial.';
       setRecords([]);
-      setListError(message);
-      pushToast({ title: 'Error cargando registros', description: message, tone: 'error' });
+      setListError(msg);
+      pushToast({ title: 'Error cargando registros', description: msg, tone: 'error' });
     } finally {
       setListLoading(false);
     }
-  }, [pushToast, range.desde, range.hasta, selectedCanal, selectedSucursalId]);
+  }, [range.desde, range.hasta, selectedCanal, selectedSucursalId, pushToast]);
 
   useEffect(() => {
     refreshList();
   }, [refreshList]);
 
-  const handleFile = useCallback((inputFile: File | null) => {
-    setFile(inputFile);
+  /* ───────────────  Parse de PDF  ─────────────── */
+  const handleFile = useCallback((f: File | null) => {
+    setFile(f);
     setPreview([]);
   }, []);
 
@@ -234,7 +250,6 @@ export default function CanalesPage() {
       pushToast({ title: 'Selecciona un PDF', description: 'Selecciona un archivo para procesar.', tone: 'warning' });
       return;
     }
-
     if (!selectedSucursalId) {
       pushToast({ title: 'Selecciona una sucursal', description: 'Necesitas elegir la sucursal destino.', tone: 'warning' });
       return;
@@ -243,7 +258,7 @@ export default function CanalesPage() {
     setParsing(true);
     try {
       if (shouldUseDemoMode || !isSupabaseConfigured) {
-        setPreview(demoRows);
+        setPreview(demoParsed);
         pushToast({
           title: 'Modo demo',
           description: 'Se generaron filas de ejemplo porque Supabase no está configurado.',
@@ -263,37 +278,41 @@ export default function CanalesPage() {
       const { data, error } = await supabase.functions.invoke<ParseResponse>('ext-canal-parse-pdf', {
         body: payload,
       });
+      if (error) throw error;
+      if (!data?.ok) throw new Error(data?.message ?? 'El parser no devolvió resultado.');
 
-      if (error) {
-        throw error;
-      }
+      // Normalizamos a las columnas reales (subtotal/itbms/total)
+      const rows = (data.rows ?? []).map((r: any) => ({
+        proveedor: r.proveedor,
+        sucursal_slug: r.sucursal_slug,
+        fecha: r.fecha,
+        subtotal: Number(r.subtotal ?? r.bruto ?? 0),
+        itbms: Number(r.itbms ?? 0),
+        total: Number(r.total ?? r.neto ?? r.subtotal ?? 0),
+        referencia: r.referencia ?? null,
+        raw: r.raw ?? null,
+      })) as ParsedRow[];
 
-      if (!data?.ok) {
-        throw new Error(data?.message ?? 'El parser no devolvió resultado.');
-      }
+      setPreview(rows);
 
-      setPreview(data.rows ?? []);
       if (data.warnings?.length) {
-        pushToast({
-          title: 'Parser con advertencias',
-          description: data.warnings.join('\n'),
-          tone: 'warning',
-        });
+        pushToast({ title: 'Parser con advertencias', description: data.warnings.join('\n'), tone: 'warning' });
       } else {
         pushToast({
           title: 'PDF procesado',
-          description: `Se detectaron ${data.rows?.length ?? 0} filas listas para ingerir.`,
+          description: `Se detectaron ${rows.length} filas listas para ingerir.`,
           tone: 'success',
         });
       }
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'No se pudo parsear el PDF.';
-      pushToast({ title: 'Error al parsear', description: message, tone: 'error' });
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : 'No se pudo parsear el PDF.';
+      pushToast({ title: 'Error al parsear', description: msg, tone: 'error' });
     } finally {
       setParsing(false);
     }
-  }, [file, pushToast, selectedCanal, selectedSucursalId]);
+  }, [file, selectedCanal, selectedSucursalId, pushToast]);
 
+  /* ───────────────  Ingesta  ─────────────── */
   const handleIngest = useCallback(async () => {
     if (!preview.length) {
       pushToast({ title: 'Sin filas para ingerir', description: 'Primero procesa un PDF para obtener filas.', tone: 'warning' });
@@ -308,17 +327,12 @@ export default function CanalesPage() {
         return;
       }
 
+      // La función de ingesta espera { rows: ParsedRow[] } (con subtotal/itbms/total)
       const { data, error } = await supabase.functions.invoke<IngestResponse>('ext-canal-ingest', {
         body: { rows: preview },
       });
-
-      if (error) {
-        throw error;
-      }
-
-      if (!data?.ok) {
-        throw new Error(data?.message ?? 'No se pudo guardar.');
-      }
+      if (error) throw error;
+      if (!data?.ok) throw new Error(data?.message ?? 'No se pudo guardar.');
 
       pushToast({
         title: 'Ingesta completada',
@@ -328,22 +342,29 @@ export default function CanalesPage() {
       setPreview([]);
       setFile(null);
       await refreshList();
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'No se pudo guardar en la base de datos.';
-      pushToast({ title: 'Error al guardar', description: message, tone: 'error' });
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : 'No se pudo guardar en la base de datos.';
+      pushToast({ title: 'Error al guardar', description: msg, tone: 'error' });
     } finally {
       setIngesting(false);
     }
-  }, [preview, pushToast, refreshList]);
+  }, [preview, refreshList, pushToast]);
 
-  const totals = useMemo(() => ({
-    bruto: sum(records, (row) => row.bruto),
-    comision: sum(records, (row) => row.comision),
-    neto: sum(records, (row) => row.neto),
-  }), [records]);
+  /* ───────────────  Totales y estado  ─────────────── */
+  const totals = useMemo(
+    () => ({
+      subtotal: sum(records, (r) => r.subtotal),
+      itbms: sum(records, (r) => r.itbms),
+      total: sum(records, (r) => r.total),
+    }),
+    [records]
+  );
 
   const emptyState = !listLoading && records.length === 0;
 
+  /* ────────────────────────────────────────────────────────────────────────────
+     Render
+  --------------------------------------------------------------------------- */
   return (
     <div className="space-y-8 p-4">
       <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
@@ -353,17 +374,18 @@ export default function CanalesPage() {
             Sube reportes en PDF (PedidosYa) para registrar ventas y comisiones por sucursal.
           </p>
         </div>
+
         <div className="flex flex-wrap items-center gap-3">
           <label className="flex flex-col text-sm text-slate-600">
             <span className="mb-1 font-medium text-slate-500">Canal</span>
             <select
               value={selectedCanal}
-              onChange={(event) => setSelectedCanal(event.target.value as CanalOption)}
+              onChange={(e) => setSelectedCanal(e.target.value as CanalOption)}
               className="rounded-xl border border-slate-200 px-3 py-2 text-sm shadow-sm focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/30"
             >
-              {CANAL_OPTIONS.map((option) => (
-                <option key={option} value={option}>
-                  {option}
+              {CANAL_OPTIONS.map((opt) => (
+                <option key={opt} value={opt}>
+                  {opt}
                 </option>
               ))}
             </select>
@@ -374,18 +396,18 @@ export default function CanalesPage() {
               <span className="mb-1 font-medium text-slate-500">Sucursal</span>
               <select
                 value={selectedSucursalId ?? ''}
-                onChange={(event) => {
-                  const value = event.target.value || null;
+                onChange={(e) => {
+                  const value = e.target.value || null;
                   setSelectedSucursalId(value);
-                  const branch = sucursalesOptions.find((item) => item.id === value) ?? null;
+                  const branch = sucursalesOptions.find((s) => s.id === value) ?? null;
                   setSucursalSeleccionada(branch ?? null);
                 }}
                 className="rounded-xl border border-slate-200 px-3 py-2 text-sm shadow-sm focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/30"
               >
                 <option value="">Todas</option>
-                {sucursalesOptions.map((sucursal) => (
-                  <option key={sucursal.id} value={sucursal.id}>
-                    {sucursal.nombre}
+                {sucursalesOptions.map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.nombre}
                   </option>
                 ))}
               </select>
@@ -393,13 +415,13 @@ export default function CanalesPage() {
           ) : (
             <div className="flex items-center gap-2 rounded-full bg-slate-100 px-4 py-2 text-sm text-slate-600">
               <Table className="h-4 w-4" />
-              {sucursalesOptions.find((item) => item.id === selectedSucursalId)?.nombre ?? 'Sucursal asignada'}
+              {sucursalesOptions.find((x) => x.id === selectedSucursalId)?.nombre ?? 'Sucursal asignada'}
             </div>
           )}
         </div>
       </div>
 
-      {shouldUseDemoMode || !isSupabaseConfigured ? (
+      {(shouldUseDemoMode || !isSupabaseConfigured) && (
         <div className="flex items-start gap-3 rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
           <AlertTriangle className="mt-0.5 h-4 w-4" />
           <div>
@@ -407,9 +429,10 @@ export default function CanalesPage() {
             <p>Supabase no está configurado. Se mostrarán filas simuladas y la ingesta se omite.</p>
           </div>
         </div>
-      ) : null}
+      )}
 
       <div className="grid gap-6 lg:grid-cols-[2fr_3fr]">
+        {/* ───────────── Upload / Parse / Ingesta ───────────── */}
         <section className="space-y-4 rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
           <header className="flex items-center gap-3 text-slate-700">
             <UploadCloud className="h-5 w-5 text-accent" />
@@ -429,11 +452,11 @@ export default function CanalesPage() {
               type="file"
               accept="application/pdf"
               className="hidden"
-              onChange={(event) => handleFile(event.target.files?.[0] ?? null)}
+              onChange={(e) => handleFile(e.target.files?.[0] ?? null)}
             />
           </label>
 
-          {file ? (
+          {file && (
             <div className="rounded-xl border border-slate-200 bg-slate-50 p-4 text-sm text-slate-600">
               <div className="flex items-center gap-2">
                 <FileText className="h-4 w-4 text-slate-500" />
@@ -450,7 +473,7 @@ export default function CanalesPage() {
                 </button>
               </div>
             </div>
-          ) : null}
+          )}
 
           <div className="flex flex-wrap items-center gap-3">
             <button
@@ -473,7 +496,7 @@ export default function CanalesPage() {
             </button>
           </div>
 
-          {preview.length > 0 ? (
+          {preview.length > 0 && (
             <div className="space-y-3 rounded-2xl border border-slate-200 bg-white p-4">
               <div className="flex items-center gap-2 text-sm font-semibold text-slate-700">
                 <Database className="h-4 w-4 text-accent" />
@@ -485,30 +508,31 @@ export default function CanalesPage() {
                     <tr>
                       <th className="px-3 py-2">Fecha</th>
                       <th className="px-3 py-2">Sucursal</th>
-                      <th className="px-3 py-2 text-right">Bruto</th>
-                      <th className="px-3 py-2 text-right">Comisión</th>
-                      <th className="px-3 py-2 text-right">Neto</th>
+                      <th className="px-3 py-2 text-right">Subtotal</th>
+                      <th className="px-3 py-2 text-right">ITBMS</th>
+                      <th className="px-3 py-2 text-right">Total</th>
                       <th className="px-3 py-2">Referencia</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {preview.map((row, index) => (
-                      <tr key={`${row.fecha}-${row.referencia ?? index}`} className="border-t border-slate-100">
-                        <td className="px-3 py-2 font-medium text-slate-700">{row.fecha}</td>
-                        <td className="px-3 py-2">{row.sucursal_slug}</td>
-                        <td className="px-3 py-2 text-right font-semibold text-slate-700">{formatMoney(row.bruto)}</td>
-                        <td className="px-3 py-2 text-right text-rose-600">{formatMoney(row.comision)}</td>
-                        <td className="px-3 py-2 text-right text-emerald-600">{formatMoney(row.neto)}</td>
-                        <td className="px-3 py-2">{row.referencia ?? '—'}</td>
+                    {preview.map((r, i) => (
+                      <tr key={`${r.fecha}-${r.referencia ?? i}`} className="border-t border-slate-100">
+                        <td className="px-3 py-2 font-medium text-slate-700">{r.fecha}</td>
+                        <td className="px-3 py-2">{r.sucursal_slug}</td>
+                        <td className="px-3 py-2 text-right font-semibold text-slate-700">{money(r.subtotal)}</td>
+                        <td className="px-3 py-2 text-right">{money(r.itbms)}</td>
+                        <td className="px-3 py-2 text-right text-emerald-600">{money(r.total)}</td>
+                        <td className="px-3 py-2">{r.referencia ?? '—'}</td>
                       </tr>
                     ))}
                   </tbody>
                 </table>
               </div>
             </div>
-          ) : null}
+          )}
         </section>
 
+        {/* ───────────── Historial / KPIs ───────────── */}
         <section className="space-y-4">
           <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
             <header className="flex flex-wrap items-center justify-between gap-3">
@@ -534,20 +558,20 @@ export default function CanalesPage() {
 
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
               <div className="rounded-xl bg-slate-50 p-4 text-sm">
-                <p className="text-slate-500">Bruto</p>
-                <p className="text-lg font-semibold text-slate-800">{formatMoney(totals.bruto)}</p>
+                <p className="text-slate-500">Subtotal</p>
+                <p className="text-lg font-semibold text-slate-800">{money(totals.subtotal)}</p>
               </div>
               <div className="rounded-xl bg-slate-50 p-4 text-sm">
-                <p className="text-slate-500">Comisión</p>
-                <p className="text-lg font-semibold text-rose-600">{formatMoney(totals.comision)}</p>
+                <p className="text-slate-500">ITBMS</p>
+                <p className="text-lg font-semibold">{money(totals.itbms)}</p>
               </div>
               <div className="rounded-xl bg-slate-50 p-4 text-sm">
-                <p className="text-slate-500">Neto</p>
-                <p className="text-lg font-semibold text-emerald-600">{formatMoney(totals.neto)}</p>
+                <p className="text-slate-500">Total</p>
+                <p className="text-lg font-semibold text-emerald-600">{money(totals.total)}</p>
               </div>
             </div>
 
-            {listError ? (
+            {listError && (
               <div className="mt-4 flex items-start gap-2 rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">
                 <ShieldAlert className="mt-0.5 h-4 w-4" />
                 <div>
@@ -555,7 +579,7 @@ export default function CanalesPage() {
                   <p>{listError}</p>
                 </div>
               </div>
-            ) : null}
+            )}
 
             <div className="mt-4 max-h-80 overflow-auto rounded-xl border border-slate-100">
               <table className="min-w-full text-left text-xs text-slate-600">
@@ -564,9 +588,9 @@ export default function CanalesPage() {
                     <th className="px-3 py-2">Fecha</th>
                     <th className="px-3 py-2">Sucursal</th>
                     <th className="px-3 py-2">Proveedor</th>
-                    <th className="px-3 py-2 text-right">Bruto</th>
-                    <th className="px-3 py-2 text-right">Comisión</th>
-                    <th className="px-3 py-2 text-right">Neto</th>
+                    <th className="px-3 py-2 text-right">Subtotal</th>
+                    <th className="px-3 py-2 text-right">ITBMS</th>
+                    <th className="px-3 py-2 text-right">Total</th>
                     <th className="px-3 py-2">Referencia</th>
                   </tr>
                 </thead>
@@ -584,15 +608,15 @@ export default function CanalesPage() {
                       </td>
                     </tr>
                   ) : (
-                    records.map((row) => (
-                      <tr key={row.id} className="border-t border-slate-100">
-                        <td className="px-3 py-2 font-medium text-slate-700">{row.fecha}</td>
-                        <td className="px-3 py-2">{row.sucursal_nombre ?? '—'}</td>
-                        <td className="px-3 py-2">{row.proveedor_nombre ?? '—'}</td>
-                        <td className="px-3 py-2 text-right font-semibold text-slate-700">{formatMoney(row.bruto)}</td>
-                        <td className="px-3 py-2 text-right text-rose-600">{formatMoney(row.comision)}</td>
-                        <td className="px-3 py-2 text-right text-emerald-600">{formatMoney(row.neto)}</td>
-                        <td className="px-3 py-2">{row.referencia ?? '—'}</td>
+                    records.map((r) => (
+                      <tr key={r.id} className="border-t border-slate-100">
+                        <td className="px-3 py-2 font-medium text-slate-700">{r.fecha}</td>
+                        <td className="px-3 py-2">{r.sucursal_nombre ?? '—'}</td>
+                        <td className="px-3 py-2">{r.proveedor_nombre ?? '—'}</td>
+                        <td className="px-3 py-2 text-right font-semibold text-slate-700">{money(r.subtotal)}</td>
+                        <td className="px-3 py-2 text-right">{money(r.itbms)}</td>
+                        <td className="px-3 py-2 text-right text-emerald-600">{money(r.total)}</td>
+                        <td className="px-3 py-2">{r.referencia ?? '—'}</td>
                       </tr>
                     ))
                   )}
