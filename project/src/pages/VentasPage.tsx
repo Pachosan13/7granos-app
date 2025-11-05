@@ -19,6 +19,54 @@ import { useRealtimeVentas } from '../hooks/useRealtimeVentas';
 import { debugLog, getFunctionsBase } from '../utils/diagnostics';
 import { normalizeSucursalId } from './utils/sucursal';
 
+type RpcParamValue = string | number | boolean | null | undefined;
+type RpcParams = Record<string, RpcParamValue>;
+
+function normalizeParams(params: RpcParams): Record<string, RpcParamValue> {
+  return Object.fromEntries(
+    Object.entries(params).filter(([, value]) => value !== undefined)
+  ) as Record<string, RpcParamValue>;
+}
+
+async function callVentasRpc<T>(
+  desde: string,
+  hasta: string,
+  sucursalId: string | null,
+): Promise<T | null> {
+  const normalizedSucursalId = normalizeSucursalId(sucursalId);
+  const variants: RpcParams[] = [
+    { p_desde: desde, p_hasta: hasta, p_sucursal_id: normalizedSucursalId },
+    { desde, hasta, p_sucursal_id: normalizedSucursalId },
+    { desde, hasta, sucursal_id: normalizedSucursalId },
+  ];
+
+  if (normalizedSucursalId === null) {
+    variants.push({ p_desde: desde, p_hasta: hasta }, { desde, hasta });
+  }
+
+  let lastError: unknown = null;
+  for (let index = 0; index < variants.length; index += 1) {
+    const params = normalizeParams(variants[index]);
+    const { data, error } = await supabase.rpc<T>(
+      'rpc_ui_series_14d',
+      params as Record<string, unknown>,
+    );
+    if (!error) {
+      if (index > 0) {
+        console.warn('[ventas] rpc_ui_series_14d fallback variant', params);
+      }
+      return data ?? null;
+    }
+    lastError = error;
+  }
+
+  if (lastError) {
+    throw lastError;
+  }
+
+  return null;
+}
+
 /* ──────────────────────────────────────────────────────────
    Tipos que devuelve cada variante de RPC
    - Todas:   rpc_ui_series_14d(desde, hasta)
@@ -113,14 +161,12 @@ export default function VentasPage() {
     setLoading(true);
     try {
       const sucursalParam = normalizeSucursalId(selectedSucursalId);
-      const { data, error } = await supabase.rpc('rpc_ui_series_14d', {
-        p_desde: desde,
-        p_hasta: hasta,
-        p_sucursal_id: sucursalParam,
-      });
-      if (error) throw error;
-
-      const rowsRaw: Array<SerieAllRow | SerieOneRow | Record<string, unknown>> = data ?? [];
+      const rowsRaw: Array<SerieAllRow | SerieOneRow | Record<string, unknown>> =
+        (await callVentasRpc<Array<SerieAllRow | SerieOneRow | Record<string, unknown>>>(
+          desde,
+          hasta,
+          selectedSucursalId,
+        )) ?? [];
 
       const extractDia = (row: any) => String(row.d ?? row.dia ?? row.fecha ?? hoy);
       const extractVentas = (row: any) => Number(row.ventas_netas ?? row.ventas ?? 0);
