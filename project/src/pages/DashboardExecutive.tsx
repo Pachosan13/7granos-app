@@ -91,6 +91,73 @@ interface PlanillaRowPayload {
 type RpcParamValue = string | number | boolean | null | undefined;
 type RpcParams = Record<string, RpcParamValue>;
 
+const ISO_DATE_PATTERN = /^(\d{4})-(\d{2})-(\d{2})$/;
+
+function normalizeSucursalParam(value: string | number | null | undefined): string | null {
+  if (value === null || value === undefined) {
+    return null;
+  }
+  const normalized = String(value).trim();
+  if (!normalized) {
+    return null;
+  }
+  const lower = normalized.toLowerCase();
+  if (lower === 'all' || lower === 'todas' || lower === 'toda' || lower === 'tod@s') {
+    return null;
+  }
+  return normalized;
+}
+
+function safeDateFromInput(value: string | null | undefined): Date | null {
+  if (!value) {
+    return null;
+  }
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return null;
+  }
+  if (ISO_DATE_PATTERN.test(trimmed)) {
+    const match = ISO_DATE_PATTERN.exec(trimmed);
+    if (match) {
+      const [, year, month, day] = match;
+      const parsed = new Date(Number(year), Number(month) - 1, Number(day));
+      return Number.isNaN(parsed.getTime()) ? null : parsed;
+    }
+  }
+  const parsed = new Date(trimmed);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+function normalizeRange(range: { desde?: string | null; hasta?: string | null }): { desde: string; hasta: string } {
+  const fallback = sevenDayWindow(true);
+  const startDate = safeDateFromInput(range.desde) ?? new Date(`${fallback.desde}T00:00:00`);
+  const endDate = safeDateFromInput(range.hasta) ?? new Date(`${fallback.hasta}T00:00:00`);
+  if (endDate.getTime() < startDate.getTime()) {
+    return fallback;
+  }
+  return { desde: fmt(startDate), hasta: fmt(endDate) };
+}
+
+function sanitizeBranchKey(value: string | number | null | undefined): string {
+  const raw = value === null || value === undefined ? '' : String(value).trim();
+  if (!raw) {
+    return 'desconocida';
+  }
+  const lower = raw.toLowerCase();
+  if (['sin-id', 'sinid', 'null', 'undefined'].includes(lower)) {
+    return 'desconocida';
+  }
+  return raw;
+}
+
+function sanitizeBranchName(value: string | null | undefined): string {
+  const trimmed = value?.trim();
+  if (!trimmed) {
+    return 'Sin sucursal';
+  }
+  return trimmed;
+}
+
 function toNumber(value: NullableNumber): number {
   if (typeof value === 'number') {
     return Number.isFinite(value) ? value : 0;
@@ -258,23 +325,25 @@ function buildDemoData(): {
 }
 
 async function fetchSummary(desde: string, hasta: string, sucursalId: string | null): Promise<Summary7d | null> {
+  const normalizedRange = normalizeRange({ desde, hasta });
+  const normalizedSucursal = normalizeSucursalParam(sucursalId);
+
   const payload =
     (await rpcWithFallback<SummaryRowPayload[]>(
       'api_dashboard_summary_7d',
       [
-        { p_desde: desde, p_hasta: hasta, p_sucursal_id: sucursalId },
-        { desde, hasta, p_sucursal_id: sucursalId },
-        { desde, hasta, sucursal_id: sucursalId },
-        { desde, hasta },
+        { p_desde: normalizedRange.desde, p_hasta: normalizedRange.hasta, p_sucursal_id: normalizedSucursal },
+        { desde: normalizedRange.desde, hasta: normalizedRange.hasta, p_sucursal_id: normalizedSucursal },
+        { desde: normalizedRange.desde, hasta: normalizedRange.hasta, sucursal_id: normalizedSucursal },
+        { desde: normalizedRange.desde, hasta: normalizedRange.hasta },
       ]
     )) ?? [];
 
-  const row = payload[0];
-  if (!row) {
+  if (!payload.length) {
     return null;
   }
 
-  return {
+  const normalizedRows = payload.map((row) => ({
     ventas_netas: toNumber(row.ventas_netas),
     cogs: toNumber(row.cogs),
     gastos: toNumber(row.gastos),
@@ -283,68 +352,154 @@ async function fetchSummary(desde: string, hasta: string, sucursalId: string | n
     ticket_promedio: toNumber(row.ticket_promedio),
     margen_bruto_pct: toNumber(row.margen_bruto_pct),
     ventas_vs_semana_ant_pct: toNullableNumber(row.ventas_vs_semana_ant_pct),
-  };
+  }));
+
+  if (normalizedSucursal === null && normalizedRows.length > 1) {
+    const totals = normalizedRows.reduce(
+      (acc, row) => {
+        acc.ventas_netas += row.ventas_netas;
+        acc.cogs += row.cogs;
+        acc.gastos += row.gastos;
+        acc.utilidad += row.utilidad;
+        acc.tx += row.tx;
+        if (row.ventas_vs_semana_ant_pct !== null) {
+          acc.ventasVs.push(row.ventas_vs_semana_ant_pct);
+        }
+        return acc;
+      },
+      { ventas_netas: 0, cogs: 0, gastos: 0, utilidad: 0, tx: 0, ventasVs: [] as number[] }
+    );
+
+    const ticketPromedio = totals.tx > 0 ? totals.ventas_netas / totals.tx : 0;
+    const margenBrutoPct = totals.ventas_netas > 0 ? (totals.ventas_netas - totals.cogs) / totals.ventas_netas : 0;
+    const ventasVs = totals.ventasVs.length
+      ? totals.ventasVs.reduce((acc, value) => acc + value, 0) / totals.ventasVs.length
+      : null;
+
+    return {
+      ventas_netas: totals.ventas_netas,
+      cogs: totals.cogs,
+      gastos: totals.gastos,
+      utilidad: totals.utilidad,
+      tx: totals.tx,
+      ticket_promedio: ticketPromedio,
+      margen_bruto_pct: margenBrutoPct,
+      ventas_vs_semana_ant_pct: ventasVs,
+    };
+  }
+
+  const first = normalizedRows[0];
+  return first;
 }
 
 async function fetchSeries(desde: string, hasta: string, sucursalId: string | null): Promise<SeriesPoint[]> {
+  const normalizedRange = normalizeRange({ desde, hasta });
+  const normalizedSucursal = normalizeSucursalParam(sucursalId);
+
   const payload =
     (await rpcWithFallback<SeriesRowPayload[]>(
       'rpc_ui_series_14d',
       [
-        { p_desde: desde, p_hasta: hasta, p_sucursal_id: sucursalId },
-        { desde, hasta, p_sucursal_id: sucursalId },
-        { desde, hasta, sucursal_id: sucursalId },
-        { desde, hasta },
+        { p_desde: normalizedRange.desde, p_hasta: normalizedRange.hasta, p_sucursal_id: normalizedSucursal },
+        { desde: normalizedRange.desde, hasta: normalizedRange.hasta, p_sucursal_id: normalizedSucursal },
+        { desde: normalizedRange.desde, hasta: normalizedRange.hasta, sucursal_id: normalizedSucursal },
+        { desde: normalizedRange.desde, hasta: normalizedRange.hasta },
       ]
     )) ?? [];
 
-  return payload
+  const mapped = payload
     .map<SeriesPoint | null>((row) => {
       const dateValue = row.d ?? row.dia ?? null;
-      if (!dateValue) {
+      const parsedDate = safeDateFromInput(dateValue ?? undefined);
+      if (!parsedDate) {
         return null;
       }
       return {
-        d: dateValue,
+        d: fmt(parsedDate),
         ventas_netas: toNumber(row.ventas_netas ?? row.ventas),
         itbms: toNullableNumber(row.itbms),
         tx: toNumber(row.tx ?? row.transacciones),
       };
     })
     .filter((row): row is SeriesPoint => Boolean(row));
+
+  const merged = new Map<string, SeriesPoint>();
+  mapped.forEach((point) => {
+    const existing = merged.get(point.d) ?? { ...point, ventas_netas: 0, tx: 0 };
+    existing.ventas_netas += point.ventas_netas;
+    existing.tx += point.tx;
+    existing.itbms = (existing.itbms ?? 0) + (point.itbms ?? 0);
+    merged.set(point.d, existing);
+  });
+
+  return Array.from(merged.values()).sort((a, b) => a.d.localeCompare(b.d));
 }
 
-async function fetchRanking(desde: string, hasta: string): Promise<LeaderboardRow[]> {
+async function fetchRanking(desde: string, hasta: string, sucursalId: string | null): Promise<LeaderboardRow[]> {
+  const normalizedRange = normalizeRange({ desde, hasta });
+  const normalizedSucursal = normalizeSucursalParam(sucursalId);
+
   const payload =
     (await rpcWithFallback<RankingRowPayload[]>(
       'api_dashboard_ranking_7d',
       [
-        { p_desde: desde, p_hasta: hasta },
-        { desde, hasta },
+        { p_desde: normalizedRange.desde, p_hasta: normalizedRange.hasta, p_sucursal_id: normalizedSucursal },
+        { desde: normalizedRange.desde, hasta: normalizedRange.hasta, p_sucursal_id: normalizedSucursal },
+        { desde: normalizedRange.desde, hasta: normalizedRange.hasta },
       ]
     )) ?? [];
 
-  return payload.map((row) => ({
-    sucursal_id: String(row.sucursal_id ?? 'sin-id'),
-    sucursal_nombre: row.sucursal_nombre ?? undefined,
-    ventas: toNumber(row.ventas),
-    cogs: toNumber(row.cogs),
-    gastos: toNumber(row.gastos),
-    utilidad: toNumber(row.utilidad),
-    margen_pct: toNumber(row.margen_pct),
-  }));
+  const aggregated = new Map<string, LeaderboardRow>();
+
+  payload.forEach((row) => {
+    const key = sanitizeBranchKey(row.sucursal_id ?? row.sucursal_nombre ?? null);
+    const nombre = sanitizeBranchName(row.sucursal_nombre);
+    const ventas = toNumber(row.ventas);
+    const cogs = toNumber(row.cogs);
+    const gastos = toNumber(row.gastos);
+    const utilidad = toNumber(row.utilidad);
+
+    const existing = aggregated.get(key) ?? {
+      sucursal_id: key,
+      sucursal_nombre: nombre,
+      ventas: 0,
+      cogs: 0,
+      gastos: 0,
+      utilidad: 0,
+      margen_pct: 0,
+    };
+
+    existing.ventas += ventas;
+    existing.cogs += cogs;
+    existing.gastos += gastos;
+    existing.utilidad += utilidad;
+    if (!existing.sucursal_nombre || existing.sucursal_nombre === 'Sin sucursal') {
+      existing.sucursal_nombre = nombre;
+    }
+
+    aggregated.set(key, existing);
+  });
+
+  return Array.from(aggregated.values())
+    .map((row) => ({
+      ...row,
+      margen_pct: row.ventas > 0 ? (row.ventas - row.cogs) / row.ventas : 0,
+    }))
+    .sort((a, b) => b.ventas - a.ventas);
 }
 
 async function fetchTopProducts(desde: string, hasta: string, sucursalId: string | null): Promise<TopProductItem[]> {
   try {
+    const normalizedRange = normalizeRange({ desde, hasta });
+    const normalizedSucursal = normalizeSucursalParam(sucursalId);
     const payload =
       (await rpcWithFallback<TopProductRowPayload[]>(
         'api_dashboard_top_productos_7d',
         [
-          { p_desde: desde, p_hasta: hasta, p_sucursal_id: sucursalId },
-          { desde, hasta, p_sucursal_id: sucursalId },
-          { desde, hasta, sucursal_id: sucursalId },
-          { desde, hasta },
+          { p_desde: normalizedRange.desde, p_hasta: normalizedRange.hasta, p_sucursal_id: normalizedSucursal },
+          { desde: normalizedRange.desde, hasta: normalizedRange.hasta, p_sucursal_id: normalizedSucursal },
+          { desde: normalizedRange.desde, hasta: normalizedRange.hasta, sucursal_id: normalizedSucursal },
+          { desde: normalizedRange.desde, hasta: normalizedRange.hasta },
         ]
       )) ?? [];
 
@@ -361,22 +516,36 @@ async function fetchTopProducts(desde: string, hasta: string, sucursalId: string
 
 async function fetchHeatmap(desde: string, hasta: string, sucursalId: string | null): Promise<HeatmapPoint[]> {
   try {
+    const normalizedRange = normalizeRange({ desde, hasta });
+    const normalizedSucursal = normalizeSucursalParam(sucursalId);
     const payload =
       (await rpcWithFallback<HeatmapRowPayload[]>(
         'api_dashboard_heatmap_hora_7d',
         [
-          { p_desde: desde, p_hasta: hasta, p_sucursal_id: sucursalId },
-          { desde, hasta, p_sucursal_id: sucursalId },
-          { desde, hasta, sucursal_id: sucursalId },
-          { desde, hasta },
+          { p_desde: normalizedRange.desde, p_hasta: normalizedRange.hasta, p_sucursal_id: normalizedSucursal },
+          { desde: normalizedRange.desde, hasta: normalizedRange.hasta, p_sucursal_id: normalizedSucursal },
+          { desde: normalizedRange.desde, hasta: normalizedRange.hasta, sucursal_id: normalizedSucursal },
+          { desde: normalizedRange.desde, hasta: normalizedRange.hasta },
         ]
       )) ?? [];
 
-    return payload.map((row) => ({
-      hora: toNumber(row.hora),
-      ventas: toNumber(row.ventas),
-      tx: toNumber(row.tx),
-    }));
+    const byHour = new Map<number, HeatmapPoint>();
+
+    payload.forEach((row) => {
+      const hour = Math.round(toNumber(row.hora));
+      if (!Number.isFinite(hour)) {
+        return;
+      }
+      const clampedHour = Math.min(23, Math.max(0, hour));
+      const ventas = toNumber(row.ventas);
+      const tx = toNumber(row.tx);
+      const existing = byHour.get(clampedHour) ?? { hora: clampedHour, ventas: 0, tx: 0 };
+      existing.ventas += ventas;
+      existing.tx += tx;
+      byHour.set(clampedHour, existing);
+    });
+
+    return Array.from(byHour.values()).sort((a, b) => a.hora - b.hora);
   } catch (err) {
     console.warn('[dashboard] api_dashboard_heatmap_hora_7d no disponible', err);
     return [];
@@ -385,14 +554,16 @@ async function fetchHeatmap(desde: string, hasta: string, sucursalId: string | n
 
 async function fetchAlerts(desde: string, hasta: string, sucursalId: string | null): Promise<AlertItem[]> {
   try {
+    const normalizedRange = normalizeRange({ desde, hasta });
+    const normalizedSucursal = normalizeSucursalParam(sucursalId);
     const payload =
       (await rpcWithFallback<AlertRowPayload[]>(
         'api_dashboard_alertas_7d',
         [
-          { p_desde: desde, p_hasta: hasta, p_sucursal_id: sucursalId },
-          { desde, hasta, p_sucursal_id: sucursalId },
-          { desde, hasta, sucursal_id: sucursalId },
-          { desde, hasta },
+          { p_desde: normalizedRange.desde, p_hasta: normalizedRange.hasta, p_sucursal_id: normalizedSucursal },
+          { desde: normalizedRange.desde, hasta: normalizedRange.hasta, p_sucursal_id: normalizedSucursal },
+          { desde: normalizedRange.desde, hasta: normalizedRange.hasta, sucursal_id: normalizedSucursal },
+          { desde: normalizedRange.desde, hasta: normalizedRange.hasta },
         ]
       )) ?? [];
 
@@ -409,14 +580,16 @@ async function fetchAlerts(desde: string, hasta: string, sucursalId: string | nu
 
 async function fetchPlanillaSnapshot(desde: string, hasta: string, sucursalId: string | null): Promise<PlanillaSnapshot | null> {
   try {
+    const normalizedRange = normalizeRange({ desde, hasta });
+    const normalizedSucursal = normalizeSucursalParam(sucursalId);
     const payload =
       (await rpcWithFallback<PlanillaRowPayload[]>(
         'api_dashboard_planilla_snapshot',
         [
-          { p_desde: desde, p_hasta: hasta, p_sucursal_id: sucursalId },
-          { desde, hasta, p_sucursal_id: sucursalId },
-          { desde, hasta, sucursal_id: sucursalId },
-          { desde, hasta },
+          { p_desde: normalizedRange.desde, p_hasta: normalizedRange.hasta, p_sucursal_id: normalizedSucursal },
+          { desde: normalizedRange.desde, hasta: normalizedRange.hasta, p_sucursal_id: normalizedSucursal },
+          { desde: normalizedRange.desde, hasta: normalizedRange.hasta, sucursal_id: normalizedSucursal },
+          { desde: normalizedRange.desde, hasta: normalizedRange.hasta },
         ]
       )) ?? [];
 
@@ -467,7 +640,7 @@ export default function DashboardExecutive() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [usedFallback, setUsedFallback] = useState(false);
-  const [range, setRange] = useState(() => sevenDayWindow(true));
+  const [range, setRange] = useState(() => normalizeRange(sevenDayWindow(true)));
 
   const selectedSucursalId = sucursalSeleccionada?.id ?? null;
 
@@ -491,32 +664,42 @@ export default function DashboardExecutive() {
     setLoading(true);
     setError(null);
     try {
-      const primaryRange = sevenDayWindow(true);
-      const chartDesde = addDays(primaryRange.desde, -7);
-      const initialSeries = await fetchSeries(chartDesde, primaryRange.hasta, selectedSucursalId);
+      const normalizedSucursal = normalizeSucursalParam(selectedSucursalId);
+      const primaryRange = normalizeRange(sevenDayWindow(true));
+      const chartRange = normalizeRange({
+        desde: addDays(primaryRange.desde, -7),
+        hasta: primaryRange.hasta,
+      });
+
+      const initialSeries = await fetchSeries(chartRange.desde, chartRange.hasta, normalizedSucursal);
       let effectiveRange = primaryRange;
       let seriesData = initialSeries;
       let fallback = false;
 
       const lastPoint = initialSeries.at(-1);
-      const hasTodayData = lastPoint && lastPoint.d === primaryRange.hasta && (lastPoint.ventas_netas > 0 || lastPoint.tx > 0);
+      const hasTodayData =
+        lastPoint &&
+        lastPoint.d === primaryRange.hasta &&
+        (Number(lastPoint.ventas_netas) > 0 || Number(lastPoint.tx) > 0);
+
       if (!hasTodayData) {
-        const altRange = sevenDayWindow(false);
-        const altChartDesde = addDays(altRange.desde, -7);
-        seriesData = await fetchSeries(altChartDesde, altRange.hasta, selectedSucursalId);
+        const altRange = normalizeRange(sevenDayWindow(false));
+        const altChartRange = normalizeRange({
+          desde: addDays(altRange.desde, -7),
+          hasta: altRange.hasta,
+        });
+        seriesData = await fetchSeries(altChartRange.desde, altChartRange.hasta, normalizedSucursal);
         effectiveRange = altRange;
         fallback = true;
-      } else {
-        // keep chartDesde for context although no badge displayed
       }
 
       const [summaryData, rankingData, topData, heatmapData, alertData, planillaData] = await Promise.all([
-        fetchSummary(effectiveRange.desde, effectiveRange.hasta, selectedSucursalId),
-        fetchRanking(effectiveRange.desde, effectiveRange.hasta),
-        fetchTopProducts(effectiveRange.desde, effectiveRange.hasta, selectedSucursalId),
-        fetchHeatmap(effectiveRange.desde, effectiveRange.hasta, selectedSucursalId),
-        fetchAlerts(effectiveRange.desde, effectiveRange.hasta, selectedSucursalId),
-        fetchPlanillaSnapshot(effectiveRange.desde, effectiveRange.hasta, selectedSucursalId),
+        fetchSummary(effectiveRange.desde, effectiveRange.hasta, normalizedSucursal),
+        fetchRanking(effectiveRange.desde, effectiveRange.hasta, normalizedSucursal),
+        fetchTopProducts(effectiveRange.desde, effectiveRange.hasta, normalizedSucursal),
+        fetchHeatmap(effectiveRange.desde, effectiveRange.hasta, normalizedSucursal),
+        fetchAlerts(effectiveRange.desde, effectiveRange.hasta, normalizedSucursal),
+        fetchPlanillaSnapshot(effectiveRange.desde, effectiveRange.hasta, normalizedSucursal),
       ]);
 
       setSummary(summaryData);
