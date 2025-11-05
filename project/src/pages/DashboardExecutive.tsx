@@ -116,13 +116,54 @@ function normalizeParams(params: RpcParams): Record<string, RpcParamValue> {
   ) as Record<string, RpcParamValue>;
 }
 
-async function callDashboardRpc<T>(fn: string, params: RpcParams): Promise<T | null> {
-  const normalizedParams = normalizeParams(params);
-  const response = await supabase.rpc<T>(fn, normalizedParams as Record<string, unknown>);
-  if (response.error) {
-    throw response.error;
+async function callDashboardRpc<T>(fn: string, variants: RpcParams[]): Promise<T | null> {
+  let lastError: unknown = null;
+  for (let index = 0; index < variants.length; index += 1) {
+    const params = normalizeParams(variants[index]);
+    const response = await supabase.rpc<T>(fn, params as Record<string, unknown>);
+    if (!response.error) {
+      if (index > 0) {
+        console.warn(`[dashboard] ${fn} ejecutado con firma alternativa #${index + 1}`, params);
+      }
+      return response.data ?? null;
+    }
+    lastError = response.error;
   }
-  return response.data ?? null;
+  if (lastError) {
+    throw lastError;
+  }
+  return null;
+}
+
+interface RpcVariantOptions {
+  includeLegacyParams?: boolean;
+  allowOmittingSucursal?: boolean;
+}
+
+function buildRpcVariants(
+  desde: string,
+  hasta: string,
+  sucursalId: string | null,
+  options: RpcVariantOptions = {}
+): RpcParams[] {
+  const { includeLegacyParams = true, allowOmittingSucursal = true } = options;
+  const normalizedSucursalId = normalizeSucursalId(sucursalId);
+  const variants: RpcParams[] = [
+    { p_desde: desde, p_hasta: hasta, p_sucursal_id: normalizedSucursalId },
+  ];
+
+  if (includeLegacyParams) {
+    variants.push(
+      { desde, hasta, p_sucursal_id: normalizedSucursalId },
+      { desde, hasta, sucursal_id: normalizedSucursalId }
+    );
+  }
+
+  if (allowOmittingSucursal) {
+    variants.push({ p_desde: desde, p_hasta: hasta }, { desde, hasta });
+  }
+
+  return variants;
 }
 
 interface PlanillaSnapshot {
@@ -251,15 +292,11 @@ function buildDemoData(): {
 }
 
 async function fetchSummary(desde: string, hasta: string, sucursalId: string | null): Promise<Summary7d | null> {
-  const sucursalParam = normalizeSucursalId(sucursalId);
+  const variants = buildRpcVariants(desde, hasta, sucursalId);
   const payload =
     (await callDashboardRpc<SummaryRowPayload[]>(
       'api_dashboard_summary_7d',
-      {
-        p_desde: desde,
-        p_hasta: hasta,
-        p_sucursal_id: sucursalParam,
-      }
+      variants
     )) ?? [];
 
   const row = payload[0];
@@ -280,15 +317,11 @@ async function fetchSummary(desde: string, hasta: string, sucursalId: string | n
 }
 
 async function fetchSeries(desde: string, hasta: string, sucursalId: string | null): Promise<SeriesPoint[]> {
-  const sucursalParam = normalizeSucursalId(sucursalId);
+  const variants = buildRpcVariants(desde, hasta, sucursalId);
   const payload =
     (await callDashboardRpc<SeriesRowPayload[]>(
       'rpc_ui_series_14d',
-      {
-        p_desde: desde,
-        p_hasta: hasta,
-        p_sucursal_id: sucursalParam,
-      }
+      variants
     )) ?? [];
 
   return payload
@@ -308,15 +341,14 @@ async function fetchSeries(desde: string, hasta: string, sucursalId: string | nu
 }
 
 async function fetchRanking(desde: string, hasta: string, sucursalId: string | null): Promise<LeaderboardRow[]> {
-  const sucursalParam = normalizeSucursalId(sucursalId);
+  const variants = buildRpcVariants(desde, hasta, sucursalId, {
+    includeLegacyParams: true,
+    allowOmittingSucursal: true,
+  });
   const payload =
     (await callDashboardRpc<RankingRowPayload[]>(
       'api_dashboard_ranking_7d',
-      {
-        p_desde: desde,
-        p_hasta: hasta,
-        p_sucursal_id: sucursalParam,
-      }
+      variants
     )) ?? [];
 
   return payload.map((row) => ({
@@ -332,15 +364,11 @@ async function fetchRanking(desde: string, hasta: string, sucursalId: string | n
 
 async function fetchTopProducts(desde: string, hasta: string, sucursalId: string | null): Promise<TopProductItem[]> {
   try {
-    const sucursalParam = normalizeSucursalId(sucursalId);
+    const variants = buildRpcVariants(desde, hasta, sucursalId);
     const payload =
       (await callDashboardRpc<TopProductRowPayload[]>(
         'api_dashboard_top_productos_7d',
-        {
-          p_desde: desde,
-          p_hasta: hasta,
-          p_sucursal_id: sucursalParam,
-        }
+        variants
       )) ?? [];
 
     return payload.map((row) => ({
@@ -356,15 +384,11 @@ async function fetchTopProducts(desde: string, hasta: string, sucursalId: string
 
 async function fetchHeatmap(desde: string, hasta: string, sucursalId: string | null): Promise<HeatmapPoint[]> {
   try {
-    const sucursalParam = normalizeSucursalId(sucursalId);
+    const variants = buildRpcVariants(desde, hasta, sucursalId);
     const payload =
       (await callDashboardRpc<HeatmapRowPayload[]>(
         'api_dashboard_heatmap_hora_7d',
-        {
-          p_desde: desde,
-          p_hasta: hasta,
-          p_sucursal_id: sucursalParam,
-        }
+        variants
       )) ?? [];
 
     return payload.map((row) => ({
@@ -380,15 +404,11 @@ async function fetchHeatmap(desde: string, hasta: string, sucursalId: string | n
 
 async function fetchAlerts(desde: string, hasta: string, sucursalId: string | null): Promise<AlertItem[]> {
   try {
-    const sucursalParam = normalizeSucursalId(sucursalId);
+    const variants = buildRpcVariants(desde, hasta, sucursalId);
     const payload =
       (await callDashboardRpc<AlertRowPayload[]>(
         'api_dashboard_alertas_7d',
-        {
-          p_desde: desde,
-          p_hasta: hasta,
-          p_sucursal_id: sucursalParam,
-        }
+        variants
       )) ?? [];
 
     return payload.map((row) => ({
@@ -404,15 +424,11 @@ async function fetchAlerts(desde: string, hasta: string, sucursalId: string | nu
 
 async function fetchPlanillaSnapshot(desde: string, hasta: string, sucursalId: string | null): Promise<PlanillaSnapshot | null> {
   try {
-    const sucursalParam = normalizeSucursalId(sucursalId);
+    const variants = buildRpcVariants(desde, hasta, sucursalId);
     const payload =
       (await callDashboardRpc<PlanillaRowPayload[]>(
         'api_dashboard_planilla_snapshot',
-        {
-          p_desde: desde,
-          p_hasta: hasta,
-          p_sucursal_id: sucursalParam,
-        }
+        variants
       )) ?? [];
 
     const row = payload[0];
