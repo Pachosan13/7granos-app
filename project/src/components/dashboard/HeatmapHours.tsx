@@ -42,25 +42,31 @@ export function HeatmapHours({ data }: HeatmapHoursProps) {
         <h3 className="text-base font-semibold text-slate-900 dark:text-white">Heatmap por hora</h3>
         <p className="text-sm text-slate-500 dark:text-slate-400">Identifica los picos de ventas durante el día.</p>
       </div>
-      <div className="grid grid-cols-6 gap-3 sm:grid-cols-8">
-        {hours.map((hour) => {
-          const info = lookup.get(hour);
-          const ventas = Number(info?.ventas ?? 0);
-          return (
-            <div
-              key={hour}
-              className="flex flex-col items-center justify-center rounded-xl border border-slate-100 p-3 text-center text-xs font-medium text-slate-600 transition hover:scale-105 dark:border-slate-800 dark:text-slate-300"
-              style={{ background: intensity(ventas, maxVentas) }}
-            >
-              <span className="text-[10px] uppercase tracking-wide text-slate-500 dark:text-slate-400">{hour}:00</span>
-              <span className="mt-1 text-sm font-semibold text-slate-900 dark:text-white">
-                {ventas.toLocaleString('es-PA', { maximumFractionDigits: 0 })}
-              </span>
-              <span className="text-[11px] text-slate-500 dark:text-slate-400">TX: {info?.tx ?? 0}</span>
-            </div>
-          );
-        })}
-      </div>
+      {data.length ? (
+        <div className="grid grid-cols-6 gap-3 sm:grid-cols-8">
+          {hours.map((hour) => {
+            const info = lookup.get(hour);
+            const ventas = Number(info?.ventas ?? 0);
+            return (
+              <div
+                key={hour}
+                className="flex flex-col items-center justify-center rounded-xl border border-slate-100 p-3 text-center text-xs font-medium text-slate-600 transition hover:scale-105 dark:border-slate-800 dark:text-slate-300"
+                style={{ background: intensity(ventas, maxVentas) }}
+              >
+                <span className="text-[10px] uppercase tracking-wide text-slate-500 dark:text-slate-400">{hour}:00</span>
+                <span className="mt-1 text-sm font-semibold text-slate-900 dark:text-white">
+                  {ventas.toLocaleString('es-PA', { maximumFractionDigits: 0 })}
+                </span>
+                <span className="text-[11px] text-slate-500 dark:text-slate-400">TX: {info?.tx ?? 0}</span>
+              </div>
+            );
+          })}
+        </div>
+      ) : (
+        <div className="flex h-32 items-center justify-center rounded-xl border border-dashed border-slate-200 bg-slate-50 text-sm text-slate-500 dark:border-slate-800 dark:bg-slate-900/40 dark:text-slate-400">
+          No hay ventas en el rango seleccionado.
+        </div>
+      )}
     </div>
   );
 }
