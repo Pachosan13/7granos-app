@@ -45,26 +45,49 @@ async function callVentasRpc<T>(
   }
 
   let lastError: unknown = null;
+  let lastSuccessfulData: T | null = null;
   for (let index = 0; index < variants.length; index += 1) {
     const params = normalizeParams(variants[index]);
     const { data, error } = await supabase.rpc<T>(
       'rpc_ui_series_14d',
       params as Record<string, unknown>,
     );
+
     if (!error) {
+      const arrayData = Array.isArray(data) ? data : null;
+      const isEmptyArray = arrayData !== null && arrayData.length === 0;
+      const shouldRetryForAllBranches =
+        normalizedSucursalId === null &&
+        index < variants.length - 1 &&
+        (data == null || isEmptyArray);
+
+      if (shouldRetryForAllBranches) {
+        if (index === 0) {
+          console.warn(
+            '[ventas] rpc_ui_series_14d devolvió vacío para firma principal; reintentando variantes legadas',
+            params,
+          );
+        }
+        continue;
+      }
+
       if (index > 0) {
         console.warn('[ventas] rpc_ui_series_14d fallback variant', params);
       }
-      return data ?? null;
+
+      lastSuccessfulData = (data ?? null) as T | null;
+      lastError = null;
+      break;
     }
+
     lastError = error;
   }
 
-  if (lastError) {
+  if (lastError && lastSuccessfulData === null) {
     throw lastError;
   }
 
-  return null;
+  return lastSuccessfulData;
 }
 
 /* ──────────────────────────────────────────────────────────
