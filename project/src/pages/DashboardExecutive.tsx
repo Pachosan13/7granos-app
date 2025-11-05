@@ -1,5 +1,4 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import type { PostgrestError } from '@supabase/supabase-js';
 import { CalendarDays, Clock, RefreshCw, Store } from 'lucide-react';
 import { supabase, shouldUseDemoMode } from '../lib/supabase';
 import { formatCurrencyUSD } from '../lib/format';
@@ -10,6 +9,7 @@ import Leaderboard, { LeaderboardRow } from '../components/dashboard/Leaderboard
 import DonutTop5, { TopProductItem } from '../components/dashboard/DonutTop5';
 import HeatmapHours, { HeatmapPoint } from '../components/dashboard/HeatmapHours';
 import AlertPill from '../components/dashboard/AlertPill';
+import { normalizeSucursalId } from './utils/sucursal';
 
 interface Summary7d {
   ventas_netas: number;
@@ -116,20 +116,13 @@ function normalizeParams(params: RpcParams): Record<string, RpcParamValue> {
   ) as Record<string, RpcParamValue>;
 }
 
-async function rpcWithFallback<T>(fn: string, variants: RpcParams[]): Promise<T | null> {
-  let lastError: PostgrestError | Error | null = null;
-  for (let index = 0; index < variants.length; index += 1) {
-    const params = normalizeParams(variants[index]);
-    const response = await supabase.rpc<T>(fn, params as Record<string, unknown>);
-    if (!response.error) {
-      if (index > 0) {
-        console.warn(`[dashboard] ${fn} ejecutado con firma alternativa #${index + 1}`, params);
-      }
-      return response.data ?? null;
-    }
-    lastError = response.error;
+async function callDashboardRpc<T>(fn: string, params: RpcParams): Promise<T | null> {
+  const normalizedParams = normalizeParams(params);
+  const response = await supabase.rpc<T>(fn, normalizedParams as Record<string, unknown>);
+  if (response.error) {
+    throw response.error;
   }
-  throw lastError ?? new Error(`No se pudo ejecutar ${fn}`);
+  return response.data ?? null;
 }
 
 interface PlanillaSnapshot {
@@ -258,15 +251,15 @@ function buildDemoData(): {
 }
 
 async function fetchSummary(desde: string, hasta: string, sucursalId: string | null): Promise<Summary7d | null> {
+  const sucursalParam = normalizeSucursalId(sucursalId);
   const payload =
-    (await rpcWithFallback<SummaryRowPayload[]>(
+    (await callDashboardRpc<SummaryRowPayload[]>(
       'api_dashboard_summary_7d',
-      [
-        { p_desde: desde, p_hasta: hasta, p_sucursal_id: sucursalId },
-        { desde, hasta, p_sucursal_id: sucursalId },
-        { desde, hasta, sucursal_id: sucursalId },
-        { desde, hasta },
-      ]
+      {
+        p_desde: desde,
+        p_hasta: hasta,
+        p_sucursal_id: sucursalParam,
+      }
     )) ?? [];
 
   const row = payload[0];
@@ -287,15 +280,15 @@ async function fetchSummary(desde: string, hasta: string, sucursalId: string | n
 }
 
 async function fetchSeries(desde: string, hasta: string, sucursalId: string | null): Promise<SeriesPoint[]> {
+  const sucursalParam = normalizeSucursalId(sucursalId);
   const payload =
-    (await rpcWithFallback<SeriesRowPayload[]>(
+    (await callDashboardRpc<SeriesRowPayload[]>(
       'rpc_ui_series_14d',
-      [
-        { p_desde: desde, p_hasta: hasta, p_sucursal_id: sucursalId },
-        { desde, hasta, p_sucursal_id: sucursalId },
-        { desde, hasta, sucursal_id: sucursalId },
-        { desde, hasta },
-      ]
+      {
+        p_desde: desde,
+        p_hasta: hasta,
+        p_sucursal_id: sucursalParam,
+      }
     )) ?? [];
 
   return payload
@@ -314,14 +307,16 @@ async function fetchSeries(desde: string, hasta: string, sucursalId: string | nu
     .filter((row): row is SeriesPoint => Boolean(row));
 }
 
-async function fetchRanking(desde: string, hasta: string): Promise<LeaderboardRow[]> {
+async function fetchRanking(desde: string, hasta: string, sucursalId: string | null): Promise<LeaderboardRow[]> {
+  const sucursalParam = normalizeSucursalId(sucursalId);
   const payload =
-    (await rpcWithFallback<RankingRowPayload[]>(
+    (await callDashboardRpc<RankingRowPayload[]>(
       'api_dashboard_ranking_7d',
-      [
-        { p_desde: desde, p_hasta: hasta },
-        { desde, hasta },
-      ]
+      {
+        p_desde: desde,
+        p_hasta: hasta,
+        p_sucursal_id: sucursalParam,
+      }
     )) ?? [];
 
   return payload.map((row) => ({
@@ -337,15 +332,15 @@ async function fetchRanking(desde: string, hasta: string): Promise<LeaderboardRo
 
 async function fetchTopProducts(desde: string, hasta: string, sucursalId: string | null): Promise<TopProductItem[]> {
   try {
+    const sucursalParam = normalizeSucursalId(sucursalId);
     const payload =
-      (await rpcWithFallback<TopProductRowPayload[]>(
+      (await callDashboardRpc<TopProductRowPayload[]>(
         'api_dashboard_top_productos_7d',
-        [
-          { p_desde: desde, p_hasta: hasta, p_sucursal_id: sucursalId },
-          { desde, hasta, p_sucursal_id: sucursalId },
-          { desde, hasta, sucursal_id: sucursalId },
-          { desde, hasta },
-        ]
+        {
+          p_desde: desde,
+          p_hasta: hasta,
+          p_sucursal_id: sucursalParam,
+        }
       )) ?? [];
 
     return payload.map((row) => ({
@@ -361,15 +356,15 @@ async function fetchTopProducts(desde: string, hasta: string, sucursalId: string
 
 async function fetchHeatmap(desde: string, hasta: string, sucursalId: string | null): Promise<HeatmapPoint[]> {
   try {
+    const sucursalParam = normalizeSucursalId(sucursalId);
     const payload =
-      (await rpcWithFallback<HeatmapRowPayload[]>(
+      (await callDashboardRpc<HeatmapRowPayload[]>(
         'api_dashboard_heatmap_hora_7d',
-        [
-          { p_desde: desde, p_hasta: hasta, p_sucursal_id: sucursalId },
-          { desde, hasta, p_sucursal_id: sucursalId },
-          { desde, hasta, sucursal_id: sucursalId },
-          { desde, hasta },
-        ]
+        {
+          p_desde: desde,
+          p_hasta: hasta,
+          p_sucursal_id: sucursalParam,
+        }
       )) ?? [];
 
     return payload.map((row) => ({
@@ -385,15 +380,15 @@ async function fetchHeatmap(desde: string, hasta: string, sucursalId: string | n
 
 async function fetchAlerts(desde: string, hasta: string, sucursalId: string | null): Promise<AlertItem[]> {
   try {
+    const sucursalParam = normalizeSucursalId(sucursalId);
     const payload =
-      (await rpcWithFallback<AlertRowPayload[]>(
+      (await callDashboardRpc<AlertRowPayload[]>(
         'api_dashboard_alertas_7d',
-        [
-          { p_desde: desde, p_hasta: hasta, p_sucursal_id: sucursalId },
-          { desde, hasta, p_sucursal_id: sucursalId },
-          { desde, hasta, sucursal_id: sucursalId },
-          { desde, hasta },
-        ]
+        {
+          p_desde: desde,
+          p_hasta: hasta,
+          p_sucursal_id: sucursalParam,
+        }
       )) ?? [];
 
     return payload.map((row) => ({
@@ -409,15 +404,15 @@ async function fetchAlerts(desde: string, hasta: string, sucursalId: string | nu
 
 async function fetchPlanillaSnapshot(desde: string, hasta: string, sucursalId: string | null): Promise<PlanillaSnapshot | null> {
   try {
+    const sucursalParam = normalizeSucursalId(sucursalId);
     const payload =
-      (await rpcWithFallback<PlanillaRowPayload[]>(
+      (await callDashboardRpc<PlanillaRowPayload[]>(
         'api_dashboard_planilla_snapshot',
-        [
-          { p_desde: desde, p_hasta: hasta, p_sucursal_id: sucursalId },
-          { desde, hasta, p_sucursal_id: sucursalId },
-          { desde, hasta, sucursal_id: sucursalId },
-          { desde, hasta },
-        ]
+        {
+          p_desde: desde,
+          p_hasta: hasta,
+          p_sucursal_id: sucursalParam,
+        }
       )) ?? [];
 
     const row = payload[0];
@@ -469,7 +464,9 @@ export default function DashboardExecutive() {
   const [usedFallback, setUsedFallback] = useState(false);
   const [range, setRange] = useState(() => sevenDayWindow(true));
 
-  const selectedSucursalId = sucursalSeleccionada?.id ?? null;
+  const selectedSucursalId = normalizeSucursalId(
+    sucursalSeleccionada?.id ? String(sucursalSeleccionada.id) : null
+  );
 
   const loadData = useCallback(async () => {
     if (shouldUseDemoMode) {
@@ -512,7 +509,7 @@ export default function DashboardExecutive() {
 
       const [summaryData, rankingData, topData, heatmapData, alertData, planillaData] = await Promise.all([
         fetchSummary(effectiveRange.desde, effectiveRange.hasta, selectedSucursalId),
-        fetchRanking(effectiveRange.desde, effectiveRange.hasta),
+        fetchRanking(effectiveRange.desde, effectiveRange.hasta, selectedSucursalId),
         fetchTopProducts(effectiveRange.desde, effectiveRange.hasta, selectedSucursalId),
         fetchHeatmap(effectiveRange.desde, effectiveRange.hasta, selectedSucursalId),
         fetchAlerts(effectiveRange.desde, effectiveRange.hasta, selectedSucursalId),
@@ -603,14 +600,17 @@ export default function DashboardExecutive() {
                   value={selectedSucursalId ?? ''}
                   onChange={(event) => {
                     const value = event.target.value || null;
-                    const branch = sucursalesOptions.find((s) => s.id === value) ?? null;
+                    const branch =
+                      sucursalesOptions.find((s) =>
+                        value ? String(s.id) === value : false
+                      ) ?? null;
                     setSucursalSeleccionada(branch ?? null);
                   }}
                   className="w-full rounded-xl border border-slate-200 px-4 py-2 text-sm text-slate-700 shadow-sm focus:border-[#4B2E05] focus:outline-none focus:ring-2 focus:ring-[#D4AF37]"
                 >
                   <option value="">Todas las sucursales</option>
                   {sucursalesOptions.map((sucursal) => (
-                    <option key={sucursal.id} value={sucursal.id}>
+                    <option key={sucursal.id} value={String(sucursal.id)}>
                       {sucursal.nombre}
                     </option>
                   ))}
@@ -619,7 +619,10 @@ export default function DashboardExecutive() {
             ) : selectedSucursalId ? (
               <div className="inline-flex items-center gap-2 rounded-full bg-slate-100 px-3 py-1 text-sm font-medium text-slate-600">
                 <Store className="h-4 w-4" />{' '}
-                {sucursalesOptions.find((s) => s.id === selectedSucursalId)?.nombre ?? 'Sucursal seleccionada'}
+                {
+                  sucursalesOptions.find((s) => String(s.id) === selectedSucursalId)?.nombre ??
+                  'Sucursal seleccionada'
+                }
               </div>
             ) : null}
           </div>
@@ -705,11 +708,17 @@ export default function DashboardExecutive() {
           <div className="xl:col-span-2">
             <h2 className="mb-4 text-lg font-semibold text-slate-900">Ranking de sucursales</h2>
             <Leaderboard
-              rows={ranking.map((row) => ({
-                ...row,
-                sucursal_nombre:
-                  row.sucursal_nombre || sucursalesOptions.find((s) => s.id === row.sucursal_id)?.nombre,
-              }))}
+              rows={ranking.map((row) => {
+                const rowSucursalId = row.sucursal_id ?? null;
+                return {
+                  ...row,
+                  sucursal_nombre:
+                    row.sucursal_nombre ||
+                    (rowSucursalId !== null
+                      ? sucursalesOptions.find((s) => String(s.id) === String(rowSucursalId))?.nombre
+                      : undefined),
+                };
+              })}
             />
           </div>
           <div className="space-y-6">

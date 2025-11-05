@@ -17,6 +17,7 @@ import { KPICard } from '../components/KPICard';
 import { RealtimeStatusIndicator } from '../components/RealtimeStatusIndicator';
 import { useRealtimeVentas } from '../hooks/useRealtimeVentas';
 import { debugLog, getFunctionsBase } from '../utils/diagnostics';
+import { normalizeSucursalId } from './utils/sucursal';
 
 /* ──────────────────────────────────────────────────────────
    Tipos que devuelve cada variante de RPC
@@ -81,7 +82,7 @@ export default function VentasPage() {
 
   // Filtro de sucursal (por UUID)
   const [selectedSucursalId, setSelectedSucursalId] = useState<string | null>(
-    sucursalSeleccionada?.id ? String(sucursalSeleccionada.id) : null
+    normalizeSucursalId(sucursalSeleccionada?.id ? String(sucursalSeleccionada.id) : null)
   );
   const viewingAll = selectedSucursalId === null;
   const selectedSucursalName =
@@ -111,82 +112,92 @@ export default function VentasPage() {
   const loadData = useCallback(async () => {
     setLoading(true);
     try {
-      if (viewingAll) {
-        // MODO TODAS — usa la variante por NOMBRE
-        const { data, error } = await supabase.rpc<SerieAllRow>('rpc_ui_series_14d', {
-          desde, hasta,
-        });
-        if (error) throw error;
+      const sucursalParam = normalizeSucursalId(selectedSucursalId);
+      const { data, error } = await supabase.rpc('rpc_ui_series_14d', {
+        p_desde: desde,
+        p_hasta: hasta,
+        p_sucursal_id: sucursalParam,
+      });
+      if (error) throw error;
 
-        const all: SerieAllRow[] = data ?? [];
+      const rowsRaw: Array<SerieAllRow | SerieOneRow | Record<string, unknown>> = data ?? [];
 
-        // Serie por día (suma todas las sucursales)
+      const extractDia = (row: any) => String(row.d ?? row.dia ?? row.fecha ?? hoy);
+      const extractVentas = (row: any) => Number(row.ventas_netas ?? row.ventas ?? 0);
+      const extractTickets = (row: any) => Number(row.tx ?? row.transacciones ?? 0);
+      const extractItbms = (row: any) => Number(row.itbms ?? 0);
+      const extractSucursal = (row: any) =>
+        (row.sucursal ?? row.sucursal_nombre ?? row.sucursalName ?? '') as string;
+
+      if (sucursalParam === null) {
         const byDay = new Map<string, { dia: string; fecha: string; ventas: number; tickets: number }>();
-        for (const r of all) {
-          const cur = byDay.get(r.dia) ?? { dia: r.dia, fecha: formatDateDDMMYYYY(r.dia), ventas: 0, tickets: 0 };
-          cur.ventas += Number(r.ventas ?? 0);
-          cur.tickets += Number(r.transacciones ?? 0);
-          byDay.set(r.dia, cur);
+        const bySucursal = new Map<string, { nombre: string; ventas: number; transacciones: number }>();
+        let sumVentas = 0;
+        let sumTickets = 0;
+        let sumItbms = 0;
+
+        for (const row of rowsRaw) {
+          const dia = extractDia(row);
+          const ventas = extractVentas(row);
+          const tickets = extractTickets(row);
+          const itbms = extractItbms(row);
+          const sucursalNombre = extractSucursal(row) || 'Sucursal';
+
+          const dayEntry = byDay.get(dia) ?? { dia, fecha: formatDateDDMMYYYY(dia), ventas: 0, tickets: 0 };
+          dayEntry.ventas += ventas;
+          dayEntry.tickets += tickets;
+          byDay.set(dia, dayEntry);
+
+          const branchEntry =
+            bySucursal.get(sucursalNombre) ?? { nombre: sucursalNombre, ventas: 0, transacciones: 0 };
+          branchEntry.ventas += ventas;
+          branchEntry.transacciones += tickets;
+          bySucursal.set(sucursalNombre, branchEntry);
+
+          sumVentas += ventas;
+          sumTickets += tickets;
+          sumItbms += itbms;
         }
+
         const serie = Array.from(byDay.values()).sort((a, b) => a.dia.localeCompare(b.dia));
         setSeriesData(serie);
 
-        // Tabla por sucursal
-        const bySucursal = new Map<string, { nombre: string; ventas: number; transacciones: number }>();
-        for (const r of all) {
-          const cur = bySucursal.get(r.sucursal) ?? { nombre: r.sucursal, ventas: 0, transacciones: 0 };
-          cur.ventas += Number(r.ventas ?? 0);
-          cur.transacciones += Number(r.transacciones ?? 0);
-          bySucursal.set(r.sucursal, cur);
-        }
         const rowsList = Array.from(bySucursal.values())
-          .map(e => ({ ...e, ticketPromedio: e.transacciones > 0 ? e.ventas / e.transacciones : 0 }))
+          .map((entry) => ({
+            ...entry,
+            ticketPromedio: entry.transacciones > 0 ? entry.ventas / entry.transacciones : 0,
+          }))
           .sort((a, b) => b.ventas - a.ventas);
         setRows(rowsList);
 
-        // KPIs
-        let sumVentas = 0, sumTickets = 0, sumITBMS = 0;
-        for (const r of all) {
-          sumVentas += Number(r.ventas ?? 0);
-          sumTickets += Number(r.transacciones ?? 0);
-          sumITBMS += Number(r.itbms ?? 0);
-        }
         setTotalVentas(sumVentas);
         setTotalTransacciones(sumTickets);
-        setTotalITBMS(sumITBMS);
+        setTotalITBMS(sumItbms);
 
         setDebugInfo({
           modo: 'todas',
           filtro: { desde, hasta },
-          rowsCount: all.length,
-          sample: all[0] ?? null,
+          rowsCount: rowsRaw.length,
+          sample: rowsRaw[0] ?? null,
           seriePreview: serie.slice(0, 3),
         });
       } else {
-        // MODO INDIVIDUAL — usa la variante por UUID
-        const { data, error } = await supabase.rpc<SerieOneRow>('rpc_ui_series_14d', {
-          p_desde: desde,
-          p_hasta: hasta,
-          p_sucursal_id: selectedSucursalId,
-        });
-        if (error) throw error;
-
-        const one: SerieOneRow[] = data ?? [];
-
-        // Serie por día
-        const serie = one
-          .map(r => ({
-            dia: r.d,
-            fecha: formatDateDDMMYYYY(r.d),
-            ventas: Number(r.ventas_netas ?? 0),
-            tickets: Number(r.tx ?? 0),
+        const serie = rowsRaw
+          .map((row) => ({
+            dia: extractDia(row),
+            fecha: formatDateDDMMYYYY(extractDia(row)),
+            ventas: extractVentas(row),
+            tickets: extractTickets(row),
+            itbms: extractItbms(row),
           }))
           .sort((a, b) => a.dia.localeCompare(b.dia));
-        setSeriesData(serie);
 
-        // Tabla (una sola sucursal)
+        setSeriesData(serie.map(({ dia, fecha, ventas, tickets }) => ({ dia, fecha, ventas, tickets })));
+
         const ventasTotal = serie.reduce((acc, r) => acc + r.ventas, 0);
         const txTotal = serie.reduce((acc, r) => acc + r.tickets, 0);
+        const itbmsTotal = serie.reduce((acc, r) => acc + (r.itbms ?? 0), 0);
+
         setRows([
           {
             nombre: selectedSucursalName ?? 'Sucursal',
@@ -196,16 +207,15 @@ export default function VentasPage() {
           },
         ]);
 
-        // KPIs
         setTotalVentas(ventasTotal);
         setTotalTransacciones(txTotal);
-        setTotalITBMS(one.reduce((acc, r) => acc + Number(r.itbms ?? 0), 0));
+        setTotalITBMS(itbmsTotal);
 
         setDebugInfo({
           modo: 'individual',
-          filtro: { desde, hasta, selectedSucursalId, selectedSucursalName },
-          rowsCount: one.length,
-          sample: one[0] ?? null,
+          filtro: { desde, hasta, selectedSucursalId: sucursalParam, selectedSucursalName },
+          rowsCount: rowsRaw.length,
+          sample: rowsRaw[0] ?? null,
           seriePreview: serie.slice(0, 3),
         });
       }
@@ -216,7 +226,7 @@ export default function VentasPage() {
     } finally {
       setLoading(false);
     }
-  }, [desde, hasta, viewingAll, selectedSucursalId, selectedSucursalName]);
+  }, [desde, hasta, viewingAll, selectedSucursalId, selectedSucursalName, hoy]);
 
   /* ────────────────────────────────────────────────────────
      SYNC (igual que antes)
@@ -300,7 +310,8 @@ export default function VentasPage() {
     return () => window.removeEventListener('debug:refetch-all', handler);
   }, [loadData]);
   useEffect(() => {
-    if (sucursalSeleccionada?.id) setSelectedSucursalId(String(sucursalSeleccionada.id));
+    if (sucursalSeleccionada?.id)
+      setSelectedSucursalId(normalizeSucursalId(String(sucursalSeleccionada.id)));
     else setSelectedSucursalId(null);
   }, [sucursalSeleccionada]);
 
@@ -360,7 +371,11 @@ export default function VentasPage() {
               <div className="flex gap-2">
                 <select
                   value={viewingAll ? '' : String(selectedSucursalId ?? '')}
-                  onChange={(e) => setSelectedSucursalId(e.target.value ? String(e.target.value) : null)}
+                  onChange={(e) =>
+                    setSelectedSucursalId(
+                      normalizeSucursalId(e.target.value ? String(e.target.value) : null)
+                    )
+                  }
                   className="flex-1 px-3 py-2 rounded-lg border dark:border-gray-700 bg-white dark:bg-gray-900 text-gray-900 dark:text-gray-100"
                 >
                   <option value="">Todas las sucursales</option>
@@ -405,7 +420,7 @@ export default function VentasPage() {
             <div>
               <h3 className="text-xl font-bold text-gray-900 dark:text-white">Serie de ventas</h3>
               <p className="text-sm text-gray-500 dark:text-gray-400">
-                Fuente: {viewingAll ? 'RPC rpc_ui_series_14d(desde,hasta)' : 'RPC rpc_ui_series_14d(p_desde,p_hasta,p_sucursal_id)'}
+                Fuente: RPC rpc_ui_series_14d(p_desde, p_hasta, p_sucursal_id)
               </p>
             </div>
           </div>

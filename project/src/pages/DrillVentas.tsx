@@ -25,6 +25,7 @@ import { supabase } from '../lib/supabase';
 import { formatCurrencyUSD, formatDateDDMMYYYY } from '../lib/format';
 import { useAuthOrg } from '../context/AuthOrgContext';
 import { KPICard } from '../components/KPICard';
+import { normalizeSucursalId } from './utils/sucursal';
 
 interface Transaction {
   id: string;
@@ -67,7 +68,9 @@ export const DrillVentas = () => {
   const [fecha, setFecha] = useState<string>(
     searchParams.get('fecha') || new Date().toISOString().split('T')[0]
   );
-  const sucursalId = isViewingAll ? 'todas' : (sucursalSeleccionada?.id || 'todas');
+  const sucursalId = normalizeSucursalId(
+    !isViewingAll && sucursalSeleccionada?.id ? String(sucursalSeleccionada.id) : null
+  );
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [debouncedQuery, setDebouncedQuery] = useState<string>('');
 
@@ -110,7 +113,7 @@ export const DrillVentas = () => {
     try {
       const { data, error } = await supabase.rpc('api_detalle_ventas', {
         p_fecha: fecha,
-        p_sucursal_id: sucursalId === 'todas' ? null : sucursalId,
+        p_sucursal_id: sucursalId,
         p_query: debouncedQuery || null,
         p_limit: pageSize,
         p_offset: (currentPage - 1) * pageSize
@@ -134,7 +137,7 @@ export const DrillVentas = () => {
     try {
       const { data, error } = await supabase.rpc('api_kpis_dia', {
         p_fecha: fecha,
-        p_sucursal_id: sucursalId === 'todas' ? null : sucursalId
+        p_sucursal_id: sucursalId
       });
 
       if (error) throw error;
@@ -152,7 +155,7 @@ export const DrillVentas = () => {
     try {
       const { data, error } = await supabase.rpc('api_sparkline_ventas', {
         p_fecha: fecha,
-        p_sucursal_id: sucursalId === 'todas' ? null : sucursalId
+        p_sucursal_id: sucursalId
       });
 
       if (error) throw error;
@@ -223,8 +226,10 @@ export const DrillVentas = () => {
     const link = document.createElement('a');
     const url = URL.createObjectURL(blob);
 
-    const sucursalName = sucursalId === 'todas' ? 'todas' :
-      (sucursales.find(s => s.id === sucursalId)?.nombre || 'sucursal');
+    const sucursalName =
+      sucursalId === null
+        ? 'todas'
+        : sucursales.find((s) => String(s.id) === sucursalId)?.nombre || 'sucursal';
     const timestamp = new Date().getTime();
 
     link.setAttribute('href', url);

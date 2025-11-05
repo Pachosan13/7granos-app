@@ -6,7 +6,8 @@
     "build": "npm --prefix project run build",
     "lint": "npm --prefix project run lint",
     "preview": "npm --prefix project run preview",
-    "typecheck": "npm --prefix project run typecheck"
+    "typecheck": "npm --prefix project run typecheck",
+    "ping:dashboard": "node project/scripts/ping-dashboard.mjs"
   },
   "engines": {
     "node": ">=18"
