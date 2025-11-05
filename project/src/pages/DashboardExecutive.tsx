@@ -93,9 +93,12 @@ type RpcParams = Record<string, RpcParamValue>;
 
 const ISO_DATE_PATTERN = /^(\d{4})-(\d{2})-(\d{2})$/;
 
-function normalizeSucursalParam(value: string | number | null | undefined): string | null {
+function normalizeSucursalParam(value: string | number | null | undefined): string | number | null {
   if (value === null || value === undefined) {
     return null;
+  }
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? value : null;
   }
   const normalized = String(value).trim();
   if (!normalized) {
@@ -104,6 +107,10 @@ function normalizeSucursalParam(value: string | number | null | undefined): stri
   const lower = normalized.toLowerCase();
   if (lower === 'all' || lower === 'todas' || lower === 'toda' || lower === 'tod@s') {
     return null;
+  }
+  const numeric = Number(normalized);
+  if (Number.isFinite(numeric) && normalized === numeric.toString()) {
+    return numeric;
   }
   return normalized;
 }
