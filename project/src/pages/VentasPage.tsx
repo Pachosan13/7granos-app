@@ -1,4 +1,5 @@
 // project/src/pages/VentasPage.tsx
+import type { ReactNode } from 'react';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { RefreshCw, TrendingUp, DollarSign, Receipt, Building2, Calendar } from 'lucide-react';
 import {
@@ -17,29 +18,43 @@ import { useAuthOrg } from '../context/AuthOrgContext';
 /* ──────────────────────────────────────────────────────────
    Utilidades de fecha y formato
 ────────────────────────────────────────────────────────── */
-function todayYMD(tz = 'America/Panama') {
-  const d = new Date(new Date().toLocaleString('en-US', { timeZone: tz }));
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, '0');
-  const day = String(d.getDate()).padStart(2, '0');
+
+// YYYY-MM-DD local
+function ymdLocal(d: Date, tz = 'America/Panama') {
+  const local = new Date(d.toLocaleString('en-US', { timeZone: tz }));
+  const y = local.getFullYear();
+  const m = String(local.getMonth() + 1).padStart(2, '0');
+  const day = String(local.getDate()).padStart(2, '0');
   return `${y}-${m}-${day}`;
 }
 
-function addDays(ymd: string, days: number) {
-  const [y, m, d] = ymd.split('-').map(Number);
-  const dt = new Date(Date.UTC(y, m - 1, d, 12, 0, 0));
-  dt.setUTCDate(dt.getUTCDate() + days);
-  const yy = dt.getUTCFullYear();
-  const mm = String(dt.getUTCMonth() + 1).padStart(2, '0');
-  const dd = String(dt.getUTCDate()).padStart(2, '0');
-  return `${yy}-${mm}-${dd}`;
+function todayYMD(tz = 'America/Panama') {
+  return ymdLocal(new Date(), tz);
 }
 
+// suma días a un YYYY-MM-DD de forma segura
+function addDaysYMD(ymd: string, n: number, tz = 'America/Panama') {
+  const [y, m, d] = ymd.split('-').map(Number);
+  const base = new Date(Date.UTC(y, m - 1, d, 12, 0, 0));
+  base.setUTCDate(base.getUTCDate() + n);
+  return ymdLocal(base, tz);
+}
+
+// rango inclusivo [from, to] en YYYY-MM-DD
+function daysRangeInclusive(fromYMD: string, toYMD: string) {
+  const out: string[] = [];
+  let cur = fromYMD;
+  while (cur <= toYMD) {
+    out.push(cur);
+    cur = addDaysYMD(cur, 1);
+  }
+  return out;
+}
+
+// últimos n días terminando HOY (inclusivo)
 function startOfNDaysAgo(n: number, tz = 'America/Panama') {
-  const now = new Date(new Date().toLocaleString('en-US', { timeZone: tz }));
-  // aseguramos que corte en el día local, no UTC
-  const end = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
-  const start = addDays(end, -n + 1);
+  const end = todayYMD(tz);
+  const start = addDaysYMD(end, -(n - 1), tz);
   return { start, end };
 }
 
@@ -60,7 +75,6 @@ function formatDateDDMMYYYY(ymd: string) {
    Tipos
 ────────────────────────────────────────────────────────── */
 
-// RPC única (agrega por día). Con p_sucursal_id = null → agrega TODAS.
 type RpcSerieRow = {
   d: string;            // 'YYYY-MM-DD'
   ventas_netas: number; // numeric
@@ -68,18 +82,6 @@ type RpcSerieRow = {
   tx: number;           // bigint
 };
 
-// Vista por día/sucursal (para ranking cuando “todas”)
-type ViewSeriesRow = {
-  dia: string;          // 'YYYY-MM-DD'
-  sucursal_id: string;  // uuid
-  sucursal: string;     // nombre
-  ventas_brutas: number;
-  itbms: number;
-  tickets: number;
-  propina: number | null;
-};
-
-// Auxiliar para ranking
 type TablaSucursal = {
   nombre: string;
   ventas: number;
@@ -91,40 +93,36 @@ type TablaSucursal = {
    Lectura de datos
 ────────────────────────────────────────────────────────── */
 
+// RPC agrega por día; p_hasta es EXCLUSIVO
 async function fetchSerieRPC(
-  desde: string,
-  hasta: string,
+  desdeIncl: string,
+  hastaExcl: string,
   sucursalId: string | null
 ): Promise<RpcSerieRow[]> {
   const { data, error } = await supabase.rpc('rpc_ui_series_14d', {
-    p_desde: desde,
-    p_hasta: hasta,
+    p_desde: desdeIncl,
+    p_hasta: hastaExcl,
     p_sucursal_id: sucursalId,
   });
   if (error) throw error;
-  // normaliza nulls → números
   return (data ?? []).map((r: any) => ({
-    d: String(r.d),
+    d: String(r.d).slice(0, 10),
     ventas_netas: Number(r.ventas_netas ?? 0),
     itbms: Number(r.itbms ?? 0),
     tx: Number(r.tx ?? 0),
   }));
 }
 
-/** Para “todas”: ranking por sucursal desde la vista v_ui_series_14d */
-async function fetchRankingView(
-  desde: string,
-  hasta: string
-): Promise<TablaSucursal[]> {
+// ranking por sucursal desde la vista (cuando son "todas")
+async function fetchRankingView(desdeIncl: string, hastaIncl: string): Promise<TablaSucursal[]> {
   const { data, error } = await supabase
     .from('v_ui_series_14d')
     .select('dia,sucursal,ventas_brutas,tickets')
-    .gte('dia', desde)
-    .lte('dia', hasta);
+    .gte('dia', desdeIncl)
+    .lte('dia', hastaIncl);
 
   if (error) throw error;
 
-  // Agregamos por sucursal
   const map = new Map<string, { ventas: number; tx: number }>();
   for (const row of (data ?? []) as any[]) {
     const nombre = String(row.sucursal ?? 'Sin asignar');
@@ -136,16 +134,13 @@ async function fetchRankingView(
 
   const out: TablaSucursal[] = [];
   for (const [nombre, v] of map.entries()) {
-    const ticket = v.tx > 0 ? v.ventas / v.tx : 0;
     out.push({
       nombre,
       ventas: v.ventas,
       transacciones: v.tx,
-      ticketPromedio: ticket,
+      ticketPromedio: v.tx > 0 ? v.ventas / v.tx : 0,
     });
   }
-
-  // orden descendente por ventas
   out.sort((a, b) => b.ventas - a.ventas);
   return out;
 }
@@ -165,7 +160,7 @@ export default function VentasPage() {
   const [selectedSucursal, setSelectedSucursal] = useState<string>('');
 
   // Datos
-  const [serie, setSerie] = useState<RpcSerieRow[]>([]);
+  const [serieFilled, setSerieFilled] = useState<Array<{ fecha: string; ventas: number; itbms: number; tx: number }>>([]);
   const [ranking, setRanking] = useState<TablaSucursal[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -183,17 +178,30 @@ export default function VentasPage() {
     try {
       const sucId = selectedSucursal || null;
 
-      const [serieRows, rankingRows] = await Promise.all([
-        fetchSerieRPC(desde, hasta, sucId),
-        // ranking solo tiene sentido cuando son todas
+      // p_hasta (EXCLUSIVO) = hasta + 1 día
+      const hastaExcl = addDaysYMD(hasta, 1);
+
+      const [rowsRPC, rankingRows] = await Promise.all([
+        fetchSerieRPC(desde, hastaExcl, sucId),
         selectedSucursal ? Promise.resolve([]) : fetchRankingView(desde, hasta),
       ]);
 
-      setSerie(serieRows);
+      // rellenar días que falten en la serie (0s)
+      const byDay = new Map<string, { ventas: number; itbms: number; tx: number }>();
+      for (const r of rowsRPC) {
+        byDay.set(r.d, { ventas: r.ventas_netas, itbms: r.itbms, tx: r.tx });
+      }
+      const days = daysRangeInclusive(desde, hasta);
+      const filled = days.map((d) => {
+        const v = byDay.get(d);
+        return { fecha: d, ventas: v?.ventas ?? 0, itbms: v?.itbms ?? 0, tx: v?.tx ?? 0 };
+      });
+
+      setSerieFilled(filled);
       setRanking(rankingRows);
     } catch (e: any) {
       setError(e?.message || 'No fue posible cargar ventas.');
-      setSerie([]);
+      setSerieFilled([]);
       setRanking([]);
     } finally {
       setLoading(false);
@@ -204,26 +212,14 @@ export default function VentasPage() {
     load();
   }, [load]);
 
-  // KPIs
+  // KPIs desde la serie ya rellenada
   const kpis = useMemo(() => {
-    const ventas = serie.reduce((acc, r) => acc + (r.ventas_netas || 0), 0);
-    const itbms = serie.reduce((acc, r) => acc + (r.itbms || 0), 0);
-    const tx = serie.reduce((acc, r) => acc + (r.tx || 0), 0);
+    const ventas = serieFilled.reduce((acc, r) => acc + (r.ventas || 0), 0);
+    const itbms = serieFilled.reduce((acc, r) => acc + (r.itbms || 0), 0);
+    const tx = serieFilled.reduce((acc, r) => acc + (r.tx || 0), 0);
     const ticket = tx > 0 ? ventas / tx : 0;
     return { ventas, itbms, tx, ticket };
-  }, [serie]);
-
-  // Datos para chart
-  const chartData = useMemo(
-    () =>
-      serie.map((r) => ({
-        fecha: r.d,
-        ventas: r.ventas_netas,
-        itbms: r.itbms,
-        tx: r.tx,
-      })),
-    [serie]
-  );
+  }, [serieFilled]);
 
   return (
     <div className="space-y-6">
@@ -231,9 +227,7 @@ export default function VentasPage() {
       <header className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
         <div>
           <h1 className="text-3xl font-bold text-bean">Ventas</h1>
-          <p className="text-slate7g">
-            Serie diaria, KPIs y ranking por sucursal.
-          </p>
+          <p className="text-slate7g">Serie diaria, KPIs y ranking por sucursal.</p>
         </div>
         <div className="flex flex-wrap items-center gap-3">
           <button
@@ -335,7 +329,7 @@ export default function VentasPage() {
         />
       </section>
 
-      {/* Serie */}
+      {/* Serie 14 días */}
       <section className="rounded-2xl border border-sand bg-white shadow-sm">
         <header className="flex items-center justify-between border-b border-sand px-6 py-4">
           <div>
@@ -344,12 +338,12 @@ export default function VentasPage() {
           </div>
         </header>
         <div className="h-80 px-2 py-4">
-          {chartData.length > 0 ? (
+          {serieFilled.length > 0 ? (
             <ResponsiveContainer>
-              <ComposedChart data={chartData}>
+              <ComposedChart data={serieFilled}>
                 <CartesianGrid strokeDasharray="3 3" />
                 <XAxis dataKey="fecha" />
-                <YAxis yAxisId="left" tickFormatter={(v) => (Math.abs(v) >= 1000 ? `${(v/1000).toFixed(0)}k` : `${v}`)} />
+                <YAxis yAxisId="left" tickFormatter={(v) => (Math.abs(v) >= 1000 ? `${(v / 1000).toFixed(0)}k` : `${v}`)} />
                 <YAxis yAxisId="right" orientation="right" />
                 <Tooltip
                   formatter={(val: any, name) => {
@@ -375,9 +369,7 @@ export default function VentasPage() {
           <header className="flex items-center justify-between border-b border-sand px-6 py-4">
             <div>
               <h2 className="text-lg font-semibold text-slate-800">Ranking por sucursal</h2>
-              <p className="text-sm text-slate-500">
-                Agregado del rango seleccionado
-              </p>
+              <p className="text-sm text-slate-500">Agregado del rango seleccionado</p>
             </div>
           </header>
           <div className="overflow-x-auto">
@@ -413,7 +405,6 @@ export default function VentasPage() {
         </section>
       )}
 
-      {/* Errores */}
       {error && (
         <div className="rounded-xl border border-rose-200 bg-rose-50 p-4 text-rose-700">
           {error}
@@ -424,7 +415,7 @@ export default function VentasPage() {
 }
 
 /* ──────────────────────────────────────────────────────────
-   Pequeños componentes de UI internos (sin dependencias externas)
+   UI mínimos internos
 ────────────────────────────────────────────────────────── */
 function KpiCard({
   icon,
@@ -432,7 +423,7 @@ function KpiCard({
   value,
   helper,
 }: {
-  icon: React.ReactNode;
+  icon: ReactNode;
   title: string;
   value: string;
   helper?: string;
