@@ -31,6 +31,7 @@ interface SeriesPoint {
 type NullableNumber = number | string | null | undefined;
 
 interface SummaryRowPayload {
+  sucursal_id?: string | number | null;
   ventas_netas?: NullableNumber;
   cogs?: NullableNumber;
   gastos?: NullableNumber;
@@ -104,7 +105,7 @@ function normalizeSucursalParam(value: string | number | null | undefined): stri
   }
 
   const lower = normalized.toLowerCase();
-  if (['all', 'todas', 'toda', 'tod@s'].includes(lower)) {
+  if (['all', 'todas', 'toda', 'tod@s', 'null', 'undefined'].includes(lower)) {
     return null;
   }
 
@@ -186,7 +187,8 @@ function toNumber(value: NullableNumber): number {
     return Number.isFinite(value) ? value : 0;
   }
   if (typeof value === 'string') {
-    const parsed = Number(value);
+    const normalized = value.replace(/\s+/g, '').replace(/,/g, '');
+    const parsed = Number(normalized);
     return Number.isFinite(parsed) ? parsed : 0;
   }
   return 0;
@@ -200,48 +202,21 @@ function toNullableNumber(value: NullableNumber): number | null {
   return Number.isFinite(numeric) ? numeric : 0;
 }
 
-function buildRpcAttempts(params: DashboardParams): Record<string, unknown>[] {
-  const attempts: Record<string, unknown>[] = [];
-
-  const pushUnique = (attempt: Record<string, unknown>) => {
-    const key = JSON.stringify(attempt, Object.keys(attempt).sort());
-    if (!attempts.some((existing) => JSON.stringify(existing, Object.keys(existing).sort()) === key)) {
-      attempts.push(attempt);
-    }
-  };
-
-  const { desde, hasta, sucursal_id } = params;
-
-  pushUnique({ desde, hasta, sucursal_id });
-  pushUnique({ desde, hasta, p_sucursal_id: sucursal_id });
-  pushUnique({ p_desde: desde, p_hasta: hasta, p_sucursal_id: sucursal_id });
-  pushUnique({ p_desde: desde, p_hasta: hasta, sucursal_id });
-  pushUnique({ desde, hasta });
-  pushUnique({ p_desde: desde, p_hasta: hasta });
-
-  return attempts;
-}
-
 async function callDashboardRpc<T>(fn: string, params: DashboardParams): Promise<T | null> {
-  const attempts = buildRpcAttempts(params);
-  const errors: Error[] = [];
+  const rpcParams = {
+    desde: params.desde,
+    hasta: params.hasta,
+    sucursal_id: params.sucursal_id,
+  } as const;
 
-  for (const attempt of attempts) {
-    const response = await supabase.rpc<T>(fn, attempt);
-    if (!response.error) {
-      return response.data ?? null;
-    }
-    errors.push(response.error);
+  const { data, error } = await supabase.rpc<T>(fn, rpcParams);
+  if (error) {
     if (import.meta.env.DEV) {
-      console.debug(`[dashboard] rpc ${fn} falló con`, attempt, response.error);
+      console.error(`[dashboard] rpc ${fn} falló`, rpcParams, error);
     }
+    throw error;
   }
-
-  const lastError = errors.at(-1);
-  if (lastError) {
-    throw lastError;
-  }
-  return null;
+  return data ?? null;
 }
 
 interface PlanillaSnapshot {
@@ -382,50 +357,112 @@ async function fetchSummary(
     return null;
   }
 
-  const normalizedRows = payload.map((row) => {
+  type SummaryAccumulator = {
+    branch: string | null;
+    ventas_netas: number;
+    cogs: number;
+    gastos: number;
+    utilidad: number;
+    tx: number;
+    deltaSum: number;
+    deltaWeight: number;
+  };
+
+  const byBranch = new Map<string | null, SummaryAccumulator>();
+
+  payload.forEach((row) => {
+    const branchKeyRaw = row.sucursal_id ?? null;
+    const branchKey = branchKeyRaw === null || branchKeyRaw === undefined ? null : String(branchKeyRaw);
+    const target =
+      byBranch.get(branchKey) ?? {
+        branch: branchKey,
+        ventas_netas: 0,
+        cogs: 0,
+        gastos: 0,
+        utilidad: 0,
+        tx: 0,
+        deltaSum: 0,
+        deltaWeight: 0,
+      };
+
     const ventasNetas = toNumber(row.ventas_netas ?? row.ventas ?? row.ventas_brutas);
     const cogs = toNumber(row.cogs ?? row.costo ?? row.costo_ventas);
     const gastos = toNumber(row.gastos ?? row.gasto_total);
     const utilidadBase = row.utilidad ?? row.margen;
+    const utilidad =
+      utilidadBase !== undefined && utilidadBase !== null ? toNumber(utilidadBase) : ventasNetas - cogs - gastos;
+    const tx = toNumber(row.tx ?? row.transacciones);
+    const delta = toNullableNumber(
+      row.ventas_vs_semana_ant_pct ?? row.delta_ventas_pct ?? row.delta_vs_semana_ant_pct
+    );
+
+    target.ventas_netas += ventasNetas;
+    target.cogs += cogs;
+    target.gastos += gastos;
+    target.utilidad += utilidad;
+    target.tx += tx;
+    if (delta !== null) {
+      target.deltaSum += delta * Math.max(ventasNetas, 1);
+      target.deltaWeight += Math.max(ventasNetas, 1);
+    }
+
+    byBranch.set(branchKey, target);
+  });
+
+  const normalizedRows = Array.from(byBranch.values()).map((row) => {
+    const ticketPromedio = row.tx > 0 ? row.ventas_netas / row.tx : 0;
+    const margenBrutoPct = row.ventas_netas > 0 ? (row.ventas_netas - row.cogs) / row.ventas_netas : 0;
+    const deltaPct = row.deltaWeight > 0 ? row.deltaSum / row.deltaWeight : null;
 
     return {
-      ventas_netas: ventasNetas,
-      cogs,
-      gastos,
-      utilidad:
-        utilidadBase !== undefined && utilidadBase !== null
-          ? toNumber(utilidadBase)
-          : ventasNetas - cogs - gastos,
-      tx: toNumber(row.tx ?? row.transacciones),
-      ticket_promedio: toNumber(row.ticket_promedio ?? row.ticket ?? row.ticket_promedio_bruto),
-      margen_bruto_pct: toNumber(row.margen_bruto_pct ?? row.margen_pct ?? row.margen_bruto),
-      ventas_vs_semana_ant_pct: toNullableNumber(
-        row.ventas_vs_semana_ant_pct ?? row.delta_ventas_pct ?? row.delta_vs_semana_ant_pct
-      ),
+      branch: row.branch,
+      data: {
+        ventas_netas: row.ventas_netas,
+        cogs: row.cogs,
+        gastos: row.gastos,
+        utilidad: row.utilidad,
+        tx: row.tx,
+        ticket_promedio: ticketPromedio,
+        margen_bruto_pct: margenBrutoPct,
+        ventas_vs_semana_ant_pct: deltaPct,
+      } satisfies Summary7d,
     };
   });
 
-  if (params.sucursal_id === null && normalizedRows.length > 1) {
+  const findByBranch = (branch: string | null) =>
+    normalizedRows.find((row) => {
+      if (branch === null) {
+        return row.branch === null;
+      }
+      return row.branch === branch;
+    })?.data;
+
+  if (params.sucursal_id === null) {
+    const allRow = findByBranch(null);
+    if (allRow) {
+      return allRow;
+    }
+
     const totals = normalizedRows.reduce(
       (acc, row) => {
-        acc.ventas_netas += row.ventas_netas;
-        acc.cogs += row.cogs;
-        acc.gastos += row.gastos;
-        acc.utilidad += row.utilidad;
-        acc.tx += row.tx;
-        if (row.ventas_vs_semana_ant_pct !== null) {
-          acc.ventasVs.push(row.ventas_vs_semana_ant_pct);
+        acc.ventas_netas += row.data.ventas_netas;
+        acc.cogs += row.data.cogs;
+        acc.gastos += row.data.gastos;
+        acc.utilidad += row.data.utilidad;
+        acc.tx += row.data.tx;
+        if (row.data.ventas_vs_semana_ant_pct !== null) {
+          acc.deltaSum += row.data.ventas_vs_semana_ant_pct * Math.max(row.data.ventas_netas, 1);
+          acc.deltaWeight += Math.max(row.data.ventas_netas, 1);
         }
         return acc;
       },
-      { ventas_netas: 0, cogs: 0, gastos: 0, utilidad: 0, tx: 0, ventasVs: [] as number[] }
+      { ventas_netas: 0, cogs: 0, gastos: 0, utilidad: 0, tx: 0, deltaSum: 0, deltaWeight: 0 }
     );
 
     const ticketPromedio = totals.tx > 0 ? totals.ventas_netas / totals.tx : 0;
-    const margenBrutoPct = totals.ventas_netas > 0 ? (totals.ventas_netas - totals.cogs) / totals.ventas_netas : 0;
-    const ventasVs = totals.ventasVs.length
-      ? totals.ventasVs.reduce((acc, value) => acc + value, 0) / totals.ventasVs.length
-      : null;
+    const margenBrutoPct =
+      totals.ventas_netas > 0 ? (totals.ventas_netas - totals.cogs) / totals.ventas_netas : 0;
+    const deltaPct = totals.deltaWeight > 0 ? totals.deltaSum / totals.deltaWeight : null;
 
     return {
       ventas_netas: totals.ventas_netas,
@@ -435,12 +472,17 @@ async function fetchSummary(
       tx: totals.tx,
       ticket_promedio: ticketPromedio,
       margen_bruto_pct: margenBrutoPct,
-      ventas_vs_semana_ant_pct: ventasVs,
-    };
+      ventas_vs_semana_ant_pct: deltaPct,
+    } satisfies Summary7d;
   }
 
-  const first = normalizedRows[0];
-  return first;
+  const matchingRow = findByBranch(params.sucursal_id);
+  if (matchingRow) {
+    return matchingRow;
+  }
+
+  const fallbackRow = normalizedRows[0]?.data;
+  return fallbackRow ?? null;
 }
 
 async function fetchSeries(
