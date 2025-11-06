@@ -8,7 +8,8 @@
     "build": "vite build",
     "lint": "eslint .",
     "preview": "vite preview",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "ping:dashboard": "node src/pages/ping-dashboard.mjs"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.57.4",
