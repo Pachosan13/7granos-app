@@ -200,12 +200,48 @@ function toNullableNumber(value: NullableNumber): number | null {
   return Number.isFinite(numeric) ? numeric : 0;
 }
 
+function buildRpcAttempts(params: DashboardParams): Record<string, unknown>[] {
+  const attempts: Record<string, unknown>[] = [];
+
+  const pushUnique = (attempt: Record<string, unknown>) => {
+    const key = JSON.stringify(attempt, Object.keys(attempt).sort());
+    if (!attempts.some((existing) => JSON.stringify(existing, Object.keys(existing).sort()) === key)) {
+      attempts.push(attempt);
+    }
+  };
+
+  const { desde, hasta, sucursal_id } = params;
+
+  pushUnique({ desde, hasta, sucursal_id });
+  pushUnique({ desde, hasta, p_sucursal_id: sucursal_id });
+  pushUnique({ p_desde: desde, p_hasta: hasta, p_sucursal_id: sucursal_id });
+  pushUnique({ p_desde: desde, p_hasta: hasta, sucursal_id });
+  pushUnique({ desde, hasta });
+  pushUnique({ p_desde: desde, p_hasta: hasta });
+
+  return attempts;
+}
+
 async function callDashboardRpc<T>(fn: string, params: DashboardParams): Promise<T | null> {
-  const response = await supabase.rpc<T>(fn, params as Record<string, unknown>);
-  if (response.error) {
-    throw response.error;
+  const attempts = buildRpcAttempts(params);
+  const errors: Error[] = [];
+
+  for (const attempt of attempts) {
+    const response = await supabase.rpc<T>(fn, attempt);
+    if (!response.error) {
+      return response.data ?? null;
+    }
+    errors.push(response.error);
+    if (import.meta.env.DEV) {
+      console.debug(`[dashboard] rpc ${fn} falló con`, attempt, response.error);
+    }
   }
-  return response.data ?? null;
+
+  const lastError = errors.at(-1);
+  if (lastError) {
+    throw lastError;
+  }
+  return null;
 }
 
 interface PlanillaSnapshot {
@@ -346,16 +382,28 @@ async function fetchSummary(
     return null;
   }
 
-  const normalizedRows = payload.map((row) => ({
-    ventas_netas: toNumber(row.ventas_netas),
-    cogs: toNumber(row.cogs),
-    gastos: toNumber(row.gastos),
-    utilidad: toNumber(row.utilidad),
-    tx: toNumber(row.tx),
-    ticket_promedio: toNumber(row.ticket_promedio),
-    margen_bruto_pct: toNumber(row.margen_bruto_pct),
-    ventas_vs_semana_ant_pct: toNullableNumber(row.ventas_vs_semana_ant_pct),
-  }));
+  const normalizedRows = payload.map((row) => {
+    const ventasNetas = toNumber(row.ventas_netas ?? row.ventas ?? row.ventas_brutas);
+    const cogs = toNumber(row.cogs ?? row.costo ?? row.costo_ventas);
+    const gastos = toNumber(row.gastos ?? row.gasto_total);
+    const utilidadBase = row.utilidad ?? row.margen;
+
+    return {
+      ventas_netas: ventasNetas,
+      cogs,
+      gastos,
+      utilidad:
+        utilidadBase !== undefined && utilidadBase !== null
+          ? toNumber(utilidadBase)
+          : ventasNetas - cogs - gastos,
+      tx: toNumber(row.tx ?? row.transacciones),
+      ticket_promedio: toNumber(row.ticket_promedio ?? row.ticket ?? row.ticket_promedio_bruto),
+      margen_bruto_pct: toNumber(row.margen_bruto_pct ?? row.margen_pct ?? row.margen_bruto),
+      ventas_vs_semana_ant_pct: toNullableNumber(
+        row.ventas_vs_semana_ant_pct ?? row.delta_ventas_pct ?? row.delta_vs_semana_ant_pct
+      ),
+    };
+  });
 
   if (params.sucursal_id === null && normalizedRows.length > 1) {
     const totals = normalizedRows.reduce(
