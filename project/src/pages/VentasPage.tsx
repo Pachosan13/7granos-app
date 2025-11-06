@@ -1,3 +1,16 @@
+¡Listo! Aquí tienes la página **completa** ya corregida para que la pegues tal cual en:
+
+`// src/pages/VentasPage.tsx`
+
+* Usa **una sola RPC** `rpc_ui_series_14d(p_desde,p_hasta,p_sucursal_id)`:
+
+  * Si hay sucursal seleccionada → pasa el **UUID**.
+  * Si son “todas” → pasa **NULL** (agrega todo).
+* Para el **ranking por sucursal** cuando estás viendo “todas”, consulta la vista **`v_ui_series_14d`** y agregas por nombre de sucursal (porque la RPC agrega por día global y no trae el desglose por sucursal).
+* Arregla la tarjeta “Serie de ventas” y los **KPIs** para ambas modalidades.
+* Mantiene tus estilos/UX.
+
+```tsx
 // src/pages/VentasPage.tsx
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { RefreshCw, TrendingUp, DollarSign, Receipt, Building2, Calendar } from 'lucide-react';
@@ -19,31 +32,7 @@ import { useRealtimeVentas } from '../hooks/useRealtimeVentas';
 import { debugLog, getFunctionsBase } from '../utils/diagnostics';
 
 /* ──────────────────────────────────────────────────────────
-   Tipos que devuelve cada variante de RPC
-   - Todas:   rpc_ui_series_14d(desde, hasta)
-   - Individ: rpc_ui_series_14d(p_desde, p_hasta, p_sucursal_id uuid)
-   ────────────────────────────────────────────────────────── */
-type SerieAllRow = {
-  dia: string;          // 'YYYY-MM-DD'
-  sucursal: string;     // nombre
-  ventas: number;
-  itbms: number;
-  transacciones: number;
-  propina: number;
-};
-
-type SerieOneRow = {
-  d: string;            // 'YYYY-MM-DD'
-  ventas_netas: number;
-  itbms: number;
-  tx: number;
-};
-
-type SucursalRow = { nombre: string; ventas: number; transacciones: number; ticketPromedio: number; };
-type SyncBranchStat = { name: string; orders: number; sales?: number };
-
-/* ──────────────────────────────────────────────────────────
-   Utilidades de fecha/formatos
+   Formatos / utilidades
    ────────────────────────────────────────────────────────── */
 function todayYMD(tz = 'America/Panama') {
   const d = new Date(new Date().toLocaleString('en-US', { timeZone: tz }));
@@ -56,7 +45,9 @@ function addDays(ymd: string, days: number) {
   const [y, m, d] = ymd.split('-').map(Number);
   const dt = new Date(Date.UTC(y, m - 1, d, 12, 0, 0));
   dt.setUTCDate(dt.getUTCDate() + days);
-  const yy = dt.getUTCFullYear(); const mm = String(dt.getUTCMonth() + 1).padStart(2, '0'); const dd = String(dt.getUTCDate()).padStart(2, '0');
+  const yy = dt.getUTCFullYear();
+  const mm = String(dt.getUTCMonth() + 1).padStart(2, '0');
+  const dd = String(dt.getUTCDate()).padStart(2, '0');
   return `${yy}-${mm}-${dd}`;
 }
 function formatCurrencyUSD(n: number) {
@@ -68,13 +59,38 @@ function formatDateDDMMYYYY(ymd: string) {
 }
 
 /* ──────────────────────────────────────────────────────────
+   Tipos de respuesta
+   ────────────────────────────────────────────────────────── */
+// RPC única (agrega por día). Con sucursal_id = null → agrega TODAS.
+type RpcSerieRow = {
+  d: string;            // 'YYYY-MM-DD'
+  ventas_netas: number; // numeric
+  itbms: number;        // numeric
+  tx: number;           // bigint
+};
+
+// Vista por día/sucursal (para ranking cuando “todas”)
+type ViewSeriesRow = {
+  dia: string;          // 'YYYY-MM-DD'
+  sucursal_id: string;  // uuid
+  sucursal: string;     // nombre
+  ventas_brutas: number;
+  itbms: number;
+  tickets: number;
+  propina: number | null;
+};
+
+type TablaSucursal = { nombre: string; ventas: number; transacciones: number; ticketPromedio: number; };
+type SyncBranchStat = { name: string; orders: number; sales?: number };
+
+/* ──────────────────────────────────────────────────────────
    Página
    ────────────────────────────────────────────────────────── */
 export default function VentasPage() {
   const { sucursales, sucursalSeleccionada } = useAuthOrg();
   const functionsBase = useMemo(() => getFunctionsBase(), []);
 
-  // Rango por defecto: últimos 7 días
+  // Rango por defecto: últimos 7 días (incluyendo hoy)
   const hoy = useMemo(() => todayYMD(), []);
   const [desde, setDesde] = useState(addDays(hoy, -7));
   const [hasta, setHasta] = useState(hoy);
@@ -93,7 +109,7 @@ export default function VentasPage() {
   const [totalVentas, setTotalVentas] = useState(0);
   const [totalTransacciones, setTotalTransacciones] = useState(0);
   const [totalITBMS, setTotalITBMS] = useState(0);
-  const [rows, setRows] = useState<SucursalRow[]>([]);
+  const [rows, setRows] = useState<TablaSucursal[]>([]);
   const [seriesData, setSeriesData] = useState<any[]>([]);
   const [showDebug, setShowDebug] = useState(false);
   const [debugInfo, setDebugInfo] = useState<any>(null);
@@ -106,87 +122,69 @@ export default function VentasPage() {
     : `Viendo únicamente: ${selectedSucursalName ?? 'Sucursal'}`;
 
   /* ────────────────────────────────────────────────────────
-     CARGA PRINCIPAL — llama la RPC correcta según el modo
+     CARGA PRINCIPAL (una sola RPC) + ranking según modalidad
      ──────────────────────────────────────────────────────── */
   const loadData = useCallback(async () => {
     setLoading(true);
     try {
+      // 1) Serie vía RPC (agregada por día). Si viewingAll → p_sucursal_id = null
+      const { data: serie, error: eRpc } = await supabase.rpc<RpcSerieRow>('rpc_ui_series_14d', {
+        p_desde: desde,
+        p_hasta: hasta,
+        p_sucursal_id: viewingAll ? null : selectedSucursalId,
+      });
+      if (eRpc) throw eRpc;
+
+      const serieRows: RpcSerieRow[] = serie ?? [];
+      const serieFmt = (serieRows ?? [])
+        .map(r => ({
+          dia: r.d,
+          fecha: formatDateDDMMYYYY(r.d),
+          ventas: Number(r.ventas_netas ?? 0),
+          tickets: Number(r.tx ?? 0),
+        }))
+        .sort((a, b) => a.dia.localeCompare(b.dia));
+
+      setSeriesData(serieFmt);
+
+      // KPIs desde la RPC
+      let sumVentas = 0, sumTickets = 0, sumITBMS = 0;
+      for (const r of serieRows) {
+        sumVentas += Number(r.ventas_netas ?? 0);
+        sumTickets += Number(r.tx ?? 0);
+        sumITBMS += Number(r.itbms ?? 0);
+      }
+      setTotalVentas(sumVentas);
+      setTotalTransacciones(sumTickets);
+      setTotalITBMS(sumITBMS);
+
+      // 2) Ranking:
       if (viewingAll) {
-        // MODO TODAS — usa la variante por NOMBRE
-        const { data, error } = await supabase.rpc<SerieAllRow>('rpc_ui_series_14d', {
-          desde, hasta,
+        // Para "todas": consultamos la vista por sucursal y agregamos client-side
+        const { data: vrows, error: eView } = await supabase
+          .from('v_ui_series_14d')
+          .select('sucursal,sucursal_id,ventas_brutas,tickets,dia')
+          .gte('dia', desde)
+          .lte('dia', hasta); // inclusivo, como la RPC
+
+        if (eView) throw eView;
+
+        const acc = new Map<string, { nombre: string; ventas: number; transacciones: number }>();
+        (vrows as ViewSeriesRow[] | null)?.forEach(r => {
+          const key = r.sucursal;
+          const cur = acc.get(key) ?? { nombre: r.sucursal, ventas: 0, transacciones: 0 };
+          cur.ventas += Number(r.ventas_brutas ?? 0);
+          cur.transacciones += Number(r.tickets ?? 0);
+          acc.set(key, cur);
         });
-        if (error) throw error;
-
-        const all: SerieAllRow[] = data ?? [];
-
-        // Serie por día (suma todas las sucursales)
-        const byDay = new Map<string, { dia: string; fecha: string; ventas: number; tickets: number }>();
-        for (const r of all) {
-          const cur = byDay.get(r.dia) ?? { dia: r.dia, fecha: formatDateDDMMYYYY(r.dia), ventas: 0, tickets: 0 };
-          cur.ventas += Number(r.ventas ?? 0);
-          cur.tickets += Number(r.transacciones ?? 0);
-          byDay.set(r.dia, cur);
-        }
-        const serie = Array.from(byDay.values()).sort((a, b) => a.dia.localeCompare(b.dia));
-        setSeriesData(serie);
-
-        // Tabla por sucursal
-        const bySucursal = new Map<string, { nombre: string; ventas: number; transacciones: number }>();
-        for (const r of all) {
-          const cur = bySucursal.get(r.sucursal) ?? { nombre: r.sucursal, ventas: 0, transacciones: 0 };
-          cur.ventas += Number(r.ventas ?? 0);
-          cur.transacciones += Number(r.transacciones ?? 0);
-          bySucursal.set(r.sucursal, cur);
-        }
-        const rowsList = Array.from(bySucursal.values())
+        const rowsList = Array.from(acc.values())
           .map(e => ({ ...e, ticketPromedio: e.transacciones > 0 ? e.ventas / e.transacciones : 0 }))
           .sort((a, b) => b.ventas - a.ventas);
         setRows(rowsList);
-
-        // KPIs
-        let sumVentas = 0, sumTickets = 0, sumITBMS = 0;
-        for (const r of all) {
-          sumVentas += Number(r.ventas ?? 0);
-          sumTickets += Number(r.transacciones ?? 0);
-          sumITBMS += Number(r.itbms ?? 0);
-        }
-        setTotalVentas(sumVentas);
-        setTotalTransacciones(sumTickets);
-        setTotalITBMS(sumITBMS);
-
-        setDebugInfo({
-          modo: 'todas',
-          filtro: { desde, hasta },
-          rowsCount: all.length,
-          sample: all[0] ?? null,
-          seriePreview: serie.slice(0, 3),
-        });
       } else {
-        // MODO INDIVIDUAL — usa la variante por UUID
-        const { data, error } = await supabase.rpc<SerieOneRow>('rpc_ui_series_14d', {
-          p_desde: desde,
-          p_hasta: hasta,
-          p_sucursal_id: selectedSucursalId,
-        });
-        if (error) throw error;
-
-        const one: SerieOneRow[] = data ?? [];
-
-        // Serie por día
-        const serie = one
-          .map(r => ({
-            dia: r.d,
-            fecha: formatDateDDMMYYYY(r.d),
-            ventas: Number(r.ventas_netas ?? 0),
-            tickets: Number(r.tx ?? 0),
-          }))
-          .sort((a, b) => a.dia.localeCompare(b.dia));
-        setSeriesData(serie);
-
-        // Tabla (una sola sucursal)
-        const ventasTotal = serie.reduce((acc, r) => acc + r.ventas, 0);
-        const txTotal = serie.reduce((acc, r) => acc + r.tickets, 0);
+        // Para “individual”: usa el acumulado de la serie
+        const ventasTotal = serieFmt.reduce((acc, r) => acc + r.ventas, 0);
+        const txTotal = serieFmt.reduce((acc, r) => acc + r.tickets, 0);
         setRows([
           {
             nombre: selectedSucursalName ?? 'Sucursal',
@@ -195,23 +193,18 @@ export default function VentasPage() {
             ticketPromedio: txTotal > 0 ? ventasTotal / txTotal : 0,
           },
         ]);
-
-        // KPIs
-        setTotalVentas(ventasTotal);
-        setTotalTransacciones(txTotal);
-        setTotalITBMS(one.reduce((acc, r) => acc + Number(r.itbms ?? 0), 0));
-
-        setDebugInfo({
-          modo: 'individual',
-          filtro: { desde, hasta, selectedSucursalId, selectedSucursalName },
-          rowsCount: one.length,
-          sample: one[0] ?? null,
-          seriePreview: serie.slice(0, 3),
-        });
       }
+
+      setDebugInfo({
+        modo: viewingAll ? 'todas' : 'individual',
+        filtro: { desde, hasta, selectedSucursalId, selectedSucursalName },
+        serieCount: serieRows?.length ?? 0,
+        seriePreview: serieFmt.slice(0, 3),
+      });
     } catch (e) {
       debugLog('[VentasPage] loadData error:', e);
-      setRows([]); setSeriesData([]); setTotalVentas(0); setTotalTransacciones(0); setTotalITBMS(0);
+      setRows([]); setSeriesData([]);
+      setTotalVentas(0); setTotalTransacciones(0); setTotalITBMS(0);
       setDebugInfo({ error: String(e) });
     } finally {
       setLoading(false);
@@ -257,7 +250,6 @@ export default function VentasPage() {
       }
       if (!resp) throw new Error('No fue posible ejecutar la sincronización');
 
-      // Banner resumido
       let when = new Date().toISOString();
       try { const js = await resp.json(); if (js?.desde) when = js.desde; } catch {}
       setSyncBanner({ when, stats: [], visible: true, kind: 'ok', message: 'Sincronización completada.' });
@@ -399,13 +391,13 @@ export default function VentasPage() {
             color="bg-gradient-to-br from-blue-500 to-cyan-600" trend={8} />
         </div>
 
-        {/* Serie (14 días o rango elegido) */}
+        {/* Serie */}
         <div className="bg-white dark:bg-gray-800 rounded-2xl shadow-lg border border-gray-100 dark:border-gray-700">
           <div className="p-6 border-b border-gray-100 dark:border-gray-700 flex items-center justify-between">
             <div>
               <h3 className="text-xl font-bold text-gray-900 dark:text-white">Serie de ventas</h3>
               <p className="text-sm text-gray-500 dark:text-gray-400">
-                Fuente: {viewingAll ? 'RPC rpc_ui_series_14d(desde,hasta)' : 'RPC rpc_ui_series_14d(p_desde,p_hasta,p_sucursal_id)'}
+                Fuente: RPC rpc_ui_series_14d(p_desde,p_hasta,p_sucursal_id)
               </p>
             </div>
           </div>
@@ -473,3 +465,7 @@ export default function VentasPage() {
     </div>
   );
 }
+```
+
+Pega este archivo y dale build.
+Con esto **/ventas** ya no debería mostrar 0 para “Costa del Este” (usa la **RPC** que verificaste) y el **ranking** en modo “todas” sale del **view** consolidado.
