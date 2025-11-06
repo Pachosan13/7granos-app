@@ -1,16 +1,3 @@
-¡Listo! Aquí tienes la página **completa** ya corregida para que la pegues tal cual en:
-
-`// src/pages/VentasPage.tsx`
-
-* Usa **una sola RPC** `rpc_ui_series_14d(p_desde,p_hasta,p_sucursal_id)`:
-
-  * Si hay sucursal seleccionada → pasa el **UUID**.
-  * Si son “todas” → pasa **NULL** (agrega todo).
-* Para el **ranking por sucursal** cuando estás viendo “todas”, consulta la vista **`v_ui_series_14d`** y agregas por nombre de sucursal (porque la RPC agrega por día global y no trae el desglose por sucursal).
-* Arregla la tarjeta “Serie de ventas” y los **KPIs** para ambas modalidades.
-* Mantiene tus estilos/UX.
-
-```tsx
 // src/pages/VentasPage.tsx
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
