@@ -1,5 +1,4 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import type { PostgrestError } from '@supabase/supabase-js';
 import { CalendarDays, Clock, RefreshCw, Store } from 'lucide-react';
 import { supabase, shouldUseDemoMode } from '../lib/supabase';
 import { formatCurrencyUSD } from '../lib/format';
@@ -88,30 +87,27 @@ interface PlanillaRowPayload {
   ausencias?: NullableNumber;
 }
 
-type RpcParamValue = string | number | boolean | null | undefined;
-type RpcParams = Record<string, RpcParamValue>;
-
 const ISO_DATE_PATTERN = /^(\d{4})-(\d{2})-(\d{2})$/;
 
-function normalizeSucursalParam(value: string | number | null | undefined): string | number | null {
+function normalizeSucursalParam(value: string | number | null | undefined): string | null {
   if (value === null || value === undefined) {
     return null;
   }
+
   if (typeof value === 'number') {
-    return Number.isFinite(value) ? value : null;
+    return Number.isFinite(value) ? String(value) : null;
   }
-  const normalized = String(value).trim();
+
+  const normalized = value.trim();
   if (!normalized) {
     return null;
   }
+
   const lower = normalized.toLowerCase();
-  if (lower === 'all' || lower === 'todas' || lower === 'toda' || lower === 'tod@s') {
+  if (['all', 'todas', 'toda', 'tod@s'].includes(lower)) {
     return null;
   }
-  const numeric = Number(normalized);
-  if (Number.isFinite(numeric) && normalized === numeric.toString()) {
-    return numeric;
-  }
+
   return normalized;
 }
 
@@ -143,6 +139,26 @@ function normalizeRange(range: { desde?: string | null; hasta?: string | null })
     return fallback;
   }
   return { desde: fmt(startDate), hasta: fmt(endDate) };
+}
+
+interface DashboardParamsInput {
+  desde?: string | null;
+  hasta?: string | null;
+  sucursalId?: string | number | null;
+}
+
+interface DashboardParams {
+  desde: string;
+  hasta: string;
+  sucursal_id: string | null;
+}
+
+function normalizeDashboardParams({ desde, hasta, sucursalId }: DashboardParamsInput): DashboardParams {
+  const range = normalizeRange({ desde: desde ?? null, hasta: hasta ?? null });
+  return {
+    ...range,
+    sucursal_id: normalizeSucursalParam(sucursalId ?? null),
+  };
 }
 
 function sanitizeBranchKey(value: string | number | null | undefined): string {
@@ -184,26 +200,12 @@ function toNullableNumber(value: NullableNumber): number | null {
   return Number.isFinite(numeric) ? numeric : 0;
 }
 
-function normalizeParams(params: RpcParams): Record<string, RpcParamValue> {
-  return Object.fromEntries(
-    Object.entries(params).filter(([, value]) => value !== undefined)
-  ) as Record<string, RpcParamValue>;
-}
-
-async function rpcWithFallback<T>(fn: string, variants: RpcParams[]): Promise<T | null> {
-  let lastError: PostgrestError | Error | null = null;
-  for (let index = 0; index < variants.length; index += 1) {
-    const params = normalizeParams(variants[index]);
-    const response = await supabase.rpc<T>(fn, params as Record<string, unknown>);
-    if (!response.error) {
-      if (index > 0) {
-        console.warn(`[dashboard] ${fn} ejecutado con firma alternativa #${index + 1}`, params);
-      }
-      return response.data ?? null;
-    }
-    lastError = response.error;
+async function callDashboardRpc<T>(fn: string, params: DashboardParams): Promise<T | null> {
+  const response = await supabase.rpc<T>(fn, params as Record<string, unknown>);
+  if (response.error) {
+    throw response.error;
   }
-  throw lastError ?? new Error(`No se pudo ejecutar ${fn}`);
+  return response.data ?? null;
 }
 
 interface PlanillaSnapshot {
@@ -331,20 +333,14 @@ function buildDemoData(): {
   return { summary, series, ranking, top, heatmap, alerts, planilla, range: { desde, hasta } };
 }
 
-async function fetchSummary(desde: string, hasta: string, sucursalId: string | null): Promise<Summary7d | null> {
-  const normalizedRange = normalizeRange({ desde, hasta });
-  const normalizedSucursal = normalizeSucursalParam(sucursalId);
+async function fetchSummary(
+  desde: string,
+  hasta: string,
+  sucursalId: string | number | null
+): Promise<Summary7d | null> {
+  const params = normalizeDashboardParams({ desde, hasta, sucursalId });
 
-  const payload =
-    (await rpcWithFallback<SummaryRowPayload[]>(
-      'api_dashboard_summary_7d',
-      [
-        { p_desde: normalizedRange.desde, p_hasta: normalizedRange.hasta, p_sucursal_id: normalizedSucursal },
-        { desde: normalizedRange.desde, hasta: normalizedRange.hasta, p_sucursal_id: normalizedSucursal },
-        { desde: normalizedRange.desde, hasta: normalizedRange.hasta, sucursal_id: normalizedSucursal },
-        { desde: normalizedRange.desde, hasta: normalizedRange.hasta },
-      ]
-    )) ?? [];
+  const payload = (await callDashboardRpc<SummaryRowPayload[]>('api_dashboard_summary_7d', params)) ?? [];
 
   if (!payload.length) {
     return null;
@@ -361,7 +357,7 @@ async function fetchSummary(desde: string, hasta: string, sucursalId: string | n
     ventas_vs_semana_ant_pct: toNullableNumber(row.ventas_vs_semana_ant_pct),
   }));
 
-  if (normalizedSucursal === null && normalizedRows.length > 1) {
+  if (params.sucursal_id === null && normalizedRows.length > 1) {
     const totals = normalizedRows.reduce(
       (acc, row) => {
         acc.ventas_netas += row.ventas_netas;
@@ -399,20 +395,14 @@ async function fetchSummary(desde: string, hasta: string, sucursalId: string | n
   return first;
 }
 
-async function fetchSeries(desde: string, hasta: string, sucursalId: string | null): Promise<SeriesPoint[]> {
-  const normalizedRange = normalizeRange({ desde, hasta });
-  const normalizedSucursal = normalizeSucursalParam(sucursalId);
+async function fetchSeries(
+  desde: string,
+  hasta: string,
+  sucursalId: string | number | null
+): Promise<SeriesPoint[]> {
+  const params = normalizeDashboardParams({ desde, hasta, sucursalId });
 
-  const payload =
-    (await rpcWithFallback<SeriesRowPayload[]>(
-      'rpc_ui_series_14d',
-      [
-        { p_desde: normalizedRange.desde, p_hasta: normalizedRange.hasta, p_sucursal_id: normalizedSucursal },
-        { desde: normalizedRange.desde, hasta: normalizedRange.hasta, p_sucursal_id: normalizedSucursal },
-        { desde: normalizedRange.desde, hasta: normalizedRange.hasta, sucursal_id: normalizedSucursal },
-        { desde: normalizedRange.desde, hasta: normalizedRange.hasta },
-      ]
-    )) ?? [];
+  const payload = (await callDashboardRpc<SeriesRowPayload[]>('rpc_ui_series_14d', params)) ?? [];
 
   const mapped = payload
     .map<SeriesPoint | null>((row) => {
@@ -442,19 +432,14 @@ async function fetchSeries(desde: string, hasta: string, sucursalId: string | nu
   return Array.from(merged.values()).sort((a, b) => a.d.localeCompare(b.d));
 }
 
-async function fetchRanking(desde: string, hasta: string, sucursalId: string | null): Promise<LeaderboardRow[]> {
-  const normalizedRange = normalizeRange({ desde, hasta });
-  const normalizedSucursal = normalizeSucursalParam(sucursalId);
+async function fetchRanking(
+  desde: string,
+  hasta: string,
+  sucursalId: string | number | null
+): Promise<LeaderboardRow[]> {
+  const params = normalizeDashboardParams({ desde, hasta, sucursalId });
 
-  const payload =
-    (await rpcWithFallback<RankingRowPayload[]>(
-      'api_dashboard_ranking_7d',
-      [
-        { p_desde: normalizedRange.desde, p_hasta: normalizedRange.hasta, p_sucursal_id: normalizedSucursal },
-        { desde: normalizedRange.desde, hasta: normalizedRange.hasta, p_sucursal_id: normalizedSucursal },
-        { desde: normalizedRange.desde, hasta: normalizedRange.hasta },
-      ]
-    )) ?? [];
+  const payload = (await callDashboardRpc<RankingRowPayload[]>('api_dashboard_ranking_7d', params)) ?? [];
 
   const aggregated = new Map<string, LeaderboardRow>();
 
@@ -495,20 +480,15 @@ async function fetchRanking(desde: string, hasta: string, sucursalId: string | n
     .sort((a, b) => b.ventas - a.ventas);
 }
 
-async function fetchTopProducts(desde: string, hasta: string, sucursalId: string | null): Promise<TopProductItem[]> {
+async function fetchTopProducts(
+  desde: string,
+  hasta: string,
+  sucursalId: string | number | null
+): Promise<TopProductItem[]> {
   try {
-    const normalizedRange = normalizeRange({ desde, hasta });
-    const normalizedSucursal = normalizeSucursalParam(sucursalId);
+    const params = normalizeDashboardParams({ desde, hasta, sucursalId });
     const payload =
-      (await rpcWithFallback<TopProductRowPayload[]>(
-        'api_dashboard_top_productos_7d',
-        [
-          { p_desde: normalizedRange.desde, p_hasta: normalizedRange.hasta, p_sucursal_id: normalizedSucursal },
-          { desde: normalizedRange.desde, hasta: normalizedRange.hasta, p_sucursal_id: normalizedSucursal },
-          { desde: normalizedRange.desde, hasta: normalizedRange.hasta, sucursal_id: normalizedSucursal },
-          { desde: normalizedRange.desde, hasta: normalizedRange.hasta },
-        ]
-      )) ?? [];
+      (await callDashboardRpc<TopProductRowPayload[]>('api_dashboard_top_productos_7d', params)) ?? [];
 
     return payload.map((row) => ({
       producto: row.producto ?? 'Producto',
@@ -521,20 +501,15 @@ async function fetchTopProducts(desde: string, hasta: string, sucursalId: string
   }
 }
 
-async function fetchHeatmap(desde: string, hasta: string, sucursalId: string | null): Promise<HeatmapPoint[]> {
+async function fetchHeatmap(
+  desde: string,
+  hasta: string,
+  sucursalId: string | number | null
+): Promise<HeatmapPoint[]> {
   try {
-    const normalizedRange = normalizeRange({ desde, hasta });
-    const normalizedSucursal = normalizeSucursalParam(sucursalId);
+    const params = normalizeDashboardParams({ desde, hasta, sucursalId });
     const payload =
-      (await rpcWithFallback<HeatmapRowPayload[]>(
-        'api_dashboard_heatmap_hora_7d',
-        [
-          { p_desde: normalizedRange.desde, p_hasta: normalizedRange.hasta, p_sucursal_id: normalizedSucursal },
-          { desde: normalizedRange.desde, hasta: normalizedRange.hasta, p_sucursal_id: normalizedSucursal },
-          { desde: normalizedRange.desde, hasta: normalizedRange.hasta, sucursal_id: normalizedSucursal },
-          { desde: normalizedRange.desde, hasta: normalizedRange.hasta },
-        ]
-      )) ?? [];
+      (await callDashboardRpc<HeatmapRowPayload[]>('api_dashboard_heatmap_hora_7d', params)) ?? [];
 
     const byHour = new Map<number, HeatmapPoint>();
 
@@ -559,20 +534,15 @@ async function fetchHeatmap(desde: string, hasta: string, sucursalId: string | n
   }
 }
 
-async function fetchAlerts(desde: string, hasta: string, sucursalId: string | null): Promise<AlertItem[]> {
+async function fetchAlerts(
+  desde: string,
+  hasta: string,
+  sucursalId: string | number | null
+): Promise<AlertItem[]> {
   try {
-    const normalizedRange = normalizeRange({ desde, hasta });
-    const normalizedSucursal = normalizeSucursalParam(sucursalId);
+    const params = normalizeDashboardParams({ desde, hasta, sucursalId });
     const payload =
-      (await rpcWithFallback<AlertRowPayload[]>(
-        'api_dashboard_alertas_7d',
-        [
-          { p_desde: normalizedRange.desde, p_hasta: normalizedRange.hasta, p_sucursal_id: normalizedSucursal },
-          { desde: normalizedRange.desde, hasta: normalizedRange.hasta, p_sucursal_id: normalizedSucursal },
-          { desde: normalizedRange.desde, hasta: normalizedRange.hasta, sucursal_id: normalizedSucursal },
-          { desde: normalizedRange.desde, hasta: normalizedRange.hasta },
-        ]
-      )) ?? [];
+      (await callDashboardRpc<AlertRowPayload[]>('api_dashboard_alertas_7d', params)) ?? [];
 
     return payload.map((row) => ({
       code: String(row.code ?? 'alert'),
@@ -585,20 +555,15 @@ async function fetchAlerts(desde: string, hasta: string, sucursalId: string | nu
   }
 }
 
-async function fetchPlanillaSnapshot(desde: string, hasta: string, sucursalId: string | null): Promise<PlanillaSnapshot | null> {
+async function fetchPlanillaSnapshot(
+  desde: string,
+  hasta: string,
+  sucursalId: string | number | null
+): Promise<PlanillaSnapshot | null> {
   try {
-    const normalizedRange = normalizeRange({ desde, hasta });
-    const normalizedSucursal = normalizeSucursalParam(sucursalId);
+    const params = normalizeDashboardParams({ desde, hasta, sucursalId });
     const payload =
-      (await rpcWithFallback<PlanillaRowPayload[]>(
-        'api_dashboard_planilla_snapshot',
-        [
-          { p_desde: normalizedRange.desde, p_hasta: normalizedRange.hasta, p_sucursal_id: normalizedSucursal },
-          { desde: normalizedRange.desde, hasta: normalizedRange.hasta, p_sucursal_id: normalizedSucursal },
-          { desde: normalizedRange.desde, hasta: normalizedRange.hasta, sucursal_id: normalizedSucursal },
-          { desde: normalizedRange.desde, hasta: normalizedRange.hasta },
-        ]
-      )) ?? [];
+      (await callDashboardRpc<PlanillaRowPayload[]>('api_dashboard_planilla_snapshot', params)) ?? [];
 
     const row = payload[0];
     if (!row) {
@@ -671,14 +636,13 @@ export default function DashboardExecutive() {
     setLoading(true);
     setError(null);
     try {
-      const normalizedSucursal = normalizeSucursalParam(selectedSucursalId);
       const primaryRange = normalizeRange(sevenDayWindow(true));
       const chartRange = normalizeRange({
         desde: addDays(primaryRange.desde, -7),
         hasta: primaryRange.hasta,
       });
 
-      const initialSeries = await fetchSeries(chartRange.desde, chartRange.hasta, normalizedSucursal);
+      const initialSeries = await fetchSeries(chartRange.desde, chartRange.hasta, selectedSucursalId ?? null);
       let effectiveRange = primaryRange;
       let seriesData = initialSeries;
       let fallback = false;
@@ -695,18 +659,18 @@ export default function DashboardExecutive() {
           desde: addDays(altRange.desde, -7),
           hasta: altRange.hasta,
         });
-        seriesData = await fetchSeries(altChartRange.desde, altChartRange.hasta, normalizedSucursal);
+        seriesData = await fetchSeries(altChartRange.desde, altChartRange.hasta, selectedSucursalId ?? null);
         effectiveRange = altRange;
         fallback = true;
       }
 
       const [summaryData, rankingData, topData, heatmapData, alertData, planillaData] = await Promise.all([
-        fetchSummary(effectiveRange.desde, effectiveRange.hasta, normalizedSucursal),
-        fetchRanking(effectiveRange.desde, effectiveRange.hasta, normalizedSucursal),
-        fetchTopProducts(effectiveRange.desde, effectiveRange.hasta, normalizedSucursal),
-        fetchHeatmap(effectiveRange.desde, effectiveRange.hasta, normalizedSucursal),
-        fetchAlerts(effectiveRange.desde, effectiveRange.hasta, normalizedSucursal),
-        fetchPlanillaSnapshot(effectiveRange.desde, effectiveRange.hasta, normalizedSucursal),
+        fetchSummary(effectiveRange.desde, effectiveRange.hasta, selectedSucursalId ?? null),
+        fetchRanking(effectiveRange.desde, effectiveRange.hasta, selectedSucursalId ?? null),
+        fetchTopProducts(effectiveRange.desde, effectiveRange.hasta, selectedSucursalId ?? null),
+        fetchHeatmap(effectiveRange.desde, effectiveRange.hasta, selectedSucursalId ?? null),
+        fetchAlerts(effectiveRange.desde, effectiveRange.hasta, selectedSucursalId ?? null),
+        fetchPlanillaSnapshot(effectiveRange.desde, effectiveRange.hasta, selectedSucursalId ?? null),
       ]);
 
       setSummary(summaryData);
