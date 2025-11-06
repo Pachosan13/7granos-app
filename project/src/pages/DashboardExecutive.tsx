@@ -56,6 +56,11 @@ interface SeriesRowPayload {
 interface RankingRowPayload {
   sucursal_id?: string | number | null;
   sucursal_nombre?: string | null;
+  sucursal?: string | null;
+  nombre?: string | null;
+  alias?: string | null;
+  branch?: string | null;
+  sucursalName?: string | null;
   ventas?: NullableNumber;
   cogs?: NullableNumber;
   gastos?: NullableNumber;
@@ -181,6 +186,119 @@ function sanitizeBranchName(value: string | null | undefined): string {
     return 'Sin sucursal';
   }
   return trimmed;
+}
+
+function branchKey(value: string | number | null | undefined): string {
+  const sanitized = sanitizeBranchKey(value ?? null);
+  return sanitized === 'desconocida' ? 'desconocida' : sanitized.toLowerCase();
+}
+
+interface BranchKeyCandidate {
+  key: string;
+  raw: string;
+}
+
+function collectBranchKeyCandidates(row: RankingRowPayload): BranchKeyCandidate[] {
+  const values: Array<string | number | null | undefined> = [
+    row.sucursal_id,
+    row.sucursal_nombre,
+    row.sucursal,
+    row.nombre,
+    row.alias,
+    row.branch,
+    row.sucursalName,
+  ];
+
+  const seen = new Set<string>();
+  const candidates: BranchKeyCandidate[] = [];
+
+  values.forEach((value) => {
+    if (value === null || value === undefined) {
+      return;
+    }
+    const raw = String(value).trim();
+    if (!raw) {
+      return;
+    }
+    const key = branchKey(value);
+    if (key === 'desconocida' || seen.has(key)) {
+      return;
+    }
+    seen.add(key);
+    candidates.push({ key, raw });
+  });
+
+  return candidates;
+}
+
+interface BranchCatalogItem {
+  id?: string | number | null;
+  nombre?: string | null;
+}
+
+interface BranchCatalogEntry {
+  id: string;
+  nombre: string;
+}
+
+function buildBranchCatalogIndex(catalog: BranchCatalogItem[]): Map<string, BranchCatalogEntry> {
+  const index = new Map<string, BranchCatalogEntry>();
+
+  catalog.forEach((item) => {
+    if (!item) {
+      return;
+    }
+
+    const idRaw = item.id !== null && item.id !== undefined ? String(item.id).trim() : '';
+    const nombreRaw = item.nombre?.toString().trim() ?? '';
+
+    if (!idRaw && !nombreRaw) {
+      return;
+    }
+
+    const entry: BranchCatalogEntry = {
+      id: idRaw || nombreRaw,
+      nombre: nombreRaw || idRaw || 'Sucursal',
+    };
+
+    [idRaw, nombreRaw].forEach((value) => {
+      if (!value) {
+        return;
+      }
+      const key = branchKey(value);
+      if (key === 'desconocida') {
+        return;
+      }
+      if (!index.has(key)) {
+        index.set(key, entry);
+      }
+    });
+  });
+
+  return index;
+}
+
+function extractBranchName(
+  row: RankingRowPayload,
+  fallback: BranchCatalogEntry | null
+): string | null {
+  const candidates: Array<string | null | undefined> = [
+    row.sucursal_nombre,
+    row.sucursal,
+    row.nombre,
+    row.alias,
+    row.branch,
+    row.sucursalName,
+    fallback?.nombre ?? null,
+  ];
+
+  for (const candidate of candidates) {
+    if (candidate && String(candidate).trim()) {
+      return String(candidate).trim();
+    }
+  }
+
+  return null;
 }
 
 function toNumber(value: NullableNumber): number {
@@ -578,11 +696,14 @@ async function fetchSeries(
 async function fetchRanking(
   desde: string,
   hasta: string,
-  sucursalId: string | number | null
+  sucursalId: string | number | null,
+  catalog: BranchCatalogItem[]
 ): Promise<LeaderboardRow[]> {
   const params = normalizeDashboardParams({ desde, hasta, sucursalId });
 
   const payload = (await callDashboardRpc<RankingRowPayload[]>('api_dashboard_ranking_7d', params)) ?? [];
+
+  const branchIndex = buildBranchCatalogIndex(catalog);
 
   interface RankingAccumulator extends LeaderboardRow {
     matchKeys: Set<string>;
@@ -591,16 +712,23 @@ async function fetchRanking(
   const aggregated = new Map<string, RankingAccumulator>();
 
   payload.forEach((row) => {
+    const candidates = collectBranchKeyCandidates(row);
     const rawId = row.sucursal_id ?? null;
-    const idKey = sanitizeBranchKey(rawId);
-    const nombre = sanitizeBranchName(row.sucursal_nombre);
-    const nameKey = sanitizeBranchKey(row.sucursal_nombre ?? null);
-    const resolvedKey = idKey !== 'desconocida' ? idKey : nameKey !== 'desconocida' ? nameKey : 'desconocida';
+    const catalogMatch =
+      candidates.map((candidate) => branchIndex.get(candidate.key)).find(Boolean) ?? null;
+
+    const canonicalId =
+      catalogMatch?.id ??
+      (rawId !== null && rawId !== undefined && String(rawId).trim()
+        ? String(rawId).trim()
+        : candidates[0]?.raw ?? 'desconocida');
+
+    const mapKey = branchKey(canonicalId);
 
     const existing =
-      aggregated.get(resolvedKey) ?? {
-        sucursal_id: idKey !== 'desconocida' && rawId !== null ? String(rawId) : resolvedKey,
-        sucursal_nombre: nombre,
+      aggregated.get(mapKey) ?? {
+        sucursal_id: String(canonicalId),
+        sucursal_nombre: sanitizeBranchName(extractBranchName(row, catalogMatch)),
         ventas: 0,
         cogs: 0,
         gastos: 0,
@@ -608,6 +736,18 @@ async function fetchRanking(
         margen_pct: 0,
         matchKeys: new Set<string>(),
       };
+
+    existing.sucursal_id = String(canonicalId);
+
+    const resolvedName = extractBranchName(row, catalogMatch);
+    if (resolvedName) {
+      const cleaned = sanitizeBranchName(resolvedName);
+      if (!existing.sucursal_nombre || existing.sucursal_nombre === 'Sin sucursal') {
+        existing.sucursal_nombre = cleaned;
+      }
+    } else if (catalogMatch?.nombre && (!existing.sucursal_nombre || existing.sucursal_nombre === 'Sin sucursal')) {
+      existing.sucursal_nombre = catalogMatch.nombre;
+    }
 
     const ventas = toNumber(row.ventas);
     const cogs = toNumber(row.cogs);
@@ -619,28 +759,26 @@ async function fetchRanking(
     existing.gastos += gastos;
     existing.utilidad += utilidad;
 
-    if (rawId !== null) {
-      existing.matchKeys.add(sanitizeBranchKey(rawId));
-      if (existing.sucursal_id === resolvedKey || existing.sucursal_id === 'desconocida') {
-        existing.sucursal_id = String(rawId);
+    existing.matchKeys.add(mapKey);
+    candidates.forEach((candidate) => existing.matchKeys.add(candidate.key));
+
+    if (catalogMatch) {
+      existing.matchKeys.add(branchKey(catalogMatch.id));
+      existing.matchKeys.add(branchKey(catalogMatch.nombre));
+      if (!existing.sucursal_nombre || existing.sucursal_nombre === 'Sin sucursal') {
+        existing.sucursal_nombre = catalogMatch.nombre;
       }
+      existing.sucursal_id = catalogMatch.id;
+    } else if (rawId !== null && rawId !== undefined && String(rawId).trim()) {
+      existing.matchKeys.add(branchKey(rawId));
+      existing.sucursal_id = String(rawId).trim();
     }
 
-    if (row.sucursal_nombre) {
-      existing.matchKeys.add(sanitizeBranchKey(row.sucursal_nombre));
-    }
-
-    if (!existing.sucursal_nombre || existing.sucursal_nombre === 'Sin sucursal') {
-      existing.sucursal_nombre = nombre;
-    }
-
-    existing.matchKeys.add(resolvedKey);
-
-    aggregated.set(resolvedKey, existing);
+    aggregated.set(mapKey, existing);
   });
 
   const aggregatedRows = Array.from(aggregated.values());
-  const targetKey = params.sucursal_id !== null ? sanitizeBranchKey(params.sucursal_id) : null;
+  const targetKey = params.sucursal_id !== null ? branchKey(params.sucursal_id) : null;
 
   const scopedRows =
     targetKey && aggregatedRows.some((row) => row.matchKeys.has(targetKey))
@@ -648,10 +786,14 @@ async function fetchRanking(
       : aggregatedRows;
 
   return scopedRows
-    .map(({ matchKeys, ...row }) => ({
-      ...row,
-      margen_pct: row.ventas > 0 ? (row.ventas - row.cogs) / row.ventas : 0,
-    }))
+    .map((row) => {
+      const { matchKeys, ...rest } = row;
+      void matchKeys;
+      return {
+        ...rest,
+        margen_pct: rest.ventas > 0 ? (rest.ventas - rest.cogs) / rest.ventas : 0,
+      };
+    })
     .sort((a, b) => b.ventas - a.ventas);
 }
 
@@ -839,9 +981,11 @@ export default function DashboardExecutive() {
         fallback = true;
       }
 
+      const branchCatalog = Array.isArray(sucursales) ? sucursales : [];
+
       const [summaryData, rankingData, topData, heatmapData, alertData, planillaData] = await Promise.all([
         fetchSummary(effectiveRange.desde, effectiveRange.hasta, selectedSucursalId ?? null),
-        fetchRanking(effectiveRange.desde, effectiveRange.hasta, selectedSucursalId ?? null),
+        fetchRanking(effectiveRange.desde, effectiveRange.hasta, selectedSucursalId ?? null, branchCatalog),
         fetchTopProducts(effectiveRange.desde, effectiveRange.hasta, selectedSucursalId ?? null),
         fetchHeatmap(effectiveRange.desde, effectiveRange.hasta, selectedSucursalId ?? null),
         fetchAlerts(effectiveRange.desde, effectiveRange.hasta, selectedSucursalId ?? null),
@@ -872,13 +1016,43 @@ export default function DashboardExecutive() {
     } finally {
       setLoading(false);
     }
-  }, [selectedSucursalId]);
+  }, [selectedSucursalId, sucursales]);
 
   useEffect(() => {
     loadData();
   }, [loadData]);
 
   const sucursalesOptions = useMemo(() => sucursales ?? [], [sucursales]);
+
+  const rankingRows = useMemo(() => {
+    if (!ranking.length) {
+      return ranking;
+    }
+
+    const catalogIndex = buildBranchCatalogIndex(sucursalesOptions);
+
+    return ranking.map((row) => {
+      if (row.sucursal_nombre && row.sucursal_nombre !== 'Sin sucursal') {
+        return row;
+      }
+
+      const rowKeys = [branchKey(row.sucursal_id), branchKey(row.sucursal_nombre ?? null)].filter(
+        (key) => key && key !== 'desconocida'
+      );
+
+      const match = rowKeys.map((key) => catalogIndex.get(key)).find(Boolean) ?? null;
+
+      if (!match) {
+        return row;
+      }
+
+      return {
+        ...row,
+        sucursal_id: match.id,
+        sucursal_nombre: match.nombre,
+      };
+    });
+  }, [ranking, sucursalesOptions]);
 
   const cashflow = useMemo(() => computeCashflow(summary), [summary]);
   const rangeLabel = useMemo(() => safeFormatRangeLabel(range.desde, range.hasta), [range.desde, range.hasta]);
@@ -1033,13 +1207,7 @@ export default function DashboardExecutive() {
         <section className="grid grid-cols-1 gap-6 xl:grid-cols-3">
           <div className="xl:col-span-2">
             <h2 className="mb-4 text-lg font-semibold text-slate-900">Ranking de sucursales</h2>
-            <Leaderboard
-              rows={ranking.map((row) => ({
-                ...row,
-                sucursal_nombre:
-                  row.sucursal_nombre || sucursalesOptions.find((s) => s.id === row.sucursal_id)?.nombre,
-              }))}
-            />
+            <Leaderboard rows={rankingRows} />
           </div>
           <div className="space-y-6">
             <div className="rounded-2xl bg-white p-6 shadow-sm ring-1 ring-slate-100 dark:bg-slate-900 dark:ring-slate-800">
