@@ -32,6 +32,7 @@ interface SeriesPoint {
 type NullableNumber = number | string | null | undefined;
 
 interface SummaryRowPayload {
+  sucursal_id?: string | number | null;
   ventas_netas?: NullableNumber;
   cogs?: NullableNumber;
   gastos?: NullableNumber;
@@ -55,6 +56,17 @@ interface SeriesRowPayload {
 interface RankingRowPayload {
   sucursal_id?: string | number | null;
   sucursal_nombre?: string | null;
+  sucursal?: string | null;
+  nombre?: string | null;
+  alias?: string | null;
+  branch?: string | null;
+  sucursalName?: string | null;
+  branch_id?: string | number | null;
+  branchId?: string | number | null;
+  branch_name?: string | null;
+  branchName?: string | null;
+  nombre_sucursal?: string | null;
+  nombreSucursal?: string | null;
   ventas?: NullableNumber;
   cogs?: NullableNumber;
   gastos?: NullableNumber;
@@ -88,15 +100,230 @@ interface PlanillaRowPayload {
   ausencias?: NullableNumber;
 }
 
-type RpcParamValue = string | number | boolean | null | undefined;
-type RpcParams = Record<string, RpcParamValue>;
+const ISO_DATE_PATTERN = /^(\d{4})-(\d{2})-(\d{2})$/;
+
+function normalizeSucursalParam(value: string | number | null | undefined): string | null {
+  if (value === null || value === undefined) {
+    return null;
+  }
+
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? String(value) : null;
+  }
+
+  const normalized = value.trim();
+  if (!normalized) {
+    return null;
+  }
+
+  const lower = normalized.toLowerCase();
+  if (['all', 'todas', 'toda', 'tod@s', 'null', 'undefined'].includes(lower)) {
+    return null;
+  }
+
+  return normalized;
+}
+
+function safeDateFromInput(value: string | null | undefined): Date | null {
+  if (!value) {
+    return null;
+  }
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return null;
+  }
+  if (ISO_DATE_PATTERN.test(trimmed)) {
+    const match = ISO_DATE_PATTERN.exec(trimmed);
+    if (match) {
+      const [, year, month, day] = match;
+      const parsed = new Date(Number(year), Number(month) - 1, Number(day));
+      return Number.isNaN(parsed.getTime()) ? null : parsed;
+    }
+  }
+  const parsed = new Date(trimmed);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+function normalizeRange(range: { desde?: string | null; hasta?: string | null }): { desde: string; hasta: string } {
+  const fallback = sevenDayWindow(true);
+  const startDate = safeDateFromInput(range.desde) ?? new Date(`${fallback.desde}T00:00:00`);
+  const endDate = safeDateFromInput(range.hasta) ?? new Date(`${fallback.hasta}T00:00:00`);
+  if (endDate.getTime() < startDate.getTime()) {
+    return fallback;
+  }
+  return { desde: fmt(startDate), hasta: fmt(endDate) };
+}
+
+interface DashboardParamsInput {
+  desde?: string | null;
+  hasta?: string | null;
+  sucursalId?: string | number | null;
+}
+
+interface DashboardParams {
+  desde: string;
+  hasta: string;
+  sucursal_id: string | null;
+}
+
+function normalizeDashboardParams({ desde, hasta, sucursalId }: DashboardParamsInput): DashboardParams {
+  const range = normalizeRange({ desde: desde ?? null, hasta: hasta ?? null });
+  return {
+    ...range,
+    sucursal_id: normalizeSucursalParam(sucursalId ?? null),
+  };
+}
+
+function sanitizeBranchKey(value: string | number | null | undefined): string {
+  const raw = value === null || value === undefined ? '' : String(value).trim();
+  if (!raw) {
+    return 'desconocida';
+  }
+  const lower = raw.toLowerCase();
+  if (['sin-id', 'sinid', 'sin - id', 'sin id', 'null', 'undefined'].includes(lower)) {
+    return 'desconocida';
+  }
+  return raw;
+}
+
+function sanitizeBranchName(value: string | null | undefined): string {
+  const trimmed = value?.trim();
+  if (!trimmed) {
+    return 'Sin sucursal';
+  }
+  return trimmed;
+}
+
+function branchKey(value: string | number | null | undefined): string {
+  const sanitized = sanitizeBranchKey(value ?? null);
+  return sanitized === 'desconocida' ? 'desconocida' : sanitized.toLowerCase();
+}
+
+interface BranchKeyCandidate {
+  key: string;
+  raw: string;
+}
+
+function collectBranchKeyCandidates(row: RankingRowPayload): BranchKeyCandidate[] {
+  const values: Array<string | number | null | undefined> = [
+    row.sucursal_id,
+    row.branch_id,
+    row.branchId,
+    row.sucursal_nombre,
+    row.branch_name,
+    row.branchName,
+    row.sucursal,
+    row.nombre,
+    row.alias,
+    row.branch,
+    row.sucursalName,
+    row.nombre_sucursal,
+    row.nombreSucursal,
+  ];
+
+  const seen = new Set<string>();
+  const candidates: BranchKeyCandidate[] = [];
+
+  values.forEach((value) => {
+    if (value === null || value === undefined) {
+      return;
+    }
+    const raw = String(value).trim();
+    if (!raw) {
+      return;
+    }
+    const key = branchKey(value);
+    if (key === 'desconocida' || seen.has(key)) {
+      return;
+    }
+    seen.add(key);
+    candidates.push({ key, raw });
+  });
+
+  return candidates;
+}
+
+interface BranchCatalogItem {
+  id?: string | number | null;
+  nombre?: string | null;
+}
+
+interface BranchCatalogEntry {
+  id: string;
+  nombre: string;
+}
+
+function buildBranchCatalogIndex(catalog: BranchCatalogItem[]): Map<string, BranchCatalogEntry> {
+  const index = new Map<string, BranchCatalogEntry>();
+
+  catalog.forEach((item) => {
+    if (!item) {
+      return;
+    }
+
+    const idRaw = item.id !== null && item.id !== undefined ? String(item.id).trim() : '';
+    const nombreRaw = item.nombre?.toString().trim() ?? '';
+
+    if (!idRaw && !nombreRaw) {
+      return;
+    }
+
+    const entry: BranchCatalogEntry = {
+      id: idRaw || nombreRaw,
+      nombre: nombreRaw || idRaw || 'Sucursal',
+    };
+
+    [idRaw, nombreRaw].forEach((value) => {
+      if (!value) {
+        return;
+      }
+      const key = branchKey(value);
+      if (key === 'desconocida') {
+        return;
+      }
+      if (!index.has(key)) {
+        index.set(key, entry);
+      }
+    });
+  });
+
+  return index;
+}
+
+function extractBranchName(
+  row: RankingRowPayload,
+  fallback: BranchCatalogEntry | null
+): string | null {
+  const candidates: Array<string | null | undefined> = [
+    row.sucursal_nombre,
+    row.branch_name,
+    row.branchName,
+    row.sucursal,
+    row.nombre,
+    row.alias,
+    row.branch,
+    row.sucursalName,
+    row.nombre_sucursal,
+    row.nombreSucursal,
+    fallback?.nombre ?? null,
+  ];
+
+  for (const candidate of candidates) {
+    if (candidate && String(candidate).trim()) {
+      return String(candidate).trim();
+    }
+  }
+
+  return null;
+}
 
 function toNumber(value: NullableNumber): number {
   if (typeof value === 'number') {
     return Number.isFinite(value) ? value : 0;
   }
   if (typeof value === 'string') {
-    const parsed = Number(value);
+    const normalized = value.replace(/\s+/g, '').replace(/,/g, '');
+    const parsed = Number(normalized);
     return Number.isFinite(parsed) ? parsed : 0;
   }
   return 0;
@@ -110,26 +337,73 @@ function toNullableNumber(value: NullableNumber): number | null {
   return Number.isFinite(numeric) ? numeric : 0;
 }
 
-function normalizeParams(params: RpcParams): Record<string, RpcParamValue> {
-  return Object.fromEntries(
-    Object.entries(params).filter(([, value]) => value !== undefined)
-  ) as Record<string, RpcParamValue>;
+interface RpcCallOptions {
+  includeSucursalParam?: boolean;
 }
 
-async function rpcWithFallback<T>(fn: string, variants: RpcParams[]): Promise<T | null> {
-  let lastError: PostgrestError | Error | null = null;
-  for (let index = 0; index < variants.length; index += 1) {
-    const params = normalizeParams(variants[index]);
-    const response = await supabase.rpc<T>(fn, params as Record<string, unknown>);
-    if (!response.error) {
-      if (index > 0) {
-        console.warn(`[dashboard] ${fn} ejecutado con firma alternativa #${index + 1}`, params);
-      }
-      return response.data ?? null;
+async function callDashboardRpc<T>(
+  fn: string,
+  params: DashboardParams,
+  options: RpcCallOptions = {}
+): Promise<T | null> {
+  const { includeSucursalParam = true } = options;
+
+  const base = { desde: params.desde, hasta: params.hasta } as const;
+  const legacyBase = { p_desde: params.desde, p_hasta: params.hasta } as const;
+
+  const variants: Array<Record<string, unknown>> = [];
+  const seen = new Set<string>();
+  const pushVariant = (variant: Record<string, unknown>) => {
+    const cleanedEntries = Object.entries(variant).filter(([, value]) => value !== undefined);
+    const cleaned = Object.fromEntries(cleanedEntries);
+    const key = JSON.stringify(cleaned);
+    if (!seen.has(key) && cleanedEntries.length > 0) {
+      variants.push(cleaned);
+      seen.add(key);
     }
-    lastError = response.error;
+  };
+
+  if (includeSucursalParam) {
+    pushVariant({ ...base, sucursal_id: params.sucursal_id });
+    pushVariant({ ...base, p_sucursal_id: params.sucursal_id });
+    pushVariant({ ...legacyBase, sucursal_id: params.sucursal_id });
+    pushVariant({ ...legacyBase, p_sucursal_id: params.sucursal_id });
   }
-  throw lastError ?? new Error(`No se pudo ejecutar ${fn}`);
+
+  pushVariant(base);
+  pushVariant(legacyBase);
+
+  let lastError: PostgrestError | Error | null = null;
+
+  for (let index = 0; index < variants.length; index += 1) {
+    const payload = variants[index];
+    const { data, error } = await supabase.rpc<T>(fn, payload);
+    if (!error) {
+      if (index > 0 && import.meta.env.DEV) {
+        console.warn(`[dashboard] ${fn} usó firma alternativa #${index + 1}`, payload);
+      }
+      return data ?? null;
+    }
+
+    lastError = error;
+
+    const code = (error as PostgrestError).code;
+    const isParamMismatch = code === 'PGRST202' || code === 'PGRST204' || code === 'PGRST302';
+
+    if (!isParamMismatch && !includeSucursalParam) {
+      break;
+    }
+  }
+
+  if (import.meta.env.DEV) {
+    console.error(`[dashboard] rpc ${fn} falló`, variants, lastError);
+  }
+
+  if (lastError) {
+    throw lastError;
+  }
+
+  return null;
 }
 
 interface PlanillaSnapshot {
@@ -257,96 +531,313 @@ function buildDemoData(): {
   return { summary, series, ranking, top, heatmap, alerts, planilla, range: { desde, hasta } };
 }
 
-async function fetchSummary(desde: string, hasta: string, sucursalId: string | null): Promise<Summary7d | null> {
-  const payload =
-    (await rpcWithFallback<SummaryRowPayload[]>(
-      'api_dashboard_summary_7d',
-      [
-        { p_desde: desde, p_hasta: hasta, p_sucursal_id: sucursalId },
-        { desde, hasta, p_sucursal_id: sucursalId },
-        { desde, hasta, sucursal_id: sucursalId },
-        { desde, hasta },
-      ]
-    )) ?? [];
+async function fetchSummary(
+  desde: string,
+  hasta: string,
+  sucursalId: string | number | null
+): Promise<Summary7d | null> {
+  const params = normalizeDashboardParams({ desde, hasta, sucursalId });
 
-  const row = payload[0];
-  if (!row) {
+  const payload = (await callDashboardRpc<SummaryRowPayload[]>('api_dashboard_summary_7d', params)) ?? [];
+
+  if (!payload.length) {
     return null;
   }
 
-  return {
-    ventas_netas: toNumber(row.ventas_netas),
-    cogs: toNumber(row.cogs),
-    gastos: toNumber(row.gastos),
-    utilidad: toNumber(row.utilidad),
-    tx: toNumber(row.tx),
-    ticket_promedio: toNumber(row.ticket_promedio),
-    margen_bruto_pct: toNumber(row.margen_bruto_pct),
-    ventas_vs_semana_ant_pct: toNullableNumber(row.ventas_vs_semana_ant_pct),
+  type SummaryAccumulator = {
+    branch: string | null;
+    ventas_netas: number;
+    cogs: number;
+    gastos: number;
+    utilidad: number;
+    tx: number;
+    deltaSum: number;
+    deltaWeight: number;
   };
+
+  const byBranch = new Map<string | null, SummaryAccumulator>();
+
+  payload.forEach((row) => {
+    const branchKeyRaw = row.sucursal_id ?? null;
+    const branchKey = branchKeyRaw === null || branchKeyRaw === undefined ? null : String(branchKeyRaw);
+    const target =
+      byBranch.get(branchKey) ?? {
+        branch: branchKey,
+        ventas_netas: 0,
+        cogs: 0,
+        gastos: 0,
+        utilidad: 0,
+        tx: 0,
+        deltaSum: 0,
+        deltaWeight: 0,
+      };
+
+    const ventasNetas = toNumber(row.ventas_netas ?? row.ventas ?? row.ventas_brutas);
+    const cogs = toNumber(row.cogs ?? row.costo ?? row.costo_ventas);
+    const gastos = toNumber(row.gastos ?? row.gasto_total);
+    const utilidadBase = row.utilidad ?? row.margen;
+    const utilidad =
+      utilidadBase !== undefined && utilidadBase !== null ? toNumber(utilidadBase) : ventasNetas - cogs - gastos;
+    const tx = toNumber(row.tx ?? row.transacciones);
+    const delta = toNullableNumber(
+      row.ventas_vs_semana_ant_pct ?? row.delta_ventas_pct ?? row.delta_vs_semana_ant_pct
+    );
+
+    target.ventas_netas += ventasNetas;
+    target.cogs += cogs;
+    target.gastos += gastos;
+    target.utilidad += utilidad;
+    target.tx += tx;
+    if (delta !== null) {
+      target.deltaSum += delta * Math.max(ventasNetas, 1);
+      target.deltaWeight += Math.max(ventasNetas, 1);
+    }
+
+    byBranch.set(branchKey, target);
+  });
+
+  const normalizedRows = Array.from(byBranch.values()).map((row) => {
+    const ticketPromedio = row.tx > 0 ? row.ventas_netas / row.tx : 0;
+    const margenBrutoPct = row.ventas_netas > 0 ? (row.ventas_netas - row.cogs) / row.ventas_netas : 0;
+    const deltaPct = row.deltaWeight > 0 ? row.deltaSum / row.deltaWeight : null;
+
+    return {
+      branch: row.branch,
+      data: {
+        ventas_netas: row.ventas_netas,
+        cogs: row.cogs,
+        gastos: row.gastos,
+        utilidad: row.utilidad,
+        tx: row.tx,
+        ticket_promedio: ticketPromedio,
+        margen_bruto_pct: margenBrutoPct,
+        ventas_vs_semana_ant_pct: deltaPct,
+      } satisfies Summary7d,
+    };
+  });
+
+  const findByBranch = (branch: string | null) =>
+    normalizedRows.find((row) => {
+      if (branch === null) {
+        return row.branch === null;
+      }
+      return row.branch === branch;
+    })?.data;
+
+  if (params.sucursal_id === null) {
+    const allRow = findByBranch(null);
+    if (allRow) {
+      return allRow;
+    }
+
+    const totals = normalizedRows.reduce(
+      (acc, row) => {
+        acc.ventas_netas += row.data.ventas_netas;
+        acc.cogs += row.data.cogs;
+        acc.gastos += row.data.gastos;
+        acc.utilidad += row.data.utilidad;
+        acc.tx += row.data.tx;
+        if (row.data.ventas_vs_semana_ant_pct !== null) {
+          acc.deltaSum += row.data.ventas_vs_semana_ant_pct * Math.max(row.data.ventas_netas, 1);
+          acc.deltaWeight += Math.max(row.data.ventas_netas, 1);
+        }
+        return acc;
+      },
+      { ventas_netas: 0, cogs: 0, gastos: 0, utilidad: 0, tx: 0, deltaSum: 0, deltaWeight: 0 }
+    );
+
+    const ticketPromedio = totals.tx > 0 ? totals.ventas_netas / totals.tx : 0;
+    const margenBrutoPct =
+      totals.ventas_netas > 0 ? (totals.ventas_netas - totals.cogs) / totals.ventas_netas : 0;
+    const deltaPct = totals.deltaWeight > 0 ? totals.deltaSum / totals.deltaWeight : null;
+
+    return {
+      ventas_netas: totals.ventas_netas,
+      cogs: totals.cogs,
+      gastos: totals.gastos,
+      utilidad: totals.utilidad,
+      tx: totals.tx,
+      ticket_promedio: ticketPromedio,
+      margen_bruto_pct: margenBrutoPct,
+      ventas_vs_semana_ant_pct: deltaPct,
+    } satisfies Summary7d;
+  }
+
+  const matchingRow = findByBranch(params.sucursal_id);
+  if (matchingRow) {
+    return matchingRow;
+  }
+
+  const fallbackRow = normalizedRows[0]?.data;
+  return fallbackRow ?? null;
 }
 
-async function fetchSeries(desde: string, hasta: string, sucursalId: string | null): Promise<SeriesPoint[]> {
-  const payload =
-    (await rpcWithFallback<SeriesRowPayload[]>(
-      'rpc_ui_series_14d',
-      [
-        { p_desde: desde, p_hasta: hasta, p_sucursal_id: sucursalId },
-        { desde, hasta, p_sucursal_id: sucursalId },
-        { desde, hasta, sucursal_id: sucursalId },
-        { desde, hasta },
-      ]
-    )) ?? [];
+async function fetchSeries(
+  desde: string,
+  hasta: string,
+  sucursalId: string | number | null
+): Promise<SeriesPoint[]> {
+  const params = normalizeDashboardParams({ desde, hasta, sucursalId });
 
-  return payload
+  const payload = (await callDashboardRpc<SeriesRowPayload[]>('rpc_ui_series_14d', params)) ?? [];
+
+  const mapped = payload
     .map<SeriesPoint | null>((row) => {
       const dateValue = row.d ?? row.dia ?? null;
-      if (!dateValue) {
+      const parsedDate = safeDateFromInput(dateValue ?? undefined);
+      if (!parsedDate) {
         return null;
       }
       return {
-        d: dateValue,
+        d: fmt(parsedDate),
         ventas_netas: toNumber(row.ventas_netas ?? row.ventas),
         itbms: toNullableNumber(row.itbms),
         tx: toNumber(row.tx ?? row.transacciones),
       };
     })
     .filter((row): row is SeriesPoint => Boolean(row));
+
+  const merged = new Map<string, SeriesPoint>();
+  mapped.forEach((point) => {
+    const existing = merged.get(point.d) ?? { ...point, ventas_netas: 0, tx: 0 };
+    existing.ventas_netas += point.ventas_netas;
+    existing.tx += point.tx;
+    existing.itbms = (existing.itbms ?? 0) + (point.itbms ?? 0);
+    merged.set(point.d, existing);
+  });
+
+  return Array.from(merged.values()).sort((a, b) => a.d.localeCompare(b.d));
 }
 
-async function fetchRanking(desde: string, hasta: string): Promise<LeaderboardRow[]> {
-  const payload =
-    (await rpcWithFallback<RankingRowPayload[]>(
-      'api_dashboard_ranking_7d',
-      [
-        { p_desde: desde, p_hasta: hasta },
-        { desde, hasta },
-      ]
-    )) ?? [];
+async function fetchRanking(
+  desde: string,
+  hasta: string,
+  sucursalId: string | number | null,
+  catalog: BranchCatalogItem[]
+): Promise<LeaderboardRow[]> {
+  const params = normalizeDashboardParams({ desde, hasta, sucursalId });
 
-  return payload.map((row) => ({
-    sucursal_id: String(row.sucursal_id ?? 'sin-id'),
-    sucursal_nombre: row.sucursal_nombre ?? undefined,
-    ventas: toNumber(row.ventas),
-    cogs: toNumber(row.cogs),
-    gastos: toNumber(row.gastos),
-    utilidad: toNumber(row.utilidad),
-    margen_pct: toNumber(row.margen_pct),
-  }));
+  const payload = (await callDashboardRpc<RankingRowPayload[]>('api_dashboard_ranking_7d', params)) ?? [];
+
+  const branchIndex = buildBranchCatalogIndex(catalog);
+
+  interface RankingAccumulator extends LeaderboardRow {
+    matchKeys: Set<string>;
+  }
+
+  const aggregated = new Map<string, RankingAccumulator>();
+
+  payload.forEach((row) => {
+    const candidates = collectBranchKeyCandidates(row);
+    const rawId = row.sucursal_id ?? null;
+    const catalogMatch =
+      candidates.map((candidate) => branchIndex.get(candidate.key)).find(Boolean) ?? null;
+
+    const canonicalId =
+      catalogMatch?.id ??
+      (rawId !== null && rawId !== undefined && String(rawId).trim()
+        ? String(rawId).trim()
+        : candidates[0]?.raw ?? 'desconocida');
+
+    const mapKey = branchKey(canonicalId);
+
+    const existing =
+      aggregated.get(mapKey) ?? {
+        sucursal_id: String(canonicalId),
+        sucursal_nombre: sanitizeBranchName(extractBranchName(row, catalogMatch)),
+        ventas: 0,
+        cogs: 0,
+        gastos: 0,
+        utilidad: 0,
+        margen_pct: 0,
+        matchKeys: new Set<string>(),
+      };
+
+    existing.sucursal_id = String(canonicalId);
+
+    const resolvedName = extractBranchName(row, catalogMatch);
+    if (resolvedName) {
+      const cleaned = sanitizeBranchName(resolvedName);
+      if (!existing.sucursal_nombre || existing.sucursal_nombre === 'Sin sucursal') {
+        existing.sucursal_nombre = cleaned;
+      }
+    } else if (catalogMatch?.nombre && (!existing.sucursal_nombre || existing.sucursal_nombre === 'Sin sucursal')) {
+      existing.sucursal_nombre = catalogMatch.nombre;
+    }
+
+    const ventas = toNumber(row.ventas);
+    const cogs = toNumber(row.cogs);
+    const gastos = toNumber(row.gastos);
+    const utilidad = toNumber(row.utilidad);
+
+    existing.ventas += ventas;
+    existing.cogs += cogs;
+    existing.gastos += gastos;
+    existing.utilidad += utilidad;
+
+    existing.matchKeys.add(mapKey);
+    candidates.forEach((candidate) => existing.matchKeys.add(candidate.key));
+
+    if (catalogMatch) {
+      existing.matchKeys.add(branchKey(catalogMatch.id));
+      existing.matchKeys.add(branchKey(catalogMatch.nombre));
+      if (!existing.sucursal_nombre || existing.sucursal_nombre === 'Sin sucursal') {
+        existing.sucursal_nombre = catalogMatch.nombre;
+      }
+      existing.sucursal_id = catalogMatch.id;
+    } else if (rawId !== null && rawId !== undefined && String(rawId).trim()) {
+      existing.matchKeys.add(branchKey(rawId));
+      existing.sucursal_id = String(rawId).trim();
+    }
+
+    aggregated.set(mapKey, existing);
+  });
+
+  const aggregatedRows = Array.from(aggregated.values());
+  const targetKey = params.sucursal_id !== null ? branchKey(params.sucursal_id) : null;
+
+  const scopedRows =
+    targetKey && aggregatedRows.some((row) => row.matchKeys.has(targetKey))
+      ? aggregatedRows.filter((row) => row.matchKeys.has(targetKey))
+      : aggregatedRows;
+
+  const normalizedRows = scopedRows
+    .map((row) => {
+      const { matchKeys, ...rest } = row;
+      void matchKeys;
+      return {
+        ...rest,
+        margen_pct: rest.ventas > 0 ? (rest.ventas - rest.cogs) / rest.ventas : 0,
+      };
+    })
+    .sort((a, b) => b.ventas - a.ventas);
+
+  const hasNamedRow = normalizedRows.some(
+    (row) => row.sucursal_nombre && row.sucursal_nombre !== 'Sin sucursal'
+  );
+
+  if (!hasNamedRow) {
+    return normalizedRows;
+  }
+
+  return normalizedRows.filter((row) => {
+    if (!row.sucursal_nombre || row.sucursal_nombre === 'Sin sucursal') {
+      const key = branchKey(row.sucursal_id);
+      return branchIndex.has(key);
+    }
+    return true;
+  });
 }
 
-async function fetchTopProducts(desde: string, hasta: string, sucursalId: string | null): Promise<TopProductItem[]> {
+async function fetchTopProducts(
+  desde: string,
+  hasta: string,
+  sucursalId: string | number | null
+): Promise<TopProductItem[]> {
   try {
+    const params = normalizeDashboardParams({ desde, hasta, sucursalId });
     const payload =
-      (await rpcWithFallback<TopProductRowPayload[]>(
-        'api_dashboard_top_productos_7d',
-        [
-          { p_desde: desde, p_hasta: hasta, p_sucursal_id: sucursalId },
-          { desde, hasta, p_sucursal_id: sucursalId },
-          { desde, hasta, sucursal_id: sucursalId },
-          { desde, hasta },
-        ]
-      )) ?? [];
+      (await callDashboardRpc<TopProductRowPayload[]>('api_dashboard_top_productos_7d', params)) ?? [];
 
     return payload.map((row) => ({
       producto: row.producto ?? 'Producto',
@@ -359,42 +850,48 @@ async function fetchTopProducts(desde: string, hasta: string, sucursalId: string
   }
 }
 
-async function fetchHeatmap(desde: string, hasta: string, sucursalId: string | null): Promise<HeatmapPoint[]> {
+async function fetchHeatmap(
+  desde: string,
+  hasta: string,
+  sucursalId: string | number | null
+): Promise<HeatmapPoint[]> {
   try {
+    const params = normalizeDashboardParams({ desde, hasta, sucursalId });
     const payload =
-      (await rpcWithFallback<HeatmapRowPayload[]>(
-        'api_dashboard_heatmap_hora_7d',
-        [
-          { p_desde: desde, p_hasta: hasta, p_sucursal_id: sucursalId },
-          { desde, hasta, p_sucursal_id: sucursalId },
-          { desde, hasta, sucursal_id: sucursalId },
-          { desde, hasta },
-        ]
-      )) ?? [];
+      (await callDashboardRpc<HeatmapRowPayload[]>('api_dashboard_heatmap_hora_7d', params)) ?? [];
 
-    return payload.map((row) => ({
-      hora: toNumber(row.hora),
-      ventas: toNumber(row.ventas),
-      tx: toNumber(row.tx),
-    }));
+    const byHour = new Map<number, HeatmapPoint>();
+
+    payload.forEach((row) => {
+      const hour = Math.round(toNumber(row.hora));
+      if (!Number.isFinite(hour)) {
+        return;
+      }
+      const clampedHour = Math.min(23, Math.max(0, hour));
+      const ventas = toNumber(row.ventas);
+      const tx = toNumber(row.tx);
+      const existing = byHour.get(clampedHour) ?? { hora: clampedHour, ventas: 0, tx: 0 };
+      existing.ventas += ventas;
+      existing.tx += tx;
+      byHour.set(clampedHour, existing);
+    });
+
+    return Array.from(byHour.values()).sort((a, b) => a.hora - b.hora);
   } catch (err) {
     console.warn('[dashboard] api_dashboard_heatmap_hora_7d no disponible', err);
     return [];
   }
 }
 
-async function fetchAlerts(desde: string, hasta: string, sucursalId: string | null): Promise<AlertItem[]> {
+async function fetchAlerts(
+  desde: string,
+  hasta: string,
+  sucursalId: string | number | null
+): Promise<AlertItem[]> {
   try {
+    const params = normalizeDashboardParams({ desde, hasta, sucursalId });
     const payload =
-      (await rpcWithFallback<AlertRowPayload[]>(
-        'api_dashboard_alertas_7d',
-        [
-          { p_desde: desde, p_hasta: hasta, p_sucursal_id: sucursalId },
-          { desde, hasta, p_sucursal_id: sucursalId },
-          { desde, hasta, sucursal_id: sucursalId },
-          { desde, hasta },
-        ]
-      )) ?? [];
+      (await callDashboardRpc<AlertRowPayload[]>('api_dashboard_alertas_7d', params)) ?? [];
 
     return payload.map((row) => ({
       code: String(row.code ?? 'alert'),
@@ -407,18 +904,15 @@ async function fetchAlerts(desde: string, hasta: string, sucursalId: string | nu
   }
 }
 
-async function fetchPlanillaSnapshot(desde: string, hasta: string, sucursalId: string | null): Promise<PlanillaSnapshot | null> {
+async function fetchPlanillaSnapshot(
+  desde: string,
+  hasta: string,
+  sucursalId: string | number | null
+): Promise<PlanillaSnapshot | null> {
   try {
+    const params = normalizeDashboardParams({ desde, hasta, sucursalId });
     const payload =
-      (await rpcWithFallback<PlanillaRowPayload[]>(
-        'api_dashboard_planilla_snapshot',
-        [
-          { p_desde: desde, p_hasta: hasta, p_sucursal_id: sucursalId },
-          { desde, hasta, p_sucursal_id: sucursalId },
-          { desde, hasta, sucursal_id: sucursalId },
-          { desde, hasta },
-        ]
-      )) ?? [];
+      (await callDashboardRpc<PlanillaRowPayload[]>('api_dashboard_planilla_snapshot', params)) ?? [];
 
     const row = payload[0];
     if (!row) {
@@ -467,7 +961,7 @@ export default function DashboardExecutive() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [usedFallback, setUsedFallback] = useState(false);
-  const [range, setRange] = useState(() => sevenDayWindow(true));
+  const [range, setRange] = useState(() => normalizeRange(sevenDayWindow(true)));
 
   const selectedSucursalId = sucursalSeleccionada?.id ?? null;
 
@@ -491,32 +985,43 @@ export default function DashboardExecutive() {
     setLoading(true);
     setError(null);
     try {
-      const primaryRange = sevenDayWindow(true);
-      const chartDesde = addDays(primaryRange.desde, -7);
-      const initialSeries = await fetchSeries(chartDesde, primaryRange.hasta, selectedSucursalId);
+      const primaryRange = normalizeRange(sevenDayWindow(true));
+      const chartRange = normalizeRange({
+        desde: addDays(primaryRange.desde, -7),
+        hasta: primaryRange.hasta,
+      });
+
+      const initialSeries = await fetchSeries(chartRange.desde, chartRange.hasta, selectedSucursalId ?? null);
       let effectiveRange = primaryRange;
       let seriesData = initialSeries;
       let fallback = false;
 
       const lastPoint = initialSeries.at(-1);
-      const hasTodayData = lastPoint && lastPoint.d === primaryRange.hasta && (lastPoint.ventas_netas > 0 || lastPoint.tx > 0);
+      const hasTodayData =
+        lastPoint &&
+        lastPoint.d === primaryRange.hasta &&
+        (Number(lastPoint.ventas_netas) > 0 || Number(lastPoint.tx) > 0);
+
       if (!hasTodayData) {
-        const altRange = sevenDayWindow(false);
-        const altChartDesde = addDays(altRange.desde, -7);
-        seriesData = await fetchSeries(altChartDesde, altRange.hasta, selectedSucursalId);
+        const altRange = normalizeRange(sevenDayWindow(false));
+        const altChartRange = normalizeRange({
+          desde: addDays(altRange.desde, -7),
+          hasta: altRange.hasta,
+        });
+        seriesData = await fetchSeries(altChartRange.desde, altChartRange.hasta, selectedSucursalId ?? null);
         effectiveRange = altRange;
         fallback = true;
-      } else {
-        // keep chartDesde for context although no badge displayed
       }
 
+      const branchCatalog = Array.isArray(sucursales) ? sucursales : [];
+
       const [summaryData, rankingData, topData, heatmapData, alertData, planillaData] = await Promise.all([
-        fetchSummary(effectiveRange.desde, effectiveRange.hasta, selectedSucursalId),
-        fetchRanking(effectiveRange.desde, effectiveRange.hasta),
-        fetchTopProducts(effectiveRange.desde, effectiveRange.hasta, selectedSucursalId),
-        fetchHeatmap(effectiveRange.desde, effectiveRange.hasta, selectedSucursalId),
-        fetchAlerts(effectiveRange.desde, effectiveRange.hasta, selectedSucursalId),
-        fetchPlanillaSnapshot(effectiveRange.desde, effectiveRange.hasta, selectedSucursalId),
+        fetchSummary(effectiveRange.desde, effectiveRange.hasta, selectedSucursalId ?? null),
+        fetchRanking(effectiveRange.desde, effectiveRange.hasta, selectedSucursalId ?? null, branchCatalog),
+        fetchTopProducts(effectiveRange.desde, effectiveRange.hasta, selectedSucursalId ?? null),
+        fetchHeatmap(effectiveRange.desde, effectiveRange.hasta, selectedSucursalId ?? null),
+        fetchAlerts(effectiveRange.desde, effectiveRange.hasta, selectedSucursalId ?? null),
+        fetchPlanillaSnapshot(effectiveRange.desde, effectiveRange.hasta, selectedSucursalId ?? null),
       ]);
 
       setSummary(summaryData);
@@ -543,13 +1048,43 @@ export default function DashboardExecutive() {
     } finally {
       setLoading(false);
     }
-  }, [selectedSucursalId]);
+  }, [selectedSucursalId, sucursales]);
 
   useEffect(() => {
     loadData();
   }, [loadData]);
 
   const sucursalesOptions = useMemo(() => sucursales ?? [], [sucursales]);
+
+  const rankingRows = useMemo(() => {
+    if (!ranking.length) {
+      return ranking;
+    }
+
+    const catalogIndex = buildBranchCatalogIndex(sucursalesOptions);
+
+    return ranking.map((row) => {
+      if (row.sucursal_nombre && row.sucursal_nombre !== 'Sin sucursal') {
+        return row;
+      }
+
+      const rowKeys = [branchKey(row.sucursal_id), branchKey(row.sucursal_nombre ?? null)].filter(
+        (key) => key && key !== 'desconocida'
+      );
+
+      const match = rowKeys.map((key) => catalogIndex.get(key)).find(Boolean) ?? null;
+
+      if (!match) {
+        return row;
+      }
+
+      return {
+        ...row,
+        sucursal_id: match.id,
+        sucursal_nombre: match.nombre,
+      };
+    });
+  }, [ranking, sucursalesOptions]);
 
   const cashflow = useMemo(() => computeCashflow(summary), [summary]);
   const rangeLabel = useMemo(() => safeFormatRangeLabel(range.desde, range.hasta), [range.desde, range.hasta]);
@@ -704,13 +1239,7 @@ export default function DashboardExecutive() {
         <section className="grid grid-cols-1 gap-6 xl:grid-cols-3">
           <div className="xl:col-span-2">
             <h2 className="mb-4 text-lg font-semibold text-slate-900">Ranking de sucursales</h2>
-            <Leaderboard
-              rows={ranking.map((row) => ({
-                ...row,
-                sucursal_nombre:
-                  row.sucursal_nombre || sucursalesOptions.find((s) => s.id === row.sucursal_id)?.nombre,
-              }))}
-            />
+            <Leaderboard rows={rankingRows} />
           </div>
           <div className="space-y-6">
             <div className="rounded-2xl bg-white p-6 shadow-sm ring-1 ring-slate-100 dark:bg-slate-900 dark:ring-slate-800">
