@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { startOfMonth } from 'date-fns';
 import {
   ArrowDownRight,
   ArrowUpRight,
@@ -62,6 +63,12 @@ interface PnLRow {
   cogs: number;
   gastosTotales: number;
   utilidadOperativa: number;
+}
+
+interface IngresosRow {
+  mes?: string | null;
+  sucursal_id_final?: string | null;
+  ingresos?: number | string | null;
 }
 interface PostJournalResult {
   ok?: boolean;
@@ -154,6 +161,72 @@ const getPreviousMonth = (isoDate: string) => {
 const getNetMargin = (row: PnLRow) =>
   !row.ingresos ? 0 : (row.utilidadOperativa / row.ingresos) * 100;
 
+const buildIngresosKey = (mes: string, sucursalId: string | null) =>
+  `${mes ?? ''}__${sucursalId ?? 'null'}`;
+
+const toDateOnly = (date: Date) => date.toISOString().slice(0, 10);
+
+const sumIngresos = (map: Map<string, number>) => {
+  let total = 0;
+  map.forEach((value) => {
+    total += value;
+  });
+  return total;
+};
+
+const createFallbackRow = (mes: string, sucursalId: string | null, ingresos: number): PnLRow => ({
+  mes,
+  sucursalId,
+  ingresos,
+  cogs: 0,
+  gastosTotales: 0,
+  utilidadOperativa: 0,
+});
+
+const applyIngresos = (rows: PnLRow[], map: Map<string, number>): PnLRow[] =>
+  rows.map((row) => {
+    const key = buildIngresosKey(row.mes, row.sucursalId);
+    const ingresos = map.has(key) ? map.get(key)! : row.ingresos;
+    return { ...row, ingresos };
+  });
+
+const fetchIngresosMap = async (
+  meses: string[],
+  sucursalIds: string[] | null
+): Promise<Map<string, number>> => {
+  const uniqueMeses = Array.from(new Set(meses.filter((mes) => Boolean(mes))));
+  if (uniqueMeses.length === 0) return new Map();
+
+  let query = supabase
+    .from('v_pnl_mensual_ingresos')
+    .select('mes,sucursal_id_final,ingresos');
+
+  if (uniqueMeses.length === 1) query = query.eq('mes', uniqueMeses[0]!);
+  else query = query.in('mes', uniqueMeses as string[]);
+
+  if (sucursalIds && sucursalIds.length > 0) {
+    const ids = sucursalIds.map((id) => String(id));
+    query = ids.length === 1 ? query.eq('sucursal_id_final', ids[0]!) : query.in('sucursal_id_final', ids);
+  }
+
+  const { data, error } = await query;
+  if (error || !data) {
+    if (error) {
+      console.warn('Error cargando v_pnl_mensual_ingresos', error);
+    }
+    return new Map();
+  }
+
+  const map = new Map<string, number>();
+  for (const row of data as IngresosRow[]) {
+    const mes = row.mes ? String(row.mes).slice(0, 10) : '';
+    const sucursalId = row.sucursal_id_final ? String(row.sucursal_id_final) : null;
+    const key = buildIngresosKey(mes, sucursalId);
+    map.set(key, toNumber(row.ingresos));
+  }
+  return map;
+};
+
 /* ────────────────────────────────────────────────────────────────────────────
    Componente
 --------------------------------------------------------------------------- */
@@ -185,20 +258,35 @@ export const PnLPage = () => {
     if (!mes) return;
     setLoading(true);
     setError(null);
-    const filterMes = `${mes}-01`;
+
+    const parsedMes = new Date(`${mes}-01T00:00:00`);
+    const monthStart = Number.isNaN(parsedMes.getTime())
+      ? new Date(`${mes}-01T00:00:00`)
+      : startOfMonth(parsedMes);
+    const filterMes = toDateOnly(monthStart);
     const sucursalId = selectedSucursal || null;
+    const allSucursalIds = sucursales
+      .map((s) => (s?.id ? String(s.id) : ''))
+      .filter((value): value is string => Boolean(value));
 
     try {
-      // a) Sucursal específica -> RPC
+      const ingresosMap = await fetchIngresosMap(
+        [filterMes],
+        sucursalId ? [sucursalId] : allSucursalIds.length ? allSucursalIds : null
+      );
+
       if (sucursalId) {
         const data =
           (await rpcWithFallback<PnLRawRow[]>(
             'api_get_pyg',
             buildVariants(filterMes, sucursalId)
           )) ?? [];
-        setRows(normalize(data));
+        const normalized = applyIngresos(normalize(data), ingresosMap);
+        if (normalized.length > 0) setRows(normalized);
+        else if (ingresosMap.size > 0)
+          setRows([createFallbackRow(filterMes, sucursalId, sumIngresos(ingresosMap))]);
+        else setRows([]);
       } else {
-        // b) Todas -> vista y agregamos en cliente (nunca pedimos "sucursal_id is null")
         const { data, error } = await supabase
           .from('v_pyg_comparativo')
           .select('*')
@@ -206,20 +294,34 @@ export const PnLPage = () => {
           .order('sucursal_id', { ascending: true });
 
         if (error) throw error;
-        const normalized = normalize((data ?? []) as PnLRawRow[]);
-        setRows(normalized.length ? [aggregate(normalized)] : []);
+        const normalized = applyIngresos(
+          normalize((data ?? []) as PnLRawRow[]),
+          ingresosMap
+        );
+        if (normalized.length) setRows([aggregate(normalized)]);
+        else if (ingresosMap.size > 0)
+          setRows([createFallbackRow(filterMes, null, sumIngresos(ingresosMap))]);
+        else setRows([]);
       }
 
-      // Mes anterior
       const prevMonth = getPreviousMonth(filterMes);
       if (prevMonth) {
+        const prevIngresosMap = await fetchIngresosMap(
+          [prevMonth],
+          sucursalId ? [sucursalId] : allSucursalIds.length ? allSucursalIds : null
+        );
+
         if (sucursalId) {
           const prev =
             (await rpcWithFallback<PnLRawRow[]>(
               'api_get_pyg',
               buildVariants(prevMonth, sucursalId)
             )) ?? [];
-          setPreviousRow(normalize(prev)[0] ?? null);
+          const normalizedPrev = applyIngresos(normalize(prev), prevIngresosMap);
+          if (normalizedPrev.length > 0) setPreviousRow(normalizedPrev[0]);
+          else if (prevIngresosMap.size > 0)
+            setPreviousRow(createFallbackRow(prevMonth, sucursalId, sumIngresos(prevIngresosMap)));
+          else setPreviousRow(null);
         } else {
           const { data: prevData, error: prevErr } = await supabase
             .from('v_pyg_comparativo')
@@ -227,15 +329,24 @@ export const PnLPage = () => {
             .eq('mes', prevMonth);
 
           if (prevErr) throw prevErr;
-          const normPrev = normalize((prevData ?? []) as PnLRawRow[]);
-          setPreviousRow(normPrev.length ? aggregate(normPrev) : null);
+          const normPrev = applyIngresos(
+            normalize((prevData ?? []) as PnLRawRow[]),
+            prevIngresosMap
+          );
+          if (normPrev.length) setPreviousRow(aggregate(normPrev));
+          else if (prevIngresosMap.size > 0)
+            setPreviousRow(createFallbackRow(prevMonth, null, sumIngresos(prevIngresosMap)));
+          else setPreviousRow(null);
         }
       } else {
         setPreviousRow(null);
       }
 
-      // Historial (últimos 6)
-      const history = await loadHistory(sucursalId, filterMes);
+      const history = await loadHistory(
+        sucursalId,
+        filterMes,
+        sucursalId ? [sucursalId] : allSucursalIds.length ? allSucursalIds : null
+      );
       setHistoryRows(history);
     } catch (err: unknown) {
       console.error('Error cargando P&L', err);
@@ -246,7 +357,7 @@ export const PnLPage = () => {
     } finally {
       setLoading(false);
     }
-  }, [mes, selectedSucursal]);
+  }, [mes, selectedSucursal, sucursales]);
 
   useEffect(() => {
     fetchData();
@@ -615,7 +726,11 @@ export default PnLPage;
 /* ────────────────────────────────────────────────────────────────────────────
    Historial
 --------------------------------------------------------------------------- */
-const loadHistory = async (sucursalId: string | null, currentMesISO: string) => {
+const loadHistory = async (
+  sucursalId: string | null,
+  currentMesISO: string,
+  sucursalIds: string[] | null
+) => {
   try {
     let q = supabase
       .from('v_pyg_comparativo')
@@ -632,9 +747,15 @@ const loadHistory = async (sucursalId: string | null, currentMesISO: string) => 
       return [];
     }
 
-    const normalized = normalize(data as PnLRawRow[]);
+    const normalizedBase = normalize(data as PnLRawRow[]);
+    const meses = normalizedBase.map((row) => row.mes).filter((value) => Boolean(value));
+    const ingresosMap = await fetchIngresosMap(
+      meses,
+      sucursalId ? [sucursalId] : sucursalIds && sucursalIds.length ? sucursalIds : null
+    );
+    const normalized = applyIngresos(normalizedBase, ingresosMap);
+
     if (!sucursalId) {
-      // agregamos por mes
       const byMes = new Map<string, PnLRow[]>();
       for (const r of normalized) {
         const arr = byMes.get(r.mes) ?? [];
@@ -644,9 +765,16 @@ const loadHistory = async (sucursalId: string | null, currentMesISO: string) => 
       const agg = Array.from(byMes.entries())
         .map(([mes, arr]) => ({ ...aggregate(arr), mes }))
         .sort((a, b) => a.mes.localeCompare(b.mes));
+      if (agg.length === 0 && ingresosMap.size > 0) {
+        return [createFallbackRow(currentMesISO, null, sumIngresos(ingresosMap))];
+      }
       return agg;
     }
-    return normalized.sort((a, b) => a.mes.localeCompare(b.mes));
+    const sorted = normalized.sort((a, b) => a.mes.localeCompare(b.mes));
+    if (sorted.length === 0 && ingresosMap.size > 0) {
+      return [createFallbackRow(currentMesISO, sucursalId, sumIngresos(ingresosMap))];
+    }
+    return sorted;
   } catch (err) {
     console.warn('Error inesperado cargando historial de P&L', err);
     return [];
