@@ -61,6 +61,12 @@ interface RankingRowPayload {
   alias?: string | null;
   branch?: string | null;
   sucursalName?: string | null;
+  branch_id?: string | number | null;
+  branchId?: string | number | null;
+  branch_name?: string | null;
+  branchName?: string | null;
+  nombre_sucursal?: string | null;
+  nombreSucursal?: string | null;
   ventas?: NullableNumber;
   cogs?: NullableNumber;
   gastos?: NullableNumber;
@@ -201,12 +207,18 @@ interface BranchKeyCandidate {
 function collectBranchKeyCandidates(row: RankingRowPayload): BranchKeyCandidate[] {
   const values: Array<string | number | null | undefined> = [
     row.sucursal_id,
+    row.branch_id,
+    row.branchId,
     row.sucursal_nombre,
+    row.branch_name,
+    row.branchName,
     row.sucursal,
     row.nombre,
     row.alias,
     row.branch,
     row.sucursalName,
+    row.nombre_sucursal,
+    row.nombreSucursal,
   ];
 
   const seen = new Set<string>();
@@ -284,11 +296,15 @@ function extractBranchName(
 ): string | null {
   const candidates: Array<string | null | undefined> = [
     row.sucursal_nombre,
+    row.branch_name,
+    row.branchName,
     row.sucursal,
     row.nombre,
     row.alias,
     row.branch,
     row.sucursalName,
+    row.nombre_sucursal,
+    row.nombreSucursal,
     fallback?.nombre ?? null,
   ];
 
@@ -785,7 +801,7 @@ async function fetchRanking(
       ? aggregatedRows.filter((row) => row.matchKeys.has(targetKey))
       : aggregatedRows;
 
-  return scopedRows
+  const normalizedRows = scopedRows
     .map((row) => {
       const { matchKeys, ...rest } = row;
       void matchKeys;
@@ -795,6 +811,22 @@ async function fetchRanking(
       };
     })
     .sort((a, b) => b.ventas - a.ventas);
+
+  const hasNamedRow = normalizedRows.some(
+    (row) => row.sucursal_nombre && row.sucursal_nombre !== 'Sin sucursal'
+  );
+
+  if (!hasNamedRow) {
+    return normalizedRows;
+  }
+
+  return normalizedRows.filter((row) => {
+    if (!row.sucursal_nombre || row.sucursal_nombre === 'Sin sucursal') {
+      const key = branchKey(row.sucursal_id);
+      return branchIndex.has(key);
+    }
+    return true;
+  });
 }
 
 async function fetchTopProducts(
