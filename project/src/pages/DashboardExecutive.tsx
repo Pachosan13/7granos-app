@@ -42,14 +42,13 @@ interface SummaryRowPayload {
   ventas_vs_semana_ant_pct?: NullableNumber;
 }
 
-interface SeriesRowPayload {
-  d?: string | null;
-  dia?: string | null;
-  ventas_netas?: NullableNumber;
+interface DashboardVentasRow {
+  fecha?: string | null;
+  sucursal?: string | null;
   ventas?: NullableNumber;
-  itbms?: NullableNumber;
-  tx?: NullableNumber;
   transacciones?: NullableNumber;
+  ticket_promedio?: NullableNumber;
+  branch?: string | null;
 }
 
 interface RankingRowPayload {
@@ -257,7 +256,49 @@ function buildDemoData(): {
   return { summary, series, ranking, top, heatmap, alerts, planilla, range: { desde, hasta } };
 }
 
-async function fetchSummary(desde: string, hasta: string, sucursalId: string | null): Promise<Summary7d | null> {
+async function fetchDashboardVentasRows(
+  desde: string,
+  hasta: string,
+  sucursalId: string | null,
+  sucursalNombre: string | null
+): Promise<DashboardVentasRow[]> {
+  try {
+    const parsedHasta = new Date(`${hasta}T00:00:00`);
+    const hastaExclusive = Number.isNaN(parsedHasta.getTime()) ? null : addDays(hasta, 1);
+    let query = supabase
+      .from('vw_dashboard_ventas')
+      .select('fecha,sucursal,ventas,transacciones,ticket_promedio,branch')
+      .gte('fecha', desde);
+    if (hastaExclusive) {
+      query = query.lt('fecha', hastaExclusive);
+    }
+
+    if (sucursalId) {
+      query = query.eq('branch', sucursalId);
+      if (sucursalNombre) {
+        query = query.eq('sucursal', sucursalNombre);
+      }
+    } else if (sucursalNombre) {
+      query = query.eq('sucursal', sucursalNombre);
+    }
+
+    const { data, error } = await query;
+    if (error) {
+      throw error;
+    }
+    return (data ?? []) as DashboardVentasRow[];
+  } catch (err) {
+    console.warn('[dashboard] vw_dashboard_ventas no disponible', err);
+    return [];
+  }
+}
+
+async function fetchSummary(
+  desde: string,
+  hasta: string,
+  sucursalId: string | null,
+  sucursalNombre: string | null
+): Promise<Summary7d | null> {
   const payload =
     (await rpcWithFallback<SummaryRowPayload[]>(
       'api_dashboard_summary_7d',
@@ -269,49 +310,98 @@ async function fetchSummary(desde: string, hasta: string, sucursalId: string | n
       ]
     )) ?? [];
 
+  const ventasRows = await fetchDashboardVentasRows(desde, hasta, sucursalId, sucursalNombre);
   const row = payload[0];
-  if (!row) {
+
+  const baseSummary: Summary7d | null = row
+    ? {
+        ventas_netas: toNumber(row.ventas_netas),
+        cogs: toNumber(row.cogs),
+        gastos: toNumber(row.gastos),
+        utilidad: toNumber(row.utilidad),
+        tx: toNumber(row.tx),
+        ticket_promedio: toNumber(row.ticket_promedio),
+        margen_bruto_pct: toNumber(row.margen_bruto_pct),
+        ventas_vs_semana_ant_pct: toNullableNumber(row.ventas_vs_semana_ant_pct),
+      }
+    : ventasRows.length
+      ? {
+          ventas_netas: 0,
+          cogs: 0,
+          gastos: 0,
+          utilidad: 0,
+          tx: 0,
+          ticket_promedio: 0,
+          margen_bruto_pct: 0,
+          ventas_vs_semana_ant_pct: null,
+        }
+      : null;
+
+  if (!baseSummary) {
     return null;
   }
 
+  const totalVentas = ventasRows.reduce((acc, current) => acc + toNumber(current.ventas), 0);
+  const totalTx = ventasRows.reduce((acc, current) => acc + toNumber(current.transacciones), 0);
+  const ticketPromedio = totalTx > 0 ? totalVentas / totalTx : 0;
+  const utilidad = totalVentas - baseSummary.cogs - baseSummary.gastos;
+  const margen = totalVentas > 0 ? (totalVentas - baseSummary.cogs) / totalVentas : 0;
+
   return {
-    ventas_netas: toNumber(row.ventas_netas),
-    cogs: toNumber(row.cogs),
-    gastos: toNumber(row.gastos),
-    utilidad: toNumber(row.utilidad),
-    tx: toNumber(row.tx),
-    ticket_promedio: toNumber(row.ticket_promedio),
-    margen_bruto_pct: toNumber(row.margen_bruto_pct),
-    ventas_vs_semana_ant_pct: toNullableNumber(row.ventas_vs_semana_ant_pct),
+    ...baseSummary,
+    ventas_netas: totalVentas,
+    tx: totalTx,
+    ticket_promedio: ticketPromedio,
+    utilidad,
+    margen_bruto_pct: margen,
   };
 }
 
-async function fetchSeries(desde: string, hasta: string, sucursalId: string | null): Promise<SeriesPoint[]> {
-  const payload =
-    (await rpcWithFallback<SeriesRowPayload[]>(
-      'rpc_ui_series_14d',
-      [
-        { p_desde: desde, p_hasta: hasta, p_sucursal_id: sucursalId },
-        { desde, hasta, p_sucursal_id: sucursalId },
-        { desde, hasta, sucursal_id: sucursalId },
-        { desde, hasta },
-      ]
-    )) ?? [];
+async function fetchSeries(
+  desde: string,
+  hasta: string,
+  sucursalId: string | null,
+  sucursalNombre: string | null
+): Promise<SeriesPoint[]> {
+  const ventasRows = await fetchDashboardVentasRows(desde, hasta, sucursalId, sucursalNombre);
+  if (!ventasRows.length) {
+    return [];
+  }
 
-  return payload
-    .map<SeriesPoint | null>((row) => {
-      const dateValue = row.d ?? row.dia ?? null;
-      if (!dateValue) {
-        return null;
-      }
-      return {
-        d: dateValue,
-        ventas_netas: toNumber(row.ventas_netas ?? row.ventas),
-        itbms: toNullableNumber(row.itbms),
-        tx: toNumber(row.tx ?? row.transacciones),
-      };
-    })
-    .filter((row): row is SeriesPoint => Boolean(row));
+  const byDay = new Map<string, { ventas: number; tx: number }>();
+  ventasRows.forEach((row) => {
+    const fecha = typeof row.fecha === 'string' ? row.fecha.slice(0, 10) : null;
+    if (!fecha) {
+      return;
+    }
+    const entry = byDay.get(fecha) ?? { ventas: 0, tx: 0 };
+    entry.ventas += toNumber(row.ventas);
+    entry.tx += toNumber(row.transacciones);
+    byDay.set(fecha, entry);
+  });
+
+  const startDate = new Date(`${desde}T00:00:00`);
+  const endDate = new Date(`${hasta}T00:00:00`);
+  if (Number.isNaN(startDate.getTime()) || Number.isNaN(endDate.getTime())) {
+    return Array.from(byDay.entries())
+      .sort((a, b) => a[0].localeCompare(b[0]))
+      .map(([date, totals]) => ({
+        d: date,
+        ventas_netas: totals.ventas,
+        itbms: null,
+        tx: totals.tx,
+      }));
+  }
+
+  const series: SeriesPoint[] = [];
+  const cursor = new Date(startDate);
+  while (cursor <= endDate) {
+    const key = fmt(cursor);
+    const totals = byDay.get(key) ?? { ventas: 0, tx: 0 };
+    series.push({ d: key, ventas_netas: totals.ventas, itbms: null, tx: totals.tx });
+    cursor.setDate(cursor.getDate() + 1);
+  }
+  return series;
 }
 
 async function fetchRanking(desde: string, hasta: string): Promise<LeaderboardRow[]> {
@@ -469,7 +559,18 @@ export default function DashboardExecutive() {
   const [usedFallback, setUsedFallback] = useState(false);
   const [range, setRange] = useState(() => sevenDayWindow(true));
 
+  const sucursalesOptions = useMemo(() => sucursales ?? [], [sucursales]);
   const selectedSucursalId = sucursalSeleccionada?.id ?? null;
+  const selectedSucursalName = useMemo(() => {
+    if (!selectedSucursalId) {
+      return null;
+    }
+    if (sucursalSeleccionada?.nombre) {
+      return sucursalSeleccionada.nombre;
+    }
+    const match = sucursalesOptions.find((sucursal) => sucursal.id === selectedSucursalId);
+    return match?.nombre ?? null;
+  }, [selectedSucursalId, sucursalSeleccionada, sucursalesOptions]);
 
   const loadData = useCallback(async () => {
     if (shouldUseDemoMode) {
@@ -493,7 +594,12 @@ export default function DashboardExecutive() {
     try {
       const primaryRange = sevenDayWindow(true);
       const chartDesde = addDays(primaryRange.desde, -7);
-      const initialSeries = await fetchSeries(chartDesde, primaryRange.hasta, selectedSucursalId);
+      const initialSeries = await fetchSeries(
+        chartDesde,
+        primaryRange.hasta,
+        selectedSucursalId,
+        selectedSucursalName
+      );
       let effectiveRange = primaryRange;
       let seriesData = initialSeries;
       let fallback = false;
@@ -503,7 +609,12 @@ export default function DashboardExecutive() {
       if (!hasTodayData) {
         const altRange = sevenDayWindow(false);
         const altChartDesde = addDays(altRange.desde, -7);
-        seriesData = await fetchSeries(altChartDesde, altRange.hasta, selectedSucursalId);
+        seriesData = await fetchSeries(
+          altChartDesde,
+          altRange.hasta,
+          selectedSucursalId,
+          selectedSucursalName
+        );
         effectiveRange = altRange;
         fallback = true;
       } else {
@@ -511,7 +622,7 @@ export default function DashboardExecutive() {
       }
 
       const [summaryData, rankingData, topData, heatmapData, alertData, planillaData] = await Promise.all([
-        fetchSummary(effectiveRange.desde, effectiveRange.hasta, selectedSucursalId),
+        fetchSummary(effectiveRange.desde, effectiveRange.hasta, selectedSucursalId, selectedSucursalName),
         fetchRanking(effectiveRange.desde, effectiveRange.hasta),
         fetchTopProducts(effectiveRange.desde, effectiveRange.hasta, selectedSucursalId),
         fetchHeatmap(effectiveRange.desde, effectiveRange.hasta, selectedSucursalId),
@@ -543,13 +654,11 @@ export default function DashboardExecutive() {
     } finally {
       setLoading(false);
     }
-  }, [selectedSucursalId]);
+  }, [selectedSucursalId, selectedSucursalName]);
 
   useEffect(() => {
     loadData();
   }, [loadData]);
-
-  const sucursalesOptions = useMemo(() => sucursales ?? [], [sucursales]);
 
   const cashflow = useMemo(() => computeCashflow(summary), [summary]);
   const rangeLabel = useMemo(() => safeFormatRangeLabel(range.desde, range.hasta), [range.desde, range.hasta]);
