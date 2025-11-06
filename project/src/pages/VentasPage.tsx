@@ -19,7 +19,6 @@ import { useAuthOrg } from '../context/AuthOrgContext';
    Utilidades de fecha y formato
 ────────────────────────────────────────────────────────── */
 
-// YYYY-MM-DD local
 function ymdLocal(d: Date, tz = 'America/Panama') {
   const local = new Date(d.toLocaleString('en-US', { timeZone: tz }));
   const y = local.getFullYear();
@@ -32,7 +31,6 @@ function todayYMD(tz = 'America/Panama') {
   return ymdLocal(new Date(), tz);
 }
 
-// suma días a un YYYY-MM-DD de forma segura
 function addDaysYMD(ymd: string, n: number, tz = 'America/Panama') {
   const [y, m, d] = ymd.split('-').map(Number);
   const base = new Date(Date.UTC(y, m - 1, d, 12, 0, 0));
@@ -40,7 +38,6 @@ function addDaysYMD(ymd: string, n: number, tz = 'America/Panama') {
   return ymdLocal(base, tz);
 }
 
-// rango inclusivo [from, to] en YYYY-MM-DD
 function daysRangeInclusive(fromYMD: string, toYMD: string) {
   const out: string[] = [];
   let cur = fromYMD;
@@ -51,7 +48,6 @@ function daysRangeInclusive(fromYMD: string, toYMD: string) {
   return out;
 }
 
-// últimos n días terminando HOY (inclusivo)
 function startOfNDaysAgo(n: number, tz = 'America/Panama') {
   const end = todayYMD(tz);
   const start = addDaysYMD(end, -(n - 1), tz);
@@ -93,7 +89,7 @@ type TablaSucursal = {
    Lectura de datos
 ────────────────────────────────────────────────────────── */
 
-// RPC agrega por día; p_hasta es EXCLUSIVO
+// p_hasta es EXCLUSIVO
 async function fetchSerieRPC(
   desdeIncl: string,
   hastaExcl: string,
@@ -113,7 +109,6 @@ async function fetchSerieRPC(
   }));
 }
 
-// ranking por sucursal desde la vista (cuando son "todas")
 async function fetchRankingView(desdeIncl: string, hastaIncl: string): Promise<TablaSucursal[]> {
   const { data, error } = await supabase
     .from('v_ui_series_14d')
@@ -151,25 +146,18 @@ async function fetchRankingView(desdeIncl: string, hastaIncl: string): Promise<T
 export default function VentasPage() {
   const { sucursales, sucursalSeleccionada } = useAuthOrg();
 
-  // Filtros de fecha
   const { start: defStart, end: defEnd } = startOfNDaysAgo(14);
   const [desde, setDesde] = useState(defStart);
   const [hasta, setHasta] = useState(defEnd);
-
-  // Filtro de sucursal ('' = todas)
   const [selectedSucursal, setSelectedSucursal] = useState<string>('');
 
-  // Datos
   const [serieFilled, setSerieFilled] = useState<Array<{ fecha: string; ventas: number; itbms: number; tx: number }>>([]);
   const [ranking, setRanking] = useState<TablaSucursal[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Sincroniza el dropdown si el contexto cambia
   useEffect(() => {
-    if (sucursalSeleccionada?.id) {
-      setSelectedSucursal(String(sucursalSeleccionada.id));
-    }
+    if (sucursalSeleccionada?.id) setSelectedSucursal(String(sucursalSeleccionada.id));
   }, [sucursalSeleccionada?.id]);
 
   const load = useCallback(async () => {
@@ -177,24 +165,21 @@ export default function VentasPage() {
     setError(null);
     try {
       const sucId = selectedSucursal || null;
-
-      // p_hasta (EXCLUSIVO) = hasta + 1 día
-      const hastaExcl = addDaysYMD(hasta, 1);
+      const hastaExcl = addDaysYMD(hasta, 1); // fin-exclusivo
 
       const [rowsRPC, rankingRows] = await Promise.all([
         fetchSerieRPC(desde, hastaExcl, sucId),
         selectedSucursal ? Promise.resolve([]) : fetchRankingView(desde, hasta),
       ]);
 
-      // rellenar días que falten en la serie (0s)
+      // Relleno por día
       const byDay = new Map<string, { ventas: number; itbms: number; tx: number }>();
-      for (const r of rowsRPC) {
-        byDay.set(r.d, { ventas: r.ventas_netas, itbms: r.itbms, tx: r.tx });
-      }
-      const days = daysRangeInclusive(desde, hasta);
-      const filled = days.map((d) => {
+      for (const r of rowsRPC) byDay.set(r.d, { ventas: r.ventas_netas, itbms: r.itbms, tx: r.tx });
+
+      const filled = daysRangeInclusive(desde, hasta).map((d) => {
         const v = byDay.get(d);
         return { fecha: d, ventas: v?.ventas ?? 0, itbms: v?.itbms ?? 0, tx: v?.tx ?? 0 };
+        // Si el RPC te devolvía 2025-11-01, aquí aparecerá 100% seguro.
       });
 
       setSerieFilled(filled);
@@ -212,7 +197,6 @@ export default function VentasPage() {
     load();
   }, [load]);
 
-  // KPIs desde la serie ya rellenada
   const kpis = useMemo(() => {
     const ventas = serieFilled.reduce((acc, r) => acc + (r.ventas || 0), 0);
     const itbms = serieFilled.reduce((acc, r) => acc + (r.itbms || 0), 0);
@@ -346,9 +330,13 @@ export default function VentasPage() {
                 <YAxis yAxisId="left" tickFormatter={(v) => (Math.abs(v) >= 1000 ? `${(v / 1000).toFixed(0)}k` : `${v}`)} />
                 <YAxis yAxisId="right" orientation="right" />
                 <Tooltip
-                  formatter={(val: any, name) => {
-                    if (name === 'tx') return [Number(val).toLocaleString('en-US'), 'TX'];
-                    return [formatCurrencyUSD(Number(val)), name === 'ventas' ? 'Ventas' : 'ITBMS'];
+                  // ⚠️ Usamos dataKey real para etiquetar bien
+                  formatter={(val: any, _name, item: any) => {
+                    const key = String(item?.dataKey ?? '');
+                    if (key === 'tx') return [Number(val).toLocaleString('en-US'), 'TX'];
+                    if (key === 'ventas') return [formatCurrencyUSD(Number(val)), 'Ventas'];
+                    if (key === 'itbms') return [formatCurrencyUSD(Number(val)), 'ITBMS'];
+                    return [val, key];
                   }}
                   labelFormatter={(l) => formatDateDDMMYYYY(String(l))}
                 />
@@ -363,7 +351,7 @@ export default function VentasPage() {
         </div>
       </section>
 
-      {/* Ranking (solo cuando todas las sucursales) */}
+      {/* Ranking (solo cuando todas) */}
       {!selectedSucursal && (
         <section className="rounded-2xl border border-sand bg-white shadow-sm">
           <header className="flex items-center justify-between border-b border-sand px-6 py-4">
