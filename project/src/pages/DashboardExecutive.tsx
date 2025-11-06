@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import type { PostgrestError } from '@supabase/supabase-js';
 import { CalendarDays, Clock, RefreshCw, Store } from 'lucide-react';
 import { supabase, shouldUseDemoMode } from '../lib/supabase';
 import { formatCurrencyUSD } from '../lib/format';
@@ -168,7 +169,7 @@ function sanitizeBranchKey(value: string | number | null | undefined): string {
     return 'desconocida';
   }
   const lower = raw.toLowerCase();
-  if (['sin-id', 'sinid', 'null', 'undefined'].includes(lower)) {
+  if (['sin-id', 'sinid', 'sin - id', 'sin id', 'null', 'undefined'].includes(lower)) {
     return 'desconocida';
   }
   return raw;
@@ -202,21 +203,73 @@ function toNullableNumber(value: NullableNumber): number | null {
   return Number.isFinite(numeric) ? numeric : 0;
 }
 
-async function callDashboardRpc<T>(fn: string, params: DashboardParams): Promise<T | null> {
-  const rpcParams = {
-    desde: params.desde,
-    hasta: params.hasta,
-    sucursal_id: params.sucursal_id,
-  } as const;
+interface RpcCallOptions {
+  includeSucursalParam?: boolean;
+}
 
-  const { data, error } = await supabase.rpc<T>(fn, rpcParams);
-  if (error) {
-    if (import.meta.env.DEV) {
-      console.error(`[dashboard] rpc ${fn} falló`, rpcParams, error);
+async function callDashboardRpc<T>(
+  fn: string,
+  params: DashboardParams,
+  options: RpcCallOptions = {}
+): Promise<T | null> {
+  const { includeSucursalParam = true } = options;
+
+  const base = { desde: params.desde, hasta: params.hasta } as const;
+  const legacyBase = { p_desde: params.desde, p_hasta: params.hasta } as const;
+
+  const variants: Array<Record<string, unknown>> = [];
+  const seen = new Set<string>();
+  const pushVariant = (variant: Record<string, unknown>) => {
+    const cleanedEntries = Object.entries(variant).filter(([, value]) => value !== undefined);
+    const cleaned = Object.fromEntries(cleanedEntries);
+    const key = JSON.stringify(cleaned);
+    if (!seen.has(key) && cleanedEntries.length > 0) {
+      variants.push(cleaned);
+      seen.add(key);
     }
-    throw error;
+  };
+
+  if (includeSucursalParam) {
+    pushVariant({ ...base, sucursal_id: params.sucursal_id });
+    pushVariant({ ...base, p_sucursal_id: params.sucursal_id });
+    pushVariant({ ...legacyBase, sucursal_id: params.sucursal_id });
+    pushVariant({ ...legacyBase, p_sucursal_id: params.sucursal_id });
   }
-  return data ?? null;
+
+  pushVariant(base);
+  pushVariant(legacyBase);
+
+  let lastError: PostgrestError | Error | null = null;
+
+  for (let index = 0; index < variants.length; index += 1) {
+    const payload = variants[index];
+    const { data, error } = await supabase.rpc<T>(fn, payload);
+    if (!error) {
+      if (index > 0 && import.meta.env.DEV) {
+        console.warn(`[dashboard] ${fn} usó firma alternativa #${index + 1}`, payload);
+      }
+      return data ?? null;
+    }
+
+    lastError = error;
+
+    const code = (error as PostgrestError).code;
+    const isParamMismatch = code === 'PGRST202' || code === 'PGRST204' || code === 'PGRST302';
+
+    if (!isParamMismatch && !includeSucursalParam) {
+      break;
+    }
+  }
+
+  if (import.meta.env.DEV) {
+    console.error(`[dashboard] rpc ${fn} falló`, variants, lastError);
+  }
+
+  if (lastError) {
+    throw lastError;
+  }
+
+  return null;
 }
 
 interface PlanillaSnapshot {
@@ -531,39 +584,71 @@ async function fetchRanking(
 
   const payload = (await callDashboardRpc<RankingRowPayload[]>('api_dashboard_ranking_7d', params)) ?? [];
 
-  const aggregated = new Map<string, LeaderboardRow>();
+  interface RankingAccumulator extends LeaderboardRow {
+    matchKeys: Set<string>;
+  }
+
+  const aggregated = new Map<string, RankingAccumulator>();
 
   payload.forEach((row) => {
-    const key = sanitizeBranchKey(row.sucursal_id ?? row.sucursal_nombre ?? null);
+    const rawId = row.sucursal_id ?? null;
+    const idKey = sanitizeBranchKey(rawId);
     const nombre = sanitizeBranchName(row.sucursal_nombre);
+    const nameKey = sanitizeBranchKey(row.sucursal_nombre ?? null);
+    const resolvedKey = idKey !== 'desconocida' ? idKey : nameKey !== 'desconocida' ? nameKey : 'desconocida';
+
+    const existing =
+      aggregated.get(resolvedKey) ?? {
+        sucursal_id: idKey !== 'desconocida' && rawId !== null ? String(rawId) : resolvedKey,
+        sucursal_nombre: nombre,
+        ventas: 0,
+        cogs: 0,
+        gastos: 0,
+        utilidad: 0,
+        margen_pct: 0,
+        matchKeys: new Set<string>(),
+      };
+
     const ventas = toNumber(row.ventas);
     const cogs = toNumber(row.cogs);
     const gastos = toNumber(row.gastos);
     const utilidad = toNumber(row.utilidad);
 
-    const existing = aggregated.get(key) ?? {
-      sucursal_id: key,
-      sucursal_nombre: nombre,
-      ventas: 0,
-      cogs: 0,
-      gastos: 0,
-      utilidad: 0,
-      margen_pct: 0,
-    };
-
     existing.ventas += ventas;
     existing.cogs += cogs;
     existing.gastos += gastos;
     existing.utilidad += utilidad;
+
+    if (rawId !== null) {
+      existing.matchKeys.add(sanitizeBranchKey(rawId));
+      if (existing.sucursal_id === resolvedKey || existing.sucursal_id === 'desconocida') {
+        existing.sucursal_id = String(rawId);
+      }
+    }
+
+    if (row.sucursal_nombre) {
+      existing.matchKeys.add(sanitizeBranchKey(row.sucursal_nombre));
+    }
+
     if (!existing.sucursal_nombre || existing.sucursal_nombre === 'Sin sucursal') {
       existing.sucursal_nombre = nombre;
     }
 
-    aggregated.set(key, existing);
+    existing.matchKeys.add(resolvedKey);
+
+    aggregated.set(resolvedKey, existing);
   });
 
-  return Array.from(aggregated.values())
-    .map((row) => ({
+  const aggregatedRows = Array.from(aggregated.values());
+  const targetKey = params.sucursal_id !== null ? sanitizeBranchKey(params.sucursal_id) : null;
+
+  const scopedRows =
+    targetKey && aggregatedRows.some((row) => row.matchKeys.has(targetKey))
+      ? aggregatedRows.filter((row) => row.matchKeys.has(targetKey))
+      : aggregatedRows;
+
+  return scopedRows
+    .map(({ matchKeys, ...row }) => ({
       ...row,
       margen_pct: row.ventas > 0 ? (row.ventas - row.cogs) / row.ventas : 0,
     }))
