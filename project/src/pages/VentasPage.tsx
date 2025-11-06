@@ -1,8 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { RefreshCw, TrendingUp, DollarSign, Receipt, Building2, Calendar } from 'lucide-react';
-import { RefreshCw, TrendingUp, DollarSign, Receipt, Building2, Calendar } from 'lucide-react';
-import {
-import {
+import { ResponsiveContainer, ComposedChart, CartesianGrid, XAxis, YAxis, Tooltip, Legend, Bar, Line } from "recharts";
   ResponsiveContainer,
   ComposedChart,
   Area,
@@ -13,16 +11,10 @@ import {
   Bar,
 } from 'recharts';
 import { supabase } from '../lib/supabase';
-import { supabase } from '../lib/supabase';
-import { useAuthOrg } from '../context/AuthOrgContext';
 import { useAuthOrg } from '../context/AuthOrgContext';
 import { KPICard } from '../components/KPICard';
-import { KPICard } from '../components/KPICard';
-import { RealtimeStatusIndicator } from '../components/RealtimeStatusIndicator';
 import { RealtimeStatusIndicator } from '../components/RealtimeStatusIndicator';
 import { useRealtimeVentas } from '../hooks/useRealtimeVentas';
-import { useRealtimeVentas } from '../hooks/useRealtimeVentas';
-import { debugLog, getFunctionsBase } from '../utils/diagnostics';
 import { debugLog, getFunctionsBase } from '../utils/diagnostics';
 
 /* ──────────────────────────────────────────────────────────
@@ -38,20 +30,13 @@ type SerieAllRow = {
   transacciones: number;
   propina: number;
 };
-
 type SerieOneRow = {
   d: string;            // 'YYYY-MM-DD'
   ventas_netas: number;
-  itbms: number;
   tx: number;
-};
-
 type SucursalRow = { nombre: string; ventas: number; transacciones: number; ticketPromedio: number; };
 type SyncBranchStat = { name: string; orders: number; sales?: number };
-
-/* ──────────────────────────────────────────────────────────
    Utilidades de fecha/formatos
-   ────────────────────────────────────────────────────────── */
 function todayYMD(tz = 'America/Panama') {
   const d = new Date(new Date().toLocaleString('en-US', { timeZone: tz }));
   const y = d.getFullYear();
@@ -65,27 +50,19 @@ function addDays(ymd: string, days: number) {
   dt.setUTCDate(dt.getUTCDate() + days);
   const yy = dt.getUTCFullYear(); const mm = String(dt.getUTCMonth() + 1).padStart(2, '0'); const dd = String(dt.getUTCDate()).padStart(2, '0');
   return `${yy}-${mm}-${dd}`;
-}
 function formatCurrencyUSD(n: number) {
   return (n ?? 0).toLocaleString('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 2 });
-}
 function formatDateDDMMYYYY(ymd: string) {
   const [y, m, d] = ymd.split('-');
   return `${d}/${m}/${y}`;
-}
-
-/* ──────────────────────────────────────────────────────────
    Página
-   ────────────────────────────────────────────────────────── */
 export default function VentasPage() {
   const { sucursales, sucursalSeleccionada } = useAuthOrg();
   const functionsBase = useMemo(() => getFunctionsBase(), []);
-
   // Rango por defecto: últimos 7 días
   const hoy = useMemo(() => todayYMD(), []);
   const [desde, setDesde] = useState(addDays(hoy, -7));
   const [hasta, setHasta] = useState(hoy);
-
   // Filtro de sucursal (por UUID)
   const [selectedSucursalId, setSelectedSucursalId] = useState<string | null>(
     sucursalSeleccionada?.id ? String(sucursalSeleccionada.id) : null
@@ -93,7 +70,6 @@ export default function VentasPage() {
   const viewingAll = selectedSucursalId === null;
   const selectedSucursalName =
     viewingAll ? null : (sucursales.find(s => String(s.id) === selectedSucursalId)?.nombre ?? null);
-
   // Estado UI
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
@@ -107,11 +83,9 @@ export default function VentasPage() {
   const [syncBanner, setSyncBanner] = useState<{
     when: string; stats: SyncBranchStat[]; visible: boolean; kind?: 'ok' | 'warn'; message?: string;
   } | null>(null);
-
   const headerNote = viewingAll
     ? `Viendo datos de todas las sucursales (${sucursales.length} sucursales)`
     : `Viendo únicamente: ${selectedSucursalName ?? 'Sucursal'}`;
-
   /* ────────────────────────────────────────────────────────
      CARGA PRINCIPAL — llama la RPC correcta según el modo
      ──────────────────────────────────────────────────────── */
@@ -124,9 +98,7 @@ export default function VentasPage() {
           desde, hasta,
         });
         if (error) throw error;
-
         const all: SerieAllRow[] = data ?? [];
-
         // Serie por día (suma todas las sucursales)
         const byDay = new Map<string, { dia: string; fecha: string; ventas: number; tickets: number }>();
         for (const r of all) {
@@ -137,49 +109,36 @@ export default function VentasPage() {
         }
         const serie = Array.from(byDay.values()).sort((a, b) => a.dia.localeCompare(b.dia));
         setSeriesData(serie);
-
         // Tabla por sucursal
         const bySucursal = new Map<string, { nombre: string; ventas: number; transacciones: number }>();
-        for (const r of all) {
           const cur = bySucursal.get(r.sucursal) ?? { nombre: r.sucursal, ventas: 0, transacciones: 0 };
-          cur.ventas += Number(r.ventas ?? 0);
           cur.transacciones += Number(r.transacciones ?? 0);
           bySucursal.set(r.sucursal, cur);
-        }
         const rowsList = Array.from(bySucursal.values())
           .map(e => ({ ...e, ticketPromedio: e.transacciones > 0 ? e.ventas / e.transacciones : 0 }))
           .sort((a, b) => b.ventas - a.ventas);
         setRows(rowsList);
-
         // KPIs
         let sumVentas = 0, sumTickets = 0, sumITBMS = 0;
-        for (const r of all) {
           sumVentas += Number(r.ventas ?? 0);
           sumTickets += Number(r.transacciones ?? 0);
           sumITBMS += Number(r.itbms ?? 0);
-        }
         setTotalVentas(sumVentas);
         setTotalTransacciones(sumTickets);
         setTotalITBMS(sumITBMS);
-
         setDebugInfo({
           modo: 'todas',
           filtro: { desde, hasta },
           rowsCount: all.length,
           sample: all[0] ?? null,
           seriePreview: serie.slice(0, 3),
-        });
       } else {
         // MODO INDIVIDUAL — usa la variante por UUID
         const { data, error } = await supabase.rpc<SerieOneRow>('rpc_ui_series_14d', {
           p_desde: desde,
           p_hasta: hasta,
           p_sucursal_id: selectedSucursalId,
-        });
-        if (error) throw error;
-
         const one: SerieOneRow[] = data ?? [];
-
         // Serie por día
         const serie = one
           .map(r => ({
@@ -189,8 +148,6 @@ export default function VentasPage() {
             tickets: Number(r.tx ?? 0),
           }))
           .sort((a, b) => a.dia.localeCompare(b.dia));
-        setSeriesData(serie);
-
         // Tabla (una sola sucursal)
         const ventasTotal = serie.reduce((acc, r) => acc + r.ventas, 0);
         const txTotal = serie.reduce((acc, r) => acc + r.tickets, 0);
@@ -202,19 +159,13 @@ export default function VentasPage() {
             ticketPromedio: txTotal > 0 ? ventasTotal / txTotal : 0,
           },
         ]);
-
-        // KPIs
         setTotalVentas(ventasTotal);
         setTotalTransacciones(txTotal);
         setTotalITBMS(one.reduce((acc, r) => acc + Number(r.itbms ?? 0), 0));
-
-        setDebugInfo({
           modo: 'individual',
           filtro: { desde, hasta, selectedSucursalId, selectedSucursalName },
           rowsCount: one.length,
           sample: one[0] ?? null,
-          seriePreview: serie.slice(0, 3),
-        });
       }
     } catch (e) {
       debugLog('[VentasPage] loadData error:', e);
@@ -224,18 +175,13 @@ export default function VentasPage() {
       setLoading(false);
     }
   }, [desde, hasta, viewingAll, selectedSucursalId, selectedSucursalName]);
-
-  /* ────────────────────────────────────────────────────────
      SYNC (igual que antes)
-     ──────────────────────────────────────────────────────── */
   const handleSync = useCallback(async () => {
     const base = functionsBase;
     if (!base) {
       setSyncBanner({ when: new Date().toISOString(), stats: [], visible: true, kind: 'warn', message: 'Edge Function no configurada (revisa VITE_SUPABASE_FUNCTIONS_BASE).' });
       return;
-    }
     setSyncing(true);
-    try {
       const hoySync = hoy;
       const query = `?desde=${hoySync}&hasta=${hoySync}`;
       const endpoints = [
@@ -261,27 +207,19 @@ export default function VentasPage() {
           if (!r.ok && r.status === 404) continue;
           resp = r; break;
         } catch { /* sigue */ }
-      }
       if (!resp) throw new Error('No fue posible ejecutar la sincronización');
-
       // Banner resumido
       let when = new Date().toISOString();
       try { const js = await resp.json(); if (js?.desde) when = js.desde; } catch {}
       setSyncBanner({ when, stats: [], visible: true, kind: 'ok', message: 'Sincronización completada.' });
       setTimeout(() => setSyncBanner(s => (s ? { ...s, visible: false } : s)), 6000);
-
       await loadData();
     } catch (e: any) {
       setSyncBanner({ when: new Date().toISOString(), stats: [], visible: true, kind: 'warn', message: e?.message ?? 'Error desconocido en sincronización' });
       debugLog('Sync Ventas (DB) error:', e);
-    } finally {
       setSyncing(false);
-    }
   }, [functionsBase, hoy, loadData]);
-
-  /* ────────────────────────────────────────────────────────
      Realtime + efectos
-     ──────────────────────────────────────────────────────── */
   const rt: any = useRealtimeVentas({
     enabled: true, debounceMs: 1500,
     onUpdate: () => { debugLog('[VentasPage] realtime update'); loadData(); },
@@ -292,33 +230,24 @@ export default function VentasPage() {
   else if (rt && typeof rt === 'object') {
     // @ts-ignore
     rtConnected = typeof rt.connected === 'boolean' ? !!rt.connected : (rt.status === 'open');
-    // @ts-ignore
     rtError = typeof rt.error === 'string' ? rt.error : (rt.status === 'error' ? 'Connection error' : null);
-    // @ts-ignore
     rtLastUpdate = rt.lastUpdate ?? null;
-    // @ts-ignore
     if (typeof rt.manualReconnect === 'function') onReconnect = rt.manualReconnect;
   }
-
   useEffect(() => { loadData(); }, [loadData]);
   useEffect(() => {
     const handler = () => { debugLog('[VentasPage] evento debug:refetch-all'); loadData(); };
     window.addEventListener('debug:refetch-all', handler);
     return () => window.removeEventListener('debug:refetch-all', handler);
   }, [loadData]);
-  useEffect(() => {
     if (sucursalSeleccionada?.id) setSelectedSucursalId(String(sucursalSeleccionada.id));
     else setSelectedSucursalId(null);
   }, [sucursalSeleccionada]);
-
   const bannerClass =
     syncBanner?.kind === 'warn'
       ? 'bg-amber-50 dark:bg-amber-900/20 border-amber-200 dark:border-amber-700 text-amber-800 dark:text-amber-300'
       : 'bg-green-50 dark:bg-green-900/20 border-green-200 dark:border-green-700 text-green-800 dark:text-green-300';
-
-  /* ────────────────────────────────────────────────────────
      Render
-     ──────────────────────────────────────────────────────── */
   return (
     <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 dark:from-gray-900 dark:to-gray-800">
       <div className="p-6 lg:p-8 space-y-6">
@@ -342,12 +271,9 @@ export default function VentasPage() {
           {syncBanner?.visible && (
             <div className={`mt-4 text-sm rounded-xl border px-4 py-3 ${bannerClass}`}>
               {syncBanner.message ?? `Actualizado: ${new Date(syncBanner.when).toLocaleString()}`}
-            </div>
           )}
         </div>
-
         {/* Filtros */}
-        <div className="bg-white dark:bg-gray-800 rounded-2xl shadow-lg p-6 border border-gray-100 dark:border-gray-700">
           <h3 className="text-lg font-semibold text-gray-900 dark:text-white mb-4 flex items-center gap-2">
             <Calendar className="h-5 w-5" /> Filtros
           </h3>
@@ -356,13 +282,8 @@ export default function VentasPage() {
               <label className="block text-sm text-gray-600 dark:text-gray-400 mb-1">Desde</label>
               <input type="date" value={desde} onChange={(e) => setDesde(e.target.value)}
                 className="w-full px-3 py-2 rounded-lg border dark:border-gray-700 bg-white dark:bg-gray-900 text-gray-900 dark:text-gray-100" />
-            </div>
-            <div>
               <label className="block text-sm text-gray-600 dark:text-gray-400 mb-1">Hasta</label>
               <input type="date" value={hasta} onChange={(e) => setHasta(e.target.value)}
-                className="w-full px-3 py-2 rounded-lg border dark:border-gray-700 bg-white dark:bg-gray-900 text-gray-900 dark:text-gray-100" />
-            </div>
-            <div>
               <label className="block text-sm text-gray-600 dark:text-gray-400 mb-1">Sucursal</label>
               <div className="flex gap-2">
                 <select
@@ -379,23 +300,15 @@ export default function VentasPage() {
                   <Building2 className="h-4 w-4 mr-2" />
                   {viewingAll ? 'Todas' : 'Individual'}
                 </div>
-              </div>
-            </div>
-          </div>
-
           {/* Debug */}
           <div className="mt-3">
             <button className="text-xs underline text-gray-500 dark:text-gray-400" onClick={() => setShowDebug(s => !s)}>
               {showDebug ? 'Ocultar debug' : 'Mostrar debug'}
-            </button>
             {showDebug && (
               <pre className="mt-2 text-xs p-3 rounded-lg bg-gray-50 dark:bg-gray-900 border dark:border-gray-700 overflow-auto">
 {JSON.stringify(debugInfo, null, 2)}
               </pre>
             )}
-          </div>
-        </div>
-
         {/* KPIs */}
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
           <KPICard title="Total Ventas" value={totalVentas} icon={DollarSign}
@@ -404,23 +317,17 @@ export default function VentasPage() {
             color="bg-gradient-to-br from-indigo-500 to-purple-600" prefix="USD " trend={5} />
           <KPICard title="# Transacciones" value={totalTransacciones} icon={Receipt}
             color="bg-gradient-to-br from-blue-500 to-cyan-600" trend={8} />
-        </div>
-
         {/* Serie (14 días o rango elegido) */}
         <div className="bg-white dark:bg-gray-800 rounded-2xl shadow-lg border border-gray-100 dark:border-gray-700">
           <div className="p-6 border-b border-gray-100 dark:border-gray-700 flex items-center justify-between">
-            <div>
               <h3 className="text-xl font-bold text-gray-900 dark:text-white">Serie de ventas</h3>
               <p className="text-sm text-gray-500 dark:text-gray-400">
                 Fuente: {viewingAll ? 'RPC rpc_ui_series_14d(desde,hasta)' : 'RPC rpc_ui_series_14d(p_desde,p_hasta,p_sucursal_id)'}
               </p>
-            </div>
-          </div>
           <div className="h-80 px-6 pb-6">
             {seriesData.length === 0 ? (
               <div className="h-full flex items-center justify-center text-gray-500 dark:text-gray-400 text-sm">
                 {loading ? 'Cargando…' : 'Sin datos en el período seleccionado.'}
-              </div>
             ) : (
               <ResponsiveContainer width="100%" height="100%">
                 <ComposedChart data={seriesData} margin={{ top: 20, right: 20, left: 0, bottom: 0 }}>
@@ -436,17 +343,12 @@ export default function VentasPage() {
                   <Bar yAxisId="right" dataKey="tickets" name="Tickets" opacity={0.75} barSize={24} />
                 </ComposedChart>
               </ResponsiveContainer>
-            )}
-          </div>
-        </div>
-
         {/* Tabla por sucursal */}
         <div className="bg-white dark:bg-gray-800 rounded-2xl shadow-lg border border-gray-100 dark:border-gray-700 overflow-hidden">
           <div className="p-6 border-b border-gray-100 dark:border-gray-700">
             <h3 className="text-xl font-bold text-gray-900 dark:text-white">
               Resumen por sucursal ({desde} → {hasta})
             </h3>
-          </div>
           {loading ? (
             <div className="p-8 text-center text-gray-500 dark:text-gray-400">Cargando…</div>
           ) : rows.length === 0 ? (
@@ -470,13 +372,7 @@ export default function VentasPage() {
                       <td className="px-6 py-4 text-right">{r.transacciones.toLocaleString()}</td>
                       <td className="px-6 py-4 text-right">{formatCurrencyUSD(r.ticketPromedio)}</td>
                     </tr>
-                  ))}
                 </tbody>
               </table>
-            </div>
-          )}
-        </div>
       </div>
     </div>
-  );
-}
