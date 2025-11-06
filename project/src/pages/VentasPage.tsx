@@ -36,7 +36,9 @@ function addDays(ymd: string, days: number) {
 }
 
 function startOfNDaysAgo(n: number, tz = 'America/Panama') {
-  const end = todayYMD(tz);
+  const now = new Date(new Date().toLocaleString('en-US', { timeZone: tz }));
+  // aseguramos que corte en el día local, no UTC
+  const end = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
   const start = addDays(end, -n + 1);
   return { start, end };
 }
