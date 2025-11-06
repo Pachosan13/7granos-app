@@ -1,3 +1,4 @@
+// src/pages/contabilidad/PnLPage.tsx
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ArrowDownRight,
@@ -155,7 +156,26 @@ const getNetMargin = (row: PnLRow) =>
   !row.ingresos ? 0 : (row.utilidadOperativa / row.ingresos) * 100;
 
 /* ────────────────────────────────────────────────────────────────────────────
-   Componente
+   Helper: ingresos consolidados desde la vista maestra
+--------------------------------------------------------------------------- */
+async function fetchIngresosAll(mesISO: string) {
+  const { data, error } = await supabase
+    .from('v_pnl_mensual_ingresos')
+    .select('mes,sucursal_id_final,ingresos')
+    .eq('mes', mesISO);
+
+  if (error) throw error;
+  const map = new Map<string, number>();
+  for (const r of data ?? []) {
+    const id = String((r as any).sucursal_id_final);
+    const val = Number((r as any).ingresos ?? 0);
+    map.set(id, (map.get(id) ?? 0) + val);
+  }
+  return map;
+}
+
+/* ────────────────────────────────────────────────────────────────────────────
+   Componente principal
 --------------------------------------------------------------------------- */
 export const PnLPage = () => {
   const { sucursales, sucursalSeleccionada } = useAuthOrg();
@@ -176,11 +196,12 @@ export const PnLPage = () => {
   }, []);
 
   useEffect(() => {
-    if (sucursalSeleccionada?.id) {
-      setSelectedSucursal(String(sucursalSeleccionada.id));
-    }
+    if (sucursalSeleccionada?.id) setSelectedSucursal(String(sucursalSeleccionada.id));
   }, [sucursalSeleccionada?.id]);
 
+  /* ────────────────────────────────────────────────────────────────────────────
+     Carga de datos (integrada con maestro + comparativo)
+  --------------------------------------------------------------------------- */
   const fetchData = useCallback(async () => {
     if (!mes) return;
     setLoading(true);
@@ -189,31 +210,17 @@ export const PnLPage = () => {
     const sucursalId = selectedSucursal || null;
 
     try {
-      // a) Sucursal específica -> RPC
       if (sucursalId) {
+        // Sucursal específica (RPC estable)
         const data =
           (await rpcWithFallback<PnLRawRow[]>(
             'api_get_pyg',
             buildVariants(filterMes, sucursalId)
           )) ?? [];
         setRows(normalize(data));
-      } else {
-        // b) Todas -> vista y agregamos en cliente (nunca pedimos "sucursal_id is null")
-        const { data, error } = await supabase
-          .from('v_pyg_comparativo')
-          .select('*')
-          .eq('mes', filterMes)
-          .order('sucursal_id', { ascending: true });
 
-        if (error) throw error;
-        const normalized = normalize((data ?? []) as PnLRawRow[]);
-        setRows(normalized.length ? [aggregate(normalized)] : []);
-      }
-
-      // Mes anterior
-      const prevMonth = getPreviousMonth(filterMes);
-      if (prevMonth) {
-        if (sucursalId) {
+        const prevMonth = getPreviousMonth(filterMes);
+        if (prevMonth) {
           const prev =
             (await rpcWithFallback<PnLRawRow[]>(
               'api_get_pyg',
@@ -221,20 +228,102 @@ export const PnLPage = () => {
             )) ?? [];
           setPreviousRow(normalize(prev)[0] ?? null);
         } else {
-          const { data: prevData, error: prevErr } = await supabase
+          setPreviousRow(null);
+        }
+      } else {
+        // Todas las sucursales → ingresos desde vista maestra + COGS/Gastos desde comparativo
+        const ingresosMap = await fetchIngresosAll(filterMes);
+
+        const { data: otrosRows, error: errOtros } = await supabase
+          .from('v_pyg_comparativo')
+          .select('*')
+          .eq('mes', filterMes)
+          .order('sucursal_id', { ascending: true });
+        if (errOtros) throw errOtros;
+
+        const merged: PnLRow[] = [];
+        const byId = new Map<string, PnLRow>();
+
+        for (const r of (otrosRows ?? []) as PnLRawRow[]) {
+          const id = String(r.sucursal_id ?? '');
+          const cogs = toNumber(r.cogs);
+          const gastos = toNumber(r.gastos_totales ?? r.gastos ?? 0);
+          const ingresos = ingresosMap.get(id) ?? 0;
+
+          const row: PnLRow = {
+            mes: (r.mes || r.periodo || filterMes).slice(0, 10),
+            sucursalId: id || null,
+            ingresos,
+            cogs,
+            gastosTotales: gastos,
+            utilidadOperativa: ingresos - cogs - gastos,
+          };
+          byId.set(id, row);
+        }
+
+        // Ingresos que no tienen fila en comparativo: agrega con COGS/Gastos = 0
+        for (const [id, ingresos] of ingresosMap.entries()) {
+          if (!byId.has(id)) {
+            byId.set(id, {
+              mes: filterMes,
+              sucursalId: id,
+              ingresos,
+              cogs: 0,
+              gastosTotales: 0,
+              utilidadOperativa: ingresos,
+            });
+          }
+        }
+
+        for (const v of byId.values()) merged.push(v);
+        setRows(merged.length ? [aggregate(merged)] : []);
+
+        // Mes anterior consolidado
+        const prevMonth = getPreviousMonth(filterMes);
+        if (prevMonth) {
+          const prevIngresosMap = await fetchIngresosAll(prevMonth);
+          const { data: prevOtros } = await supabase
             .from('v_pyg_comparativo')
             .select('*')
             .eq('mes', prevMonth);
 
-          if (prevErr) throw prevErr;
-          const normPrev = normalize((prevData ?? []) as PnLRawRow[]);
-          setPreviousRow(normPrev.length ? aggregate(normPrev) : null);
+          const mergedPrev: PnLRow[] = [];
+          const prevMap = new Map<string, PnLRow>();
+
+          for (const r of (prevOtros ?? []) as PnLRawRow[]) {
+            const id = String(r.sucursal_id ?? '');
+            const cogs = toNumber(r.cogs);
+            const gastos = toNumber(r.gastos_totales ?? r.gastos ?? 0);
+            const ingresos = prevIngresosMap.get(id) ?? 0;
+            prevMap.set(id, {
+              mes: (r.mes || r.periodo || prevMonth).slice(0, 10),
+              sucursalId: id || null,
+              ingresos,
+              cogs,
+              gastosTotales: gastos,
+              utilidadOperativa: ingresos - cogs - gastos,
+            });
+          }
+          for (const [id, ingresos] of prevIngresosMap.entries()) {
+            if (!prevMap.has(id)) {
+              prevMap.set(id, {
+                mes: prevMonth,
+                sucursalId: id,
+                ingresos,
+                cogs: 0,
+                gastosTotales: 0,
+                utilidadOperativa: ingresos,
+              });
+            }
+          }
+          for (const v of prevMap.values()) mergedPrev.push(v);
+          setPreviousRow(mergedPrev.length ? aggregate(mergedPrev) : null);
+        } else {
+          setPreviousRow(null);
         }
-      } else {
-        setPreviousRow(null);
       }
 
-      // Historial (últimos 6)
+      // Historial (últimos 6 meses)
       const history = await loadHistory(sucursalId, filterMes);
       setHistoryRows(history);
     } catch (err: unknown) {
@@ -384,12 +473,17 @@ export const PnLPage = () => {
     exportToXlsx(data, 'P&L', { suffix: 'pnl' });
   };
 
+  /* ────────────────────────────────────────────────────────────────────────────
+     Render
+  --------------------------------------------------------------------------- */
   return (
     <div className="space-y-6">
       <ToastContainer
         toasts={toasts}
         onDismiss={(id) => dismissToast(setToasts, id)}
       />
+
+      {/* Header */}
       <header className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
         <div>
           <h1 className="text-3xl font-bold text-bean">Estado de Resultados (P&amp;L)</h1>
@@ -426,6 +520,7 @@ export const PnLPage = () => {
         </div>
       </header>
 
+      {/* Filtros */}
       <section className="rounded-2xl border border-sand bg-white p-4 shadow-sm">
         <div className="grid gap-4 md:grid-cols-4">
           <label className="flex flex-col gap-2 text-sm text-slate7g">
@@ -464,6 +559,7 @@ export const PnLPage = () => {
         </div>
       </section>
 
+      {/* Métricas */}
       <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
         <CardMetric
           title="Ingresos"
@@ -499,6 +595,7 @@ export const PnLPage = () => {
         </article>
       </section>
 
+      {/* Charts */}
       <section className="grid gap-6 lg:grid-cols-2">
         <article className="rounded-2xl border border-sand bg-white shadow-sm">
           <header className="flex items-center justify-between border-b border-sand px-6 py-4">
@@ -557,6 +654,7 @@ export const PnLPage = () => {
         </article>
       </section>
 
+      {/* Detalle del período */}
       <section className="rounded-2xl border border-sand bg-white shadow-sm">
         <header className="flex items-center justify-between border-b border-sand px-6 py-4">
           <div>
@@ -613,7 +711,7 @@ export const PnLPage = () => {
 export default PnLPage;
 
 /* ────────────────────────────────────────────────────────────────────────────
-   Historial
+   Historial (últimos 6)
 --------------------------------------------------------------------------- */
 const loadHistory = async (sucursalId: string | null, currentMesISO: string) => {
   try {
@@ -634,7 +732,7 @@ const loadHistory = async (sucursalId: string | null, currentMesISO: string) => 
 
     const normalized = normalize(data as PnLRawRow[]);
     if (!sucursalId) {
-      // agregamos por mes
+      // agregamos por mes (todas)
       const byMes = new Map<string, PnLRow[]>();
       for (const r of normalized) {
         const arr = byMes.get(r.mes) ?? [];
@@ -677,6 +775,15 @@ const CardMetric = ({
   negativeIsBad?: boolean;
 }) => {
   const Icon = icon === 'up' ? TrendingUp : icon === 'down' ? TrendingDown : Wallet;
+  const isPositive = comp.delta >= 0;
+  const isGood = negativeIsBad ? !isPositive : isPositive;
+  const tone =
+    comp.pct === null
+      ? 'text-slate-500 bg-slate-50'
+      : isGood
+      ? 'text-emerald-600 bg-emerald-50'
+      : 'text-rose-600 bg-rose-50';
+
   return (
     <article className="rounded-2xl border border-sand bg-white p-4 shadow-sm">
       <div className="flex items-center justify-between text-slate-500">
@@ -704,10 +811,16 @@ const ComparisonPill = ({
 }) => {
   const isPositive = comparison.delta >= 0;
   const isGood = negativeIsBad ? !isPositive : isPositive;
-  const tone = isGood ? 'text-emerald-600 bg-emerald-50' : 'text-rose-600 bg-rose-50';
+  const tone =
+    comparison.pct === null
+      ? 'text-slate-600 bg-slate-100'
+      : isGood
+      ? 'text-emerald-700 bg-emerald-50'
+      : 'text-rose-700 bg-rose-50';
   const Icon = isPositive ? ArrowUpRight : ArrowDownRight;
   const formatValue = (value: number) =>
     isMargin ? `${value.toFixed(1)}%` : formatCurrencyUSD(value);
+
   return (
     <div className={`mt-3 inline-flex items-center gap-2 rounded-full px-3 py-1 text-xs font-medium ${tone}`}>
       <Icon className="h-4 w-4" />
