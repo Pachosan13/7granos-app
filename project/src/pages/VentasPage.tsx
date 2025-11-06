@@ -13,16 +13,29 @@
 ```tsx
 // src/pages/VentasPage.tsx
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { RefreshCw, TrendingUp, DollarSign, Receipt, Building2, Calendar } from 'lucide-react';
+import {
+  ArrowDownRight,
+  ArrowUpRight,
+  BarChart3,
+  Download,
+  FileSpreadsheet,
+  Loader2,
+  TrendingDown,
+  TrendingUp,
+  Wallet,
+  Wallet2,
+} from 'lucide-react';
 import {
   ResponsiveContainer,
-  ComposedChart,
-  Area,
   CartesianGrid,
   XAxis,
   YAxis,
   Tooltip,
+  Legend,
+  BarChart,
   Bar,
+  LineChart,
+  Line,
 } from 'recharts';
 import { supabase } from '../lib/supabase';
 import { useAuthOrg } from '../context/AuthOrgContext';
