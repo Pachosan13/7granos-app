@@ -45,10 +45,10 @@ import {
    Tipos
 --------------------------------------------------------------------------- */
 interface PnLRawRow {
-  mes?: string;
-  periodo?: string;
+  mes?: string;                 // 'YYYY-MM-01'
+  periodo?: string;             // alias posible
   sucursal_id?: string | null;
-  sucursalId?: string | null;
+  sucursalId?: string | null;   // variante defensiva
   ingresos?: number | string | null;
   cogs?: number | string | null;
   gastos_totales?: number | string | null;
@@ -56,14 +56,16 @@ interface PnLRawRow {
   utilidad_operativa?: number | string | null;
   utilidad?: number | string | null;
 }
+
 interface PnLRow {
-  mes: string;
-  sucursalId: string | null;
+  mes: string;                  // 'YYYY-MM-01'
+  sucursalId: string | null;    // uuid o null cuando total
   ingresos: number;
   cogs: number;
   gastosTotales: number;
   utilidadOperativa: number;
 }
+
 interface PostJournalResult {
   ok?: boolean;
   msg?: string;
@@ -72,7 +74,7 @@ interface PostJournalResult {
 }
 
 /* ────────────────────────────────────────────────────────────────────────────
-   Utils
+   Helpers base
 --------------------------------------------------------------------------- */
 const getErrorMessage = (error: unknown) => {
   if (error instanceof Error) return error.message;
@@ -156,22 +158,65 @@ const getNetMargin = (row: PnLRow) =>
   !row.ingresos ? 0 : (row.utilidadOperativa / row.ingresos) * 100;
 
 /* ────────────────────────────────────────────────────────────────────────────
-   Helper: ingresos consolidados desde la vista maestra
+   Capa de datos vía RPC (RLS-safe)
 --------------------------------------------------------------------------- */
-async function fetchIngresosAll(mesISO: string) {
-  const { data, error } = await supabase
-    .from('v_pnl_mensual_ingresos')
-    .select('mes,sucursal_id_final,ingresos')
-    .eq('mes', mesISO);
+/** Lee P&L de un mes. Si sucursalId === null, trae todas las sucursales. */
+async function rpcGetPyg(mesISO: string, sucursalId: string | null) {
+  const data =
+    (await rpcWithFallback<PnLRawRow[]>(
+      'api_get_pyg',
+      buildVariants(mesISO, sucursalId)
+    )) ?? [];
+  return normalize(data);
+}
 
-  if (error) throw error;
-  const map = new Map<string, number>();
-  for (const r of data ?? []) {
-    const id = String((r as any).sucursal_id_final);
-    const val = Number((r as any).ingresos ?? 0);
-    map.set(id, (map.get(id) ?? 0) + val);
+/** Devuelve un total agregado para “todas las sucursales”. */
+async function fetchTotalsAll(mesISO: string): Promise<PnLRow | null> {
+  const rows = await rpcGetPyg(mesISO, null);
+  if (!rows.length) return null;
+  return aggregate(rows);
+}
+
+/** Devuelve el histórico de los últimos N meses usando solo RPC. */
+async function fetchHistoryRPC(
+  currentMesISO: string,
+  sucursalId: string | null,
+  n: number = 6
+): Promise<PnLRow[]> {
+  // currentMesISO es 'YYYY-MM-01'
+  const base = new Date(currentMesISO);
+  if (Number.isNaN(base.getTime())) return [];
+
+  const months: string[] = [];
+  const d = new Date(base);
+  // queremos n meses hacia atrás incluyendo el actual
+  for (let i = n - 1; i >= 0; i--) {
+    const t = new Date(base);
+    t.setMonth(base.getMonth() - i);
+    const yyyy = t.getFullYear();
+    const mm = String(t.getMonth() + 1).padStart(2, '0');
+    months.push(`${yyyy}-${mm}-01`);
   }
-  return map;
+
+  const out: PnLRow[] = [];
+  for (const m of months) {
+    const rows = await rpcGetPyg(m, sucursalId);
+    if (!rows.length) {
+      // Sin datos: devolvemos cero
+      out.push({
+        mes: m,
+        sucursalId,
+        ingresos: 0,
+        cogs: 0,
+        gastosTotales: 0,
+        utilidadOperativa: 0,
+      });
+      continue;
+    }
+    // si piden “todas”: agregamos; si piden sucursal: suele venir una fila
+    out.push(sucursalId ? rows[0] : aggregate(rows));
+  }
+  return out;
 }
 
 /* ────────────────────────────────────────────────────────────────────────────
@@ -200,7 +245,7 @@ export const PnLPage = () => {
   }, [sucursalSeleccionada?.id]);
 
   /* ────────────────────────────────────────────────────────────────────────────
-     Carga de datos (integrada con maestro + comparativo)
+     Carga de datos (todo por RPC para evitar RLS)
   --------------------------------------------------------------------------- */
   const fetchData = useCallback(async () => {
     if (!mes) return;
@@ -211,121 +256,34 @@ export const PnLPage = () => {
 
     try {
       if (sucursalId) {
-        // Sucursal específica (RPC estable)
-        const data =
-          (await rpcWithFallback<PnLRawRow[]>(
-            'api_get_pyg',
-            buildVariants(filterMes, sucursalId)
-          )) ?? [];
-        setRows(normalize(data));
+        // Sucursal específica
+        const data = await rpcGetPyg(filterMes, sucursalId);
+        setRows(data);
 
         const prevMonth = getPreviousMonth(filterMes);
         if (prevMonth) {
-          const prev =
-            (await rpcWithFallback<PnLRawRow[]>(
-              'api_get_pyg',
-              buildVariants(prevMonth, sucursalId)
-            )) ?? [];
-          setPreviousRow(normalize(prev)[0] ?? null);
+          const prev = await rpcGetPyg(prevMonth, sucursalId);
+          setPreviousRow(prev[0] ?? null);
         } else {
           setPreviousRow(null);
         }
       } else {
-        // Todas las sucursales → ingresos desde vista maestra + COGS/Gastos desde comparativo
-        const ingresosMap = await fetchIngresosAll(filterMes);
+        // Todas las sucursales → total agregado por RPC
+        const totalAll = await fetchTotalsAll(filterMes);
+        setRows(totalAll ? [totalAll] : []);
 
-        const { data: otrosRows, error: errOtros } = await supabase
-          .from('v_pyg_comparativo')
-          .select('*')
-          .eq('mes', filterMes)
-          .order('sucursal_id', { ascending: true });
-        if (errOtros) throw errOtros;
-
-        const merged: PnLRow[] = [];
-        const byId = new Map<string, PnLRow>();
-
-        for (const r of (otrosRows ?? []) as PnLRawRow[]) {
-          const id = String(r.sucursal_id ?? '');
-          const cogs = toNumber(r.cogs);
-          const gastos = toNumber(r.gastos_totales ?? r.gastos ?? 0);
-          const ingresos = ingresosMap.get(id) ?? 0;
-
-          const row: PnLRow = {
-            mes: (r.mes || r.periodo || filterMes).slice(0, 10),
-            sucursalId: id || null,
-            ingresos,
-            cogs,
-            gastosTotales: gastos,
-            utilidadOperativa: ingresos - cogs - gastos,
-          };
-          byId.set(id, row);
-        }
-
-        // Ingresos que no tienen fila en comparativo: agrega con COGS/Gastos = 0
-        for (const [id, ingresos] of ingresosMap.entries()) {
-          if (!byId.has(id)) {
-            byId.set(id, {
-              mes: filterMes,
-              sucursalId: id,
-              ingresos,
-              cogs: 0,
-              gastosTotales: 0,
-              utilidadOperativa: ingresos,
-            });
-          }
-        }
-
-        for (const v of byId.values()) merged.push(v);
-        setRows(merged.length ? [aggregate(merged)] : []);
-
-        // Mes anterior consolidado
         const prevMonth = getPreviousMonth(filterMes);
         if (prevMonth) {
-          const prevIngresosMap = await fetchIngresosAll(prevMonth);
-          const { data: prevOtros } = await supabase
-            .from('v_pyg_comparativo')
-            .select('*')
-            .eq('mes', prevMonth);
-
-          const mergedPrev: PnLRow[] = [];
-          const prevMap = new Map<string, PnLRow>();
-
-          for (const r of (prevOtros ?? []) as PnLRawRow[]) {
-            const id = String(r.sucursal_id ?? '');
-            const cogs = toNumber(r.cogs);
-            const gastos = toNumber(r.gastos_totales ?? r.gastos ?? 0);
-            const ingresos = prevIngresosMap.get(id) ?? 0;
-            prevMap.set(id, {
-              mes: (r.mes || r.periodo || prevMonth).slice(0, 10),
-              sucursalId: id || null,
-              ingresos,
-              cogs,
-              gastosTotales: gastos,
-              utilidadOperativa: ingresos - cogs - gastos,
-            });
-          }
-          for (const [id, ingresos] of prevIngresosMap.entries()) {
-            if (!prevMap.has(id)) {
-              prevMap.set(id, {
-                mes: prevMonth,
-                sucursalId: id,
-                ingresos,
-                cogs: 0,
-                gastosTotales: 0,
-                utilidadOperativa: ingresos,
-              });
-            }
-          }
-          for (const v of prevMap.values()) mergedPrev.push(v);
-          setPreviousRow(mergedPrev.length ? aggregate(mergedPrev) : null);
+          const prevTotal = await fetchTotalsAll(prevMonth);
+          setPreviousRow(prevTotal);
         } else {
           setPreviousRow(null);
         }
       }
 
-      // Historial (últimos 6 meses)
-      const history = await loadHistory(sucursalId, filterMes);
-      setHistoryRows(history);
+      // Historial (últimos 6) por RPC
+      const hist = await fetchHistoryRPC(filterMes, sucursalId, 6);
+      setHistoryRows(hist);
     } catch (err: unknown) {
       console.error('Error cargando P&L', err);
       setRows([]);
@@ -487,9 +445,6 @@ export const PnLPage = () => {
       <header className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
         <div>
           <h1 className="text-3xl font-bold text-bean">Estado de Resultados (P&amp;L)</h1>
-          <p className="text-slate7g">
-            Visualiza ingresos, COGS, gastos operativos y utilidad neta del mes.
-          </p>
         </div>
         <div className="flex flex-wrap items-center gap-3">
           <button
@@ -711,44 +666,11 @@ export const PnLPage = () => {
 export default PnLPage;
 
 /* ────────────────────────────────────────────────────────────────────────────
-   Historial (últimos 6)
+   Historial (RPC)
 --------------------------------------------------------------------------- */
 const loadHistory = async (sucursalId: string | null, currentMesISO: string) => {
-  try {
-    let q = supabase
-      .from('v_pyg_comparativo')
-      .select('*')
-      .lte('mes', currentMesISO)
-      .order('mes', { ascending: true })
-      .limit(6);
-
-    if (sucursalId) q = q.eq('sucursal_id', sucursalId); // nunca usamos is.null
-
-    const { data, error } = await q;
-    if (error || !data) {
-      if (error) console.warn('Error cargando v_pyg_comparativo', error);
-      return [];
-    }
-
-    const normalized = normalize(data as PnLRawRow[]);
-    if (!sucursalId) {
-      // agregamos por mes (todas)
-      const byMes = new Map<string, PnLRow[]>();
-      for (const r of normalized) {
-        const arr = byMes.get(r.mes) ?? [];
-        arr.push(r);
-        byMes.set(r.mes, arr);
-      }
-      const agg = Array.from(byMes.entries())
-        .map(([mes, arr]) => ({ ...aggregate(arr), mes }))
-        .sort((a, b) => a.mes.localeCompare(b.mes));
-      return agg;
-    }
-    return normalized.sort((a, b) => a.mes.localeCompare(b.mes));
-  } catch (err) {
-    console.warn('Error inesperado cargando historial de P&L', err);
-    return [];
-  }
+  // Mantengo una firma compatible, pero internamente usamos la versión RPC
+  return fetchHistoryRPC(currentMesISO, sucursalId, 6);
 };
 
 /* ────────────────────────────────────────────────────────────────────────────
