@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { RefreshCw, TrendingUp, DollarSign, Receipt, Building2, Calendar } from 'lucide-react';
+import { RefreshCw, TrendingUp, DollarSign, Receipt, Building2, Calendar } from 'lucide-react';
+import {
 import {
   ResponsiveContainer,
   ComposedChart,
@@ -11,10 +13,16 @@ import {
   Bar,
 } from 'recharts';
 import { supabase } from '../lib/supabase';
+import { supabase } from '../lib/supabase';
+import { useAuthOrg } from '../context/AuthOrgContext';
 import { useAuthOrg } from '../context/AuthOrgContext';
 import { KPICard } from '../components/KPICard';
+import { KPICard } from '../components/KPICard';
+import { RealtimeStatusIndicator } from '../components/RealtimeStatusIndicator';
 import { RealtimeStatusIndicator } from '../components/RealtimeStatusIndicator';
 import { useRealtimeVentas } from '../hooks/useRealtimeVentas';
+import { useRealtimeVentas } from '../hooks/useRealtimeVentas';
+import { debugLog, getFunctionsBase } from '../utils/diagnostics';
 import { debugLog, getFunctionsBase } from '../utils/diagnostics';
 
 /* ──────────────────────────────────────────────────────────
