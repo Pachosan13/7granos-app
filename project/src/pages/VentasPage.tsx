@@ -18,7 +18,6 @@ import { useAuthOrg } from '../context/AuthOrgContext';
 /* ──────────────────────────────────────────────────────────
    Utilidades de fecha y formato
 ────────────────────────────────────────────────────────── */
-
 function ymdLocal(d: Date, tz = 'America/Panama') {
   const local = new Date(d.toLocaleString('en-US', { timeZone: tz }));
   const y = local.getFullYear();
@@ -26,18 +25,15 @@ function ymdLocal(d: Date, tz = 'America/Panama') {
   const day = String(local.getDate()).padStart(2, '0');
   return `${y}-${m}-${day}`;
 }
-
 function todayYMD(tz = 'America/Panama') {
   return ymdLocal(new Date(), tz);
 }
-
 function addDaysYMD(ymd: string, n: number, tz = 'America/Panama') {
   const [y, m, d] = ymd.split('-').map(Number);
   const base = new Date(Date.UTC(y, m - 1, d, 12, 0, 0));
   base.setUTCDate(base.getUTCDate() + n);
   return ymdLocal(base, tz);
 }
-
 function daysRangeInclusive(fromYMD: string, toYMD: string) {
   const out: string[] = [];
   let cur = fromYMD;
@@ -47,13 +43,11 @@ function daysRangeInclusive(fromYMD: string, toYMD: string) {
   }
   return out;
 }
-
 function startOfNDaysAgo(n: number, tz = 'America/Panama') {
   const end = todayYMD(tz);
   const start = addDaysYMD(end, -(n - 1), tz);
   return { start, end };
 }
-
 function formatCurrencyUSD(n: number) {
   return (n ?? 0).toLocaleString('en-US', {
     style: 'currency',
@@ -61,7 +55,6 @@ function formatCurrencyUSD(n: number) {
     maximumFractionDigits: 2,
   });
 }
-
 function formatDateDDMMYYYY(ymd: string) {
   const [y, m, d] = ymd.split('-');
   return `${d}/${m}/${y}`;
@@ -70,14 +63,12 @@ function formatDateDDMMYYYY(ymd: string) {
 /* ──────────────────────────────────────────────────────────
    Tipos
 ────────────────────────────────────────────────────────── */
-
 type RpcSerieRow = {
   d: string;            // 'YYYY-MM-DD'
   ventas_netas: number; // numeric
   itbms: number;        // numeric
   tx: number;           // bigint
 };
-
 type TablaSucursal = {
   nombre: string;
   ventas: number;
@@ -88,7 +79,6 @@ type TablaSucursal = {
 /* ──────────────────────────────────────────────────────────
    Lectura de datos
 ────────────────────────────────────────────────────────── */
-
 // p_hasta es EXCLUSIVO
 async function fetchSerieRPC(
   desdeIncl: string,
@@ -151,7 +141,9 @@ export default function VentasPage() {
   const [hasta, setHasta] = useState(defEnd);
   const [selectedSucursal, setSelectedSucursal] = useState<string>('');
 
-  const [serieFilled, setSerieFilled] = useState<Array<{ fecha: string; ventas: number; itbms: number; tx: number }>>([]);
+  const [serieFilled, setSerieFilled] = useState<
+    Array<{ fecha: string; ventas: number; itbms: number; tx: number }>
+  >([]);
   const [ranking, setRanking] = useState<TablaSucursal[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -179,7 +171,6 @@ export default function VentasPage() {
       const filled = daysRangeInclusive(desde, hasta).map((d) => {
         const v = byDay.get(d);
         return { fecha: d, ventas: v?.ventas ?? 0, itbms: v?.itbms ?? 0, tx: v?.tx ?? 0 };
-        // Si el RPC te devolvía 2025-11-01, aquí aparecerá 100% seguro.
       });
 
       setSerieFilled(filled);
@@ -327,10 +318,14 @@ export default function VentasPage() {
               <ComposedChart data={serieFilled}>
                 <CartesianGrid strokeDasharray="3 3" />
                 <XAxis dataKey="fecha" />
-                <YAxis yAxisId="left" tickFormatter={(v) => (Math.abs(v) >= 1000 ? `${(v / 1000).toFixed(0)}k` : `${v}`)} />
+                <YAxis
+                  yAxisId="left"
+                  tickFormatter={(v) =>
+                    Math.abs(v) >= 1000 ? `${(v / 1000).toFixed(0)}k` : `${v}`
+                  }
+                />
                 <YAxis yAxisId="right" orientation="right" />
                 <Tooltip
-                  // ⚠️ Usamos dataKey real para etiquetar bien
                   formatter={(val: any, _name, item: any) => {
                     const key = String(item?.dataKey ?? '');
                     if (key === 'tx') return [Number(val).toLocaleString('en-US'), 'TX'];
@@ -376,8 +371,12 @@ export default function VentasPage() {
                     <tr key={r.nombre}>
                       <td className="px-6 py-3">{r.nombre}</td>
                       <td className="px-6 py-3 text-right font-mono">{formatCurrencyUSD(r.ventas)}</td>
-                      <td className="px-6 py-3 text-right font-mono">{r.transacciones.toLocaleString('en-US')}</td>
-                      <td className="px-6 py-3 text-right font-mono">{formatCurrencyUSD(r.ticketPromedio)}</td>
+                      <td className="px-6 py-3 text-right font-mono">
+                        {r.transacciones.toLocaleString('en-US')}
+                      </td>
+                      <td className="px-6 py-3 text-right font-mono">
+                        {formatCurrencyUSD(r.ticketPromedio)}
+                      </td>
                     </tr>
                   ))
                 ) : (
@@ -427,7 +426,6 @@ function KpiCard({
     </article>
   );
 }
-
 function EmptyState({ message }: { message: string }) {
   return (
     <div className="flex h-full flex-col items-center justify-center gap-2 px-6 py-8 text-center text-sm text-slate-500">
