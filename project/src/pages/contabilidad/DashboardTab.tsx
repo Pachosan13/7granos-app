@@ -1,7 +1,6 @@
 // src/pages/contabilidad/DashboardTab.tsx
 import { useEffect, useMemo, useState } from 'react';
 import { supabase } from '../../lib/supabase';
-import { postJournalsInRange, toISODate } from '../../lib/contabilidad';
 
 type Row = {
   fecha: string;
@@ -10,6 +9,11 @@ type Row = {
   itbms: number | null;
   num_transacciones: number | null;
 };
+
+function toISODate(v: string | Date): string {
+  if (typeof v === 'string') return v.slice(0, 10);
+  return new Date(v).toISOString().slice(0, 10);
+}
 
 export const DashboardTab = () => {
   const [desde, setDesde] = useState<string>('');
@@ -20,19 +24,17 @@ export const DashboardTab = () => {
   const [posting, setPosting] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
 
-  // Inicializa fechas al día de hoy
+  // Inicializa al día de hoy
   useEffect(() => {
     const today = new Date().toISOString().slice(0, 10);
     setDesde(today);
     setHasta(today);
   }, []);
 
-  // Cargar catálogo de sucursales (para mostrar nombre)
+  // Catálogo de sucursales (id -> nombre)
   useEffect(() => {
     (async () => {
-      const { data, error } = await supabase
-        .from('sucursal')
-        .select('id,nombre,activa');
+      const { data, error } = await supabase.from('sucursal').select('id,nombre,activa');
       if (error) {
         console.error(error);
         return;
@@ -76,7 +78,7 @@ export const DashboardTab = () => {
 
   useEffect(() => {
     fetchData();
-  }, [desde, hasta]);
+  }, [desde, hasta]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const refetchResumen = async () => {
     await fetchData();
@@ -94,17 +96,23 @@ export const DashboardTab = () => {
     );
   }, [rows]);
 
-  // ✅ Generar asientos / postear journals via RPC (sin Edge Function)
+  // ✅ Generar asientos vía Edge Function cont-post-asientos
   const handleGenerarAsientos = async () => {
     setPosting(true);
     setMsg(null);
     try {
-      await postJournalsInRange({
+      const payload = {
         desde: toISODate(desde),
         hasta: toISODate(hasta),
-        sucursalId: null, // o el id seleccionado si agregas filtro
+        sucursal: null, // puedes pasar id/slug si luego agregas filtro
+      };
+
+      const { data, error } = await supabase.functions.invoke('cont-post-asientos', {
+        body: payload,
       });
-      setMsg('OK: asientos posteados en el rango');
+
+      if (error) throw error;
+      setMsg(`OK: asientos posteados (${data?.posted ?? 'listo'})`);
       await refetchResumen();
     } catch (e: any) {
       console.error(e);
@@ -119,7 +127,7 @@ export const DashboardTab = () => {
       {/* Filtros */}
       <div className="flex flex-wrap items-end gap-2">
         <div className="flex flex-col">
-          <label className="text-xs text-slate7g">Desde</label>
+          <label className="text-xs text-slate-700">Desde</label>
           <input
             type="date"
             value={desde}
@@ -128,7 +136,7 @@ export const DashboardTab = () => {
           />
         </div>
         <div className="flex flex-col">
-          <label className="text-xs text-slate7g">Hasta</label>
+          <label className="text-xs text-slate-700">Hasta</label>
           <input
             type="date"
             value={hasta}
@@ -149,7 +157,7 @@ export const DashboardTab = () => {
           onClick={handleGenerarAsientos}
           className="px-3 py-2 rounded bg-accent text-white"
           disabled={posting || loading}
-          title="Postea journals en el rango usando RPC directo"
+          title="Postea journals en el rango con Edge Function"
         >
           {posting ? 'Generando…' : 'Generar asientos'}
         </button>
@@ -160,22 +168,16 @@ export const DashboardTab = () => {
       {/* KPIs */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         <div className="rounded-xl border p-4">
-          <div className="text-slate7g text-sm">Ventas Netas</div>
-          <div className="text-2xl font-bold">
-            ${totals.ventas_netas.toLocaleString()}
-          </div>
+          <div className="text-slate-700 text-sm">Ventas Netas</div>
+          <div className="text-2xl font-bold">${totals.ventas_netas.toLocaleString()}</div>
         </div>
         <div className="rounded-xl border p-4">
-          <div className="text-slate7g text-sm">ITBMS</div>
-          <div className="text-2xl font-bold">
-            ${totals.itbms.toLocaleString()}
-          </div>
+          <div className="text-slate-700 text-sm">ITBMS</div>
+          <div className="text-2xl font-bold">${totals.itbms.toLocaleString()}</div>
         </div>
         <div className="rounded-xl border p-4">
-          <div className="text-slate7g text-sm">Transacciones</div>
-          <div className="text-2xl font-bold">
-            {totals.num_transacciones.toLocaleString()}
-          </div>
+          <div className="text-slate-700 text-sm">Transacciones</div>
+          <div className="text-2xl font-bold">{totals.num_transacciones.toLocaleString()}</div>
         </div>
       </div>
 
@@ -211,7 +213,7 @@ export const DashboardTab = () => {
             ))}
             {rows.length === 0 && (
               <tr>
-                <td className="p-4 text-center text-slate7g" colSpan={5}>
+                <td className="p-4 text-center text-slate-700" colSpan={5}>
                   Sin datos en el rango
                 </td>
               </tr>
