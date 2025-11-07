@@ -2,44 +2,60 @@ import { useMemo, useState } from 'react';
 import {
   LayoutDashboard,
   BookOpen,
-  FileText,
   Users,
   BarChart3,
-  Settings, // ✅ Importación correcta
+  Settings,
 } from 'lucide-react';
 import { DashboardTab } from './contabilidad/DashboardTab';
 import { DiarioTab } from './contabilidad/DiarioTab';
-import { MayorTab } from './contabilidad/MayorTab';
-import { AuxiliaresTab } from './contabilidad/AuxiliaresTab';
+// ⛔️ Removido: MayorTab (ya existe la vista “Libro Mayor” en el sidebar)
 import { ReportesTab } from './contabilidad/ReportesTab';
 import { AdminTab } from './contabilidad/AdminTab';
 import { useSearchParams } from 'react-router-dom';
 import { useAuthOrg } from '../context/AuthOrgContext';
 import { ErrorBoundary } from '../components/ErrorBoundary';
 
-type TabType = 'dashboard' | 'diario' | 'mayor' | 'auxiliares' | 'reportes' | 'admin';
+// ⛳️ Feature flag para ocultar Auxiliares (placeholder) si aún no está listo.
+const SHOW_AUXILIARES = false;
 
-const ALL_TABS: Array<{
+// Tabs permitidos (sin "mayor")
+type TabType = 'dashboard' | 'diario' | 'auxiliares' | 'reportes' | 'admin';
+
+type TabDef = {
   id: TabType;
   label: string;
   icon: React.ComponentType<{ size?: number; className?: string }>;
   requiresAccounting?: boolean;
-}> = [
-  { id: 'dashboard',  label: 'Dashboard',  icon: LayoutDashboard },
-  { id: 'diario',     label: 'Diario',     icon: BookOpen },
-  { id: 'mayor',      label: 'Mayor',      icon: FileText },
-  { id: 'auxiliares', label: 'Auxiliares', icon: Users },
-  { id: 'reportes',   label: 'Reportes',   icon: BarChart3 },
-  { id: 'admin',      label: 'Admin',      icon: Settings, requiresAccounting: true },
+  enabled?: boolean;
+};
+
+const ALL_TABS: TabDef[] = [
+  { id: 'dashboard',  label: 'Dashboard',  icon: LayoutDashboard, enabled: true },
+  { id: 'diario',     label: 'Diario',     icon: BookOpen,        enabled: true },
+  { id: 'auxiliares', label: 'Auxiliares', icon: Users,           enabled: SHOW_AUXILIARES },
+  { id: 'reportes',   label: 'Reportes',   icon: BarChart3,       enabled: true },
+  { id: 'admin',      label: 'Admin',      icon: Settings,        requiresAccounting: true, enabled: true },
 ];
 
 export const Contabilidad = () => {
   const [searchParams, setSearchParams] = useSearchParams();
   const { perfil } = useAuthOrg();
 
-  // Tab inicial desde URL (con guard por si viene algo inválido)
+  // Filtra por "enabled" primero (evita mostrar Auxiliares si está apagado)
+  const enabledTabs = useMemo(() => ALL_TABS.filter(t => t.enabled !== false), []);
+
+  // Autorización para Admin
+  const hasAccountingRole = !!perfil?.rol && ['owner', 'admin', 'accountant'].includes(perfil.rol);
+
+  // Tabs visibles según permisos
+  const visibleTabs = useMemo(
+    () => enabledTabs.filter(t => (t.requiresAccounting ? hasAccountingRole : true)),
+    [enabledTabs, hasAccountingRole]
+  );
+
+  // Tab inicial desde URL (si viene uno inválido o deshabilitado, cae a dashboard)
   const urlTab = (searchParams.get('tab') as TabType) ?? 'dashboard';
-  const validTabIds = useMemo(() => new Set(ALL_TABS.map(t => t.id)), []);
+  const validTabIds = useMemo(() => new Set(visibleTabs.map(t => t.id)), [visibleTabs]);
   const initialTab: TabType = validTabIds.has(urlTab) ? urlTab : 'dashboard';
 
   const [activeTab, setActiveTab] = useState<TabType>(initialTab);
@@ -48,17 +64,6 @@ export const Contabilidad = () => {
     setActiveTab(tab);
     setSearchParams({ tab });
   };
-
-  // Roles permitidos para ver "Admin"
-  const hasAccountingRole =
-    !!perfil?.rol && ['owner', 'admin', 'accountant'].includes(perfil.rol);
-
-  // Filtra tabs según rol (evita que el botón Admin aparezca sin permiso)
-  const visibleTabs = useMemo(
-    () =>
-      ALL_TABS.filter(tab => (tab.requiresAccounting ? hasAccountingRole : true)),
-    [hasAccountingRole]
-  );
 
   return (
     <ErrorBoundary>
@@ -101,8 +106,11 @@ export const Contabilidad = () => {
           <div className="p-8">
             {activeTab === 'dashboard'  && <DashboardTab />}
             {activeTab === 'diario'     && <DiarioTab />}
-            {activeTab === 'mayor'      && <MayorTab />}
-            {activeTab === 'auxiliares' && <AuxiliaresTab />}
+            {/* ⛔️ Removido: {activeTab === 'mayor' && <MayorTab />}  */}
+            {/* Auxiliares sólo si está habilitado */}
+            {SHOW_AUXILIARES && activeTab === 'auxiliares' && (
+              <div className="text-slate-700">Auxiliares (CxP) — Próximamente</div>
+            )}
             {activeTab === 'reportes'   && <ReportesTab />}
             {activeTab === 'admin'      && hasAccountingRole && <AdminTab />}
             {activeTab === 'admin'      && !hasAccountingRole && (
