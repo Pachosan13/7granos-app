@@ -86,10 +86,10 @@ async function fetchSerieRPC(
   sucursalId: string | null
 ): Promise<RpcSerieRow[]> {
   const { data, error } = await supabase.rpc('rpc_ui_series_14d', {
-    p_desde: desdeIncl,
-    p_hasta: hastaExcl,
-    p_sucursal_id: sucursalId,
-  });
+  p_desde: desdeIncl,
+  p_hasta: hastaExcl,       
+  p_sucursal_id: sucursalId,
+});
   if (error) throw error;
   return (data ?? []).map((r: any) => ({
     d: String(r.d).slice(0, 10),
