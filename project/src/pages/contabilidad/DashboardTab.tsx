@@ -45,13 +45,8 @@ export const DashboardTab = () => {
 
   // ---- Sincroniza filtros -> URL
   useEffect(() => {
-    const params: Record<string, string> = {
-      desde,
-      hasta,
-      sucursal: sucursalId,
-    };
-    // Limpia "all" para no ensuciar la URL
-    if (sucursalId === 'all') delete params.sucursal;
+    const params: Record<string, string> = { desde, hasta };
+    if (sucursalId !== 'all') params.sucursal = String(sucursalId);
     setSearchParams(params, { replace: true });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [desde, hasta, sucursalId]);
@@ -63,8 +58,11 @@ export const DashboardTab = () => {
         .from('sucursal')
         .select('id,nombre,activa')
         .order('nombre', { ascending: true });
-      if (!error) setSucursales((data as Sucursal[]) ?? []);
-      else console.error('sucursal list error:', error);
+      if (error) {
+        console.error('sucursal list error:', error);
+        return;
+      }
+      setSucursales((data as Sucursal[]) ?? []);
     })();
   }, []);
 
@@ -82,9 +80,7 @@ export const DashboardTab = () => {
         .lte('fecha', hasta)
         .order('fecha', { ascending: false });
 
-      if (sucursalId !== 'all') {
-        q = q.eq('sucursal_id', sucursalId);
-      }
+      if (sucursalId !== 'all') q = q.eq('sucursal_id', sucursalId);
 
       const { data, error } = await q;
       if (error) throw error;
@@ -118,7 +114,7 @@ export const DashboardTab = () => {
     [rows]
   );
 
-  // ---- Postear asientos a libro mayor (Edge Function)
+  // ---- Postear asientos a libro mayor (Edge Function cont-post-asientos)
   const handleGenerarAsientos = async () => {
     if (!desde || !hasta) return;
     setPosting(true);
@@ -131,11 +127,11 @@ export const DashboardTab = () => {
         'cont-post-asientos',
         { body }
       );
-
       if (error) throw error;
+
       setMsg(
-        `OK: asientos posteados (${data?.posted ?? `${desde}..${hasta}`}) ${
-          data?.sucursal ? `· sucursal: ${data.sucursal}` : ''
+        `OK: asientos posteados (${data?.posted ?? `${desde}..${hasta}`})${
+          data?.sucursal ? ` · sucursal: ${data.sucursal}` : ''
         }`
       );
       await fetchData();
