@@ -1,3 +1,4 @@
+// src/pages/contabilidad/PnLPage.tsx
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ArrowDownRight,
@@ -44,10 +45,10 @@ import {
    Tipos
 --------------------------------------------------------------------------- */
 interface PnLRawRow {
-  mes?: string;
-  periodo?: string;
+  mes?: string;                 // 'YYYY-MM-01'
+  periodo?: string;             // alias posible
   sucursal_id?: string | null;
-  sucursalId?: string | null;
+  sucursalId?: string | null;   // variante defensiva
   ingresos?: number | string | null;
   cogs?: number | string | null;
   gastos_totales?: number | string | null;
@@ -55,14 +56,16 @@ interface PnLRawRow {
   utilidad_operativa?: number | string | null;
   utilidad?: number | string | null;
 }
+
 interface PnLRow {
-  mes: string;
-  sucursalId: string | null;
+  mes: string;                  // 'YYYY-MM-01'
+  sucursalId: string | null;    // uuid o null cuando total
   ingresos: number;
   cogs: number;
   gastosTotales: number;
   utilidadOperativa: number;
 }
+
 interface PostJournalResult {
   ok?: boolean;
   msg?: string;
@@ -71,7 +74,7 @@ interface PostJournalResult {
 }
 
 /* ────────────────────────────────────────────────────────────────────────────
-   Utils
+   Helpers base
 --------------------------------------------------------------------------- */
 const getErrorMessage = (error: unknown) => {
   if (error instanceof Error) return error.message;
@@ -155,7 +158,69 @@ const getNetMargin = (row: PnLRow) =>
   !row.ingresos ? 0 : (row.utilidadOperativa / row.ingresos) * 100;
 
 /* ────────────────────────────────────────────────────────────────────────────
-   Componente
+   Capa de datos vía RPC (RLS-safe)
+--------------------------------------------------------------------------- */
+/** Lee P&L de un mes. Si sucursalId === null, trae todas las sucursales. */
+async function rpcGetPyg(mesISO: string, sucursalId: string | null) {
+  const data =
+    (await rpcWithFallback<PnLRawRow[]>(
+      'api_get_pyg',
+      buildVariants(mesISO, sucursalId)
+    )) ?? [];
+  return normalize(data);
+}
+
+/** Devuelve un total agregado para “todas las sucursales”. */
+async function fetchTotalsAll(mesISO: string): Promise<PnLRow | null> {
+  const rows = await rpcGetPyg(mesISO, null);
+  if (!rows.length) return null;
+  return aggregate(rows);
+}
+
+/** Devuelve el histórico de los últimos N meses usando solo RPC. */
+async function fetchHistoryRPC(
+  currentMesISO: string,
+  sucursalId: string | null,
+  n: number = 6
+): Promise<PnLRow[]> {
+  // currentMesISO es 'YYYY-MM-01'
+  const base = new Date(currentMesISO);
+  if (Number.isNaN(base.getTime())) return [];
+
+  const months: string[] = [];
+  const d = new Date(base);
+  // queremos n meses hacia atrás incluyendo el actual
+  for (let i = n - 1; i >= 0; i--) {
+    const t = new Date(base);
+    t.setMonth(base.getMonth() - i);
+    const yyyy = t.getFullYear();
+    const mm = String(t.getMonth() + 1).padStart(2, '0');
+    months.push(`${yyyy}-${mm}-01`);
+  }
+
+  const out: PnLRow[] = [];
+  for (const m of months) {
+    const rows = await rpcGetPyg(m, sucursalId);
+    if (!rows.length) {
+      // Sin datos: devolvemos cero
+      out.push({
+        mes: m,
+        sucursalId,
+        ingresos: 0,
+        cogs: 0,
+        gastosTotales: 0,
+        utilidadOperativa: 0,
+      });
+      continue;
+    }
+    // si piden “todas”: agregamos; si piden sucursal: suele venir una fila
+    out.push(sucursalId ? rows[0] : aggregate(rows));
+  }
+  return out;
+}
+
+/* ────────────────────────────────────────────────────────────────────────────
+   Componente principal
 --------------------------------------------------------------------------- */
 export const PnLPage = () => {
   const { sucursales, sucursalSeleccionada } = useAuthOrg();
@@ -176,11 +241,12 @@ export const PnLPage = () => {
   }, []);
 
   useEffect(() => {
-    if (sucursalSeleccionada?.id) {
-      setSelectedSucursal(String(sucursalSeleccionada.id));
-    }
+    if (sucursalSeleccionada?.id) setSelectedSucursal(String(sucursalSeleccionada.id));
   }, [sucursalSeleccionada?.id]);
 
+  /* ────────────────────────────────────────────────────────────────────────────
+     Carga de datos (todo por RPC para evitar RLS)
+  --------------------------------------------------------------------------- */
   const fetchData = useCallback(async () => {
     if (!mes) return;
     setLoading(true);
@@ -189,54 +255,35 @@ export const PnLPage = () => {
     const sucursalId = selectedSucursal || null;
 
     try {
-      // a) Sucursal específica -> RPC
       if (sucursalId) {
-        const data =
-          (await rpcWithFallback<PnLRawRow[]>(
-            'api_get_pyg',
-            buildVariants(filterMes, sucursalId)
-          )) ?? [];
-        setRows(normalize(data));
-      } else {
-        // b) Todas -> vista y agregamos en cliente (nunca pedimos "sucursal_id is null")
-        const { data, error } = await supabase
-          .from('v_pyg_comparativo')
-          .select('*')
-          .eq('mes', filterMes)
-          .order('sucursal_id', { ascending: true });
+        // Sucursal específica
+        const data = await rpcGetPyg(filterMes, sucursalId);
+        setRows(data);
 
-        if (error) throw error;
-        const normalized = normalize((data ?? []) as PnLRawRow[]);
-        setRows(normalized.length ? [aggregate(normalized)] : []);
-      }
-
-      // Mes anterior
-      const prevMonth = getPreviousMonth(filterMes);
-      if (prevMonth) {
-        if (sucursalId) {
-          const prev =
-            (await rpcWithFallback<PnLRawRow[]>(
-              'api_get_pyg',
-              buildVariants(prevMonth, sucursalId)
-            )) ?? [];
-          setPreviousRow(normalize(prev)[0] ?? null);
+        const prevMonth = getPreviousMonth(filterMes);
+        if (prevMonth) {
+          const prev = await rpcGetPyg(prevMonth, sucursalId);
+          setPreviousRow(prev[0] ?? null);
         } else {
-          const { data: prevData, error: prevErr } = await supabase
-            .from('v_pyg_comparativo')
-            .select('*')
-            .eq('mes', prevMonth);
-
-          if (prevErr) throw prevErr;
-          const normPrev = normalize((prevData ?? []) as PnLRawRow[]);
-          setPreviousRow(normPrev.length ? aggregate(normPrev) : null);
+          setPreviousRow(null);
         }
       } else {
-        setPreviousRow(null);
+        // Todas las sucursales → total agregado por RPC
+        const totalAll = await fetchTotalsAll(filterMes);
+        setRows(totalAll ? [totalAll] : []);
+
+        const prevMonth = getPreviousMonth(filterMes);
+        if (prevMonth) {
+          const prevTotal = await fetchTotalsAll(prevMonth);
+          setPreviousRow(prevTotal);
+        } else {
+          setPreviousRow(null);
+        }
       }
 
-      // Historial (últimos 6)
-      const history = await loadHistory(sucursalId, filterMes);
-      setHistoryRows(history);
+      // Historial (últimos 6) por RPC
+      const hist = await fetchHistoryRPC(filterMes, sucursalId, 6);
+      setHistoryRows(hist);
     } catch (err: unknown) {
       console.error('Error cargando P&L', err);
       setRows([]);
@@ -384,18 +431,20 @@ export const PnLPage = () => {
     exportToXlsx(data, 'P&L', { suffix: 'pnl' });
   };
 
+  /* ────────────────────────────────────────────────────────────────────────────
+     Render
+  --------------------------------------------------------------------------- */
   return (
     <div className="space-y-6">
       <ToastContainer
         toasts={toasts}
         onDismiss={(id) => dismissToast(setToasts, id)}
       />
+
+      {/* Header */}
       <header className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
         <div>
           <h1 className="text-3xl font-bold text-bean">Estado de Resultados (P&amp;L)</h1>
-          <p className="text-slate7g">
-            Visualiza ingresos, COGS, gastos operativos y utilidad neta del mes.
-          </p>
         </div>
         <div className="flex flex-wrap items-center gap-3">
           <button
@@ -426,6 +475,7 @@ export const PnLPage = () => {
         </div>
       </header>
 
+      {/* Filtros */}
       <section className="rounded-2xl border border-sand bg-white p-4 shadow-sm">
         <div className="grid gap-4 md:grid-cols-4">
           <label className="flex flex-col gap-2 text-sm text-slate7g">
@@ -464,6 +514,7 @@ export const PnLPage = () => {
         </div>
       </section>
 
+      {/* Métricas */}
       <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
         <CardMetric
           title="Ingresos"
@@ -499,6 +550,7 @@ export const PnLPage = () => {
         </article>
       </section>
 
+      {/* Charts */}
       <section className="grid gap-6 lg:grid-cols-2">
         <article className="rounded-2xl border border-sand bg-white shadow-sm">
           <header className="flex items-center justify-between border-b border-sand px-6 py-4">
@@ -557,6 +609,7 @@ export const PnLPage = () => {
         </article>
       </section>
 
+      {/* Detalle del período */}
       <section className="rounded-2xl border border-sand bg-white shadow-sm">
         <header className="flex items-center justify-between border-b border-sand px-6 py-4">
           <div>
@@ -613,44 +666,11 @@ export const PnLPage = () => {
 export default PnLPage;
 
 /* ────────────────────────────────────────────────────────────────────────────
-   Historial
+   Historial (RPC)
 --------------------------------------------------------------------------- */
 const loadHistory = async (sucursalId: string | null, currentMesISO: string) => {
-  try {
-    let q = supabase
-      .from('v_pyg_comparativo')
-      .select('*')
-      .lte('mes', currentMesISO)
-      .order('mes', { ascending: true })
-      .limit(6);
-
-    if (sucursalId) q = q.eq('sucursal_id', sucursalId); // nunca usamos is.null
-
-    const { data, error } = await q;
-    if (error || !data) {
-      if (error) console.warn('Error cargando v_pyg_comparativo', error);
-      return [];
-    }
-
-    const normalized = normalize(data as PnLRawRow[]);
-    if (!sucursalId) {
-      // agregamos por mes
-      const byMes = new Map<string, PnLRow[]>();
-      for (const r of normalized) {
-        const arr = byMes.get(r.mes) ?? [];
-        arr.push(r);
-        byMes.set(r.mes, arr);
-      }
-      const agg = Array.from(byMes.entries())
-        .map(([mes, arr]) => ({ ...aggregate(arr), mes }))
-        .sort((a, b) => a.mes.localeCompare(b.mes));
-      return agg;
-    }
-    return normalized.sort((a, b) => a.mes.localeCompare(b.mes));
-  } catch (err) {
-    console.warn('Error inesperado cargando historial de P&L', err);
-    return [];
-  }
+  // Mantengo una firma compatible, pero internamente usamos la versión RPC
+  return fetchHistoryRPC(currentMesISO, sucursalId, 6);
 };
 
 /* ────────────────────────────────────────────────────────────────────────────
@@ -677,6 +697,15 @@ const CardMetric = ({
   negativeIsBad?: boolean;
 }) => {
   const Icon = icon === 'up' ? TrendingUp : icon === 'down' ? TrendingDown : Wallet;
+  const isPositive = comp.delta >= 0;
+  const isGood = negativeIsBad ? !isPositive : isPositive;
+  const tone =
+    comp.pct === null
+      ? 'text-slate-500 bg-slate-50'
+      : isGood
+      ? 'text-emerald-600 bg-emerald-50'
+      : 'text-rose-600 bg-rose-50';
+
   return (
     <article className="rounded-2xl border border-sand bg-white p-4 shadow-sm">
       <div className="flex items-center justify-between text-slate-500">
@@ -704,10 +733,16 @@ const ComparisonPill = ({
 }) => {
   const isPositive = comparison.delta >= 0;
   const isGood = negativeIsBad ? !isPositive : isPositive;
-  const tone = isGood ? 'text-emerald-600 bg-emerald-50' : 'text-rose-600 bg-rose-50';
+  const tone =
+    comparison.pct === null
+      ? 'text-slate-600 bg-slate-100'
+      : isGood
+      ? 'text-emerald-700 bg-emerald-50'
+      : 'text-rose-700 bg-rose-50';
   const Icon = isPositive ? ArrowUpRight : ArrowDownRight;
   const formatValue = (value: number) =>
     isMargin ? `${value.toFixed(1)}%` : formatCurrencyUSD(value);
+
   return (
     <div className={`mt-3 inline-flex items-center gap-2 rounded-full px-3 py-1 text-xs font-medium ${tone}`}>
       <Icon className="h-4 w-4" />

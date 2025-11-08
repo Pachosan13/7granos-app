@@ -1,6 +1,7 @@
+// project/src/pages/VentasPage.tsx
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { RefreshCw, TrendingUp, DollarSign, Receipt, Building2, Calendar } from 'lucide-react';
-import { ResponsiveContainer, ComposedChart, CartesianGrid, XAxis, YAxis, Tooltip, Legend, Bar, Line } from "recharts";
+import {
   ResponsiveContainer,
   ComposedChart,
   Area,
@@ -12,31 +13,10 @@ import { ResponsiveContainer, ComposedChart, CartesianGrid, XAxis, YAxis, Toolti
 } from 'recharts';
 import { supabase } from '../lib/supabase';
 import { useAuthOrg } from '../context/AuthOrgContext';
-import { KPICard } from '../components/KPICard';
-import { RealtimeStatusIndicator } from '../components/RealtimeStatusIndicator';
-import { useRealtimeVentas } from '../hooks/useRealtimeVentas';
-import { debugLog, getFunctionsBase } from '../utils/diagnostics';
 
 /* ──────────────────────────────────────────────────────────
-   Tipos que devuelve cada variante de RPC
-   - Todas:   rpc_ui_series_14d(desde, hasta)
-   - Individ: rpc_ui_series_14d(p_desde, p_hasta, p_sucursal_id uuid)
-   ────────────────────────────────────────────────────────── */
-type SerieAllRow = {
-  dia: string;          // 'YYYY-MM-DD'
-  sucursal: string;     // nombre
-  ventas: number;
-  itbms: number;
-  transacciones: number;
-  propina: number;
-};
-type SerieOneRow = {
-  d: string;            // 'YYYY-MM-DD'
-  ventas_netas: number;
-  tx: number;
-type SucursalRow = { nombre: string; ventas: number; transacciones: number; ticketPromedio: number; };
-type SyncBranchStat = { name: string; orders: number; sales?: number };
-   Utilidades de fecha/formatos
+   Utilidades de fecha y formato
+────────────────────────────────────────────────────────── */
 function todayYMD(tz = 'America/Panama') {
   const d = new Date(new Date().toLocaleString('en-US', { timeZone: tz }));
   const y = d.getFullYear();
@@ -44,335 +24,436 @@ function todayYMD(tz = 'America/Panama') {
   const day = String(d.getDate()).padStart(2, '0');
   return `${y}-${m}-${day}`;
 }
+
 function addDays(ymd: string, days: number) {
   const [y, m, d] = ymd.split('-').map(Number);
   const dt = new Date(Date.UTC(y, m - 1, d, 12, 0, 0));
   dt.setUTCDate(dt.getUTCDate() + days);
-  const yy = dt.getUTCFullYear(); const mm = String(dt.getUTCMonth() + 1).padStart(2, '0'); const dd = String(dt.getUTCDate()).padStart(2, '0');
+  const yy = dt.getUTCFullYear();
+  const mm = String(dt.getUTCMonth() + 1).padStart(2, '0');
+  const dd = String(dt.getUTCDate()).padStart(2, '0');
   return `${yy}-${mm}-${dd}`;
+}
+
+function startOfNDaysAgo(n: number, tz = 'America/Panama') {
+  const now = new Date(new Date().toLocaleString('en-US', { timeZone: tz }));
+  // aseguramos que corte en el día local, no UTC
+  const end = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+  const start = addDays(end, -n + 1);
+  return { start, end };
+}
+
 function formatCurrencyUSD(n: number) {
-  return (n ?? 0).toLocaleString('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 2 });
+  return (n ?? 0).toLocaleString('en-US', {
+    style: 'currency',
+    currency: 'USD',
+    maximumFractionDigits: 2,
+  });
+}
+
 function formatDateDDMMYYYY(ymd: string) {
   const [y, m, d] = ymd.split('-');
   return `${d}/${m}/${y}`;
-   Página
+}
+
+/* ──────────────────────────────────────────────────────────
+   Tipos
+────────────────────────────────────────────────────────── */
+
+// RPC única (agrega por día). Con p_sucursal_id = null → agrega TODAS.
+type RpcSerieRow = {
+  d: string;            // 'YYYY-MM-DD'
+  ventas_netas: number; // numeric
+  itbms: number;        // numeric
+  tx: number;           // bigint
+};
+
+// Vista por día/sucursal (para ranking cuando “todas”)
+type ViewSeriesRow = {
+  dia: string;          // 'YYYY-MM-DD'
+  sucursal_id: string;  // uuid
+  sucursal: string;     // nombre
+  ventas_brutas: number;
+  itbms: number;
+  tickets: number;
+  propina: number | null;
+};
+
+// Auxiliar para ranking
+type TablaSucursal = {
+  nombre: string;
+  ventas: number;
+  transacciones: number;
+  ticketPromedio: number;
+};
+
+/* ──────────────────────────────────────────────────────────
+   Lectura de datos
+────────────────────────────────────────────────────────── */
+
+async function fetchSerieRPC(
+  desde: string,
+  hasta: string,
+  sucursalId: string | null
+): Promise<RpcSerieRow[]> {
+  const { data, error } = await supabase.rpc('rpc_ui_series_14d', {
+    p_desde: desde,
+    p_hasta: hasta,
+    p_sucursal_id: sucursalId,
+  });
+  if (error) throw error;
+  // normaliza nulls → números
+  return (data ?? []).map((r: any) => ({
+    d: String(r.d),
+    ventas_netas: Number(r.ventas_netas ?? 0),
+    itbms: Number(r.itbms ?? 0),
+    tx: Number(r.tx ?? 0),
+  }));
+}
+
+/** Para “todas”: ranking por sucursal desde la vista v_ui_series_14d */
+async function fetchRankingView(
+  desde: string,
+  hasta: string
+): Promise<TablaSucursal[]> {
+  const { data, error } = await supabase
+    .from('v_ui_series_14d')
+    .select('dia,sucursal,ventas_brutas,tickets')
+    .gte('dia', desde)
+    .lte('dia', hasta);
+
+  if (error) throw error;
+
+  // Agregamos por sucursal
+  const map = new Map<string, { ventas: number; tx: number }>();
+  for (const row of (data ?? []) as any[]) {
+    const nombre = String(row.sucursal ?? 'Sin asignar');
+    const ventas = Number(row.ventas_brutas ?? 0);
+    const tx = Number(row.tickets ?? 0);
+    const prev = map.get(nombre) ?? { ventas: 0, tx: 0 };
+    map.set(nombre, { ventas: prev.ventas + ventas, tx: prev.tx + tx });
+  }
+
+  const out: TablaSucursal[] = [];
+  for (const [nombre, v] of map.entries()) {
+    const ticket = v.tx > 0 ? v.ventas / v.tx : 0;
+    out.push({
+      nombre,
+      ventas: v.ventas,
+      transacciones: v.tx,
+      ticketPromedio: ticket,
+    });
+  }
+
+  // orden descendente por ventas
+  out.sort((a, b) => b.ventas - a.ventas);
+  return out;
+}
+
+/* ──────────────────────────────────────────────────────────
+   Página principal
+────────────────────────────────────────────────────────── */
 export default function VentasPage() {
   const { sucursales, sucursalSeleccionada } = useAuthOrg();
-  const functionsBase = useMemo(() => getFunctionsBase(), []);
-  // Rango por defecto: últimos 7 días
-  const hoy = useMemo(() => todayYMD(), []);
-  const [desde, setDesde] = useState(addDays(hoy, -7));
-  const [hasta, setHasta] = useState(hoy);
-  // Filtro de sucursal (por UUID)
-  const [selectedSucursalId, setSelectedSucursalId] = useState<string | null>(
-    sucursalSeleccionada?.id ? String(sucursalSeleccionada.id) : null
-  );
-  const viewingAll = selectedSucursalId === null;
-  const selectedSucursalName =
-    viewingAll ? null : (sucursales.find(s => String(s.id) === selectedSucursalId)?.nombre ?? null);
-  // Estado UI
-  const [loading, setLoading] = useState(true);
-  const [syncing, setSyncing] = useState(false);
-  const [totalVentas, setTotalVentas] = useState(0);
-  const [totalTransacciones, setTotalTransacciones] = useState(0);
-  const [totalITBMS, setTotalITBMS] = useState(0);
-  const [rows, setRows] = useState<SucursalRow[]>([]);
-  const [seriesData, setSeriesData] = useState<any[]>([]);
-  const [showDebug, setShowDebug] = useState(false);
-  const [debugInfo, setDebugInfo] = useState<any>(null);
-  const [syncBanner, setSyncBanner] = useState<{
-    when: string; stats: SyncBranchStat[]; visible: boolean; kind?: 'ok' | 'warn'; message?: string;
-  } | null>(null);
-  const headerNote = viewingAll
-    ? `Viendo datos de todas las sucursales (${sucursales.length} sucursales)`
-    : `Viendo únicamente: ${selectedSucursalName ?? 'Sucursal'}`;
-  /* ────────────────────────────────────────────────────────
-     CARGA PRINCIPAL — llama la RPC correcta según el modo
-     ──────────────────────────────────────────────────────── */
-  const loadData = useCallback(async () => {
+
+  // Filtros de fecha
+  const { start: defStart, end: defEnd } = startOfNDaysAgo(14);
+  const [desde, setDesde] = useState(defStart);
+  const [hasta, setHasta] = useState(defEnd);
+
+  // Filtro de sucursal ('' = todas)
+  const [selectedSucursal, setSelectedSucursal] = useState<string>('');
+
+  // Datos
+  const [serie, setSerie] = useState<RpcSerieRow[]>([]);
+  const [ranking, setRanking] = useState<TablaSucursal[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  // Sincroniza el dropdown si el contexto cambia
+  useEffect(() => {
+    if (sucursalSeleccionada?.id) {
+      setSelectedSucursal(String(sucursalSeleccionada.id));
+    }
+  }, [sucursalSeleccionada?.id]);
+
+  const load = useCallback(async () => {
     setLoading(true);
+    setError(null);
     try {
-      if (viewingAll) {
-        // MODO TODAS — usa la variante por NOMBRE
-        const { data, error } = await supabase.rpc<SerieAllRow>('rpc_ui_series_14d', {
-          desde, hasta,
-        });
-        if (error) throw error;
-        const all: SerieAllRow[] = data ?? [];
-        // Serie por día (suma todas las sucursales)
-        const byDay = new Map<string, { dia: string; fecha: string; ventas: number; tickets: number }>();
-        for (const r of all) {
-          const cur = byDay.get(r.dia) ?? { dia: r.dia, fecha: formatDateDDMMYYYY(r.dia), ventas: 0, tickets: 0 };
-          cur.ventas += Number(r.ventas ?? 0);
-          cur.tickets += Number(r.transacciones ?? 0);
-          byDay.set(r.dia, cur);
-        }
-        const serie = Array.from(byDay.values()).sort((a, b) => a.dia.localeCompare(b.dia));
-        setSeriesData(serie);
-        // Tabla por sucursal
-        const bySucursal = new Map<string, { nombre: string; ventas: number; transacciones: number }>();
-          const cur = bySucursal.get(r.sucursal) ?? { nombre: r.sucursal, ventas: 0, transacciones: 0 };
-          cur.transacciones += Number(r.transacciones ?? 0);
-          bySucursal.set(r.sucursal, cur);
-        const rowsList = Array.from(bySucursal.values())
-          .map(e => ({ ...e, ticketPromedio: e.transacciones > 0 ? e.ventas / e.transacciones : 0 }))
-          .sort((a, b) => b.ventas - a.ventas);
-        setRows(rowsList);
-        // KPIs
-        let sumVentas = 0, sumTickets = 0, sumITBMS = 0;
-          sumVentas += Number(r.ventas ?? 0);
-          sumTickets += Number(r.transacciones ?? 0);
-          sumITBMS += Number(r.itbms ?? 0);
-        setTotalVentas(sumVentas);
-        setTotalTransacciones(sumTickets);
-        setTotalITBMS(sumITBMS);
-        setDebugInfo({
-          modo: 'todas',
-          filtro: { desde, hasta },
-          rowsCount: all.length,
-          sample: all[0] ?? null,
-          seriePreview: serie.slice(0, 3),
-      } else {
-        // MODO INDIVIDUAL — usa la variante por UUID
-        const { data, error } = await supabase.rpc<SerieOneRow>('rpc_ui_series_14d', {
-          p_desde: desde,
-          p_hasta: hasta,
-          p_sucursal_id: selectedSucursalId,
-        const one: SerieOneRow[] = data ?? [];
-        // Serie por día
-        const serie = one
-          .map(r => ({
-            dia: r.d,
-            fecha: formatDateDDMMYYYY(r.d),
-            ventas: Number(r.ventas_netas ?? 0),
-            tickets: Number(r.tx ?? 0),
-          }))
-          .sort((a, b) => a.dia.localeCompare(b.dia));
-        // Tabla (una sola sucursal)
-        const ventasTotal = serie.reduce((acc, r) => acc + r.ventas, 0);
-        const txTotal = serie.reduce((acc, r) => acc + r.tickets, 0);
-        setRows([
-          {
-            nombre: selectedSucursalName ?? 'Sucursal',
-            ventas: ventasTotal,
-            transacciones: txTotal,
-            ticketPromedio: txTotal > 0 ? ventasTotal / txTotal : 0,
-          },
-        ]);
-        setTotalVentas(ventasTotal);
-        setTotalTransacciones(txTotal);
-        setTotalITBMS(one.reduce((acc, r) => acc + Number(r.itbms ?? 0), 0));
-          modo: 'individual',
-          filtro: { desde, hasta, selectedSucursalId, selectedSucursalName },
-          rowsCount: one.length,
-          sample: one[0] ?? null,
-      }
-    } catch (e) {
-      debugLog('[VentasPage] loadData error:', e);
-      setRows([]); setSeriesData([]); setTotalVentas(0); setTotalTransacciones(0); setTotalITBMS(0);
-      setDebugInfo({ error: String(e) });
+      const sucId = selectedSucursal || null;
+
+      const [serieRows, rankingRows] = await Promise.all([
+        fetchSerieRPC(desde, hasta, sucId),
+        // ranking solo tiene sentido cuando son todas
+        selectedSucursal ? Promise.resolve([]) : fetchRankingView(desde, hasta),
+      ]);
+
+      setSerie(serieRows);
+      setRanking(rankingRows);
+    } catch (e: any) {
+      setError(e?.message || 'No fue posible cargar ventas.');
+      setSerie([]);
+      setRanking([]);
     } finally {
       setLoading(false);
     }
-  }, [desde, hasta, viewingAll, selectedSucursalId, selectedSucursalName]);
-     SYNC (igual que antes)
-  const handleSync = useCallback(async () => {
-    const base = functionsBase;
-    if (!base) {
-      setSyncBanner({ when: new Date().toISOString(), stats: [], visible: true, kind: 'warn', message: 'Edge Function no configurada (revisa VITE_SUPABASE_FUNCTIONS_BASE).' });
-      return;
-    setSyncing(true);
-      const hoySync = hoy;
-      const query = `?desde=${hoySync}&hasta=${hoySync}`;
-      const endpoints = [
-        `${base}/sync-ventas-detalle${query}`,
-        `${base}/sync-ventas-v4${query}`,
-        `${base}/sync-ventas${query}`,
-      ];
-      const invoke = async (url: string) => {
-        const run = async (retry: boolean): Promise<Response> => {
-          const resp = await fetch(url, {
-            method: 'POST',
-            headers: { Authorization: `Bearer ${import.meta.env.VITE_SUPABASE_ANON_KEY}`, 'Content-Type': 'application/json' },
-          });
-          if (!resp.ok && resp.status >= 500 && retry) return run(false);
-          return resp;
-        };
-        return run(true);
-      };
-      let resp: Response | null = null;
-      for (const ep of endpoints) {
-        try {
-          const r = await invoke(ep);
-          if (!r.ok && r.status === 404) continue;
-          resp = r; break;
-        } catch { /* sigue */ }
-      if (!resp) throw new Error('No fue posible ejecutar la sincronización');
-      // Banner resumido
-      let when = new Date().toISOString();
-      try { const js = await resp.json(); if (js?.desde) when = js.desde; } catch {}
-      setSyncBanner({ when, stats: [], visible: true, kind: 'ok', message: 'Sincronización completada.' });
-      setTimeout(() => setSyncBanner(s => (s ? { ...s, visible: false } : s)), 6000);
-      await loadData();
-    } catch (e: any) {
-      setSyncBanner({ when: new Date().toISOString(), stats: [], visible: true, kind: 'warn', message: e?.message ?? 'Error desconocido en sincronización' });
-      debugLog('Sync Ventas (DB) error:', e);
-      setSyncing(false);
-  }, [functionsBase, hoy, loadData]);
-     Realtime + efectos
-  const rt: any = useRealtimeVentas({
-    enabled: true, debounceMs: 1500,
-    onUpdate: () => { debugLog('[VentasPage] realtime update'); loadData(); },
-  });
-  let rtConnected = false as boolean; let rtError: string | null = null; let rtLastUpdate: string | Date | null = null;
-  let onReconnect: () => void = () => window.location.reload();
-  if (typeof rt === 'string') { rtConnected = rt === 'open'; rtError = rt === 'error' ? 'Connection error' : null; }
-  else if (rt && typeof rt === 'object') {
-    // @ts-ignore
-    rtConnected = typeof rt.connected === 'boolean' ? !!rt.connected : (rt.status === 'open');
-    rtError = typeof rt.error === 'string' ? rt.error : (rt.status === 'error' ? 'Connection error' : null);
-    rtLastUpdate = rt.lastUpdate ?? null;
-    if (typeof rt.manualReconnect === 'function') onReconnect = rt.manualReconnect;
-  }
-  useEffect(() => { loadData(); }, [loadData]);
+  }, [desde, hasta, selectedSucursal]);
+
   useEffect(() => {
-    const handler = () => { debugLog('[VentasPage] evento debug:refetch-all'); loadData(); };
-    window.addEventListener('debug:refetch-all', handler);
-    return () => window.removeEventListener('debug:refetch-all', handler);
-  }, [loadData]);
-    if (sucursalSeleccionada?.id) setSelectedSucursalId(String(sucursalSeleccionada.id));
-    else setSelectedSucursalId(null);
-  }, [sucursalSeleccionada]);
-  const bannerClass =
-    syncBanner?.kind === 'warn'
-      ? 'bg-amber-50 dark:bg-amber-900/20 border-amber-200 dark:border-amber-700 text-amber-800 dark:text-amber-300'
-      : 'bg-green-50 dark:bg-green-900/20 border-green-200 dark:border-green-700 text-green-800 dark:text-green-300';
-     Render
+    load();
+  }, [load]);
+
+  // KPIs
+  const kpis = useMemo(() => {
+    const ventas = serie.reduce((acc, r) => acc + (r.ventas_netas || 0), 0);
+    const itbms = serie.reduce((acc, r) => acc + (r.itbms || 0), 0);
+    const tx = serie.reduce((acc, r) => acc + (r.tx || 0), 0);
+    const ticket = tx > 0 ? ventas / tx : 0;
+    return { ventas, itbms, tx, ticket };
+  }, [serie]);
+
+  // Datos para chart
+  const chartData = useMemo(
+    () =>
+      serie.map((r) => ({
+        fecha: r.d,
+        ventas: r.ventas_netas,
+        itbms: r.itbms,
+        tx: r.tx,
+      })),
+    [serie]
+  );
+
   return (
-    <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 dark:from-gray-900 dark:to-gray-800">
-      <div className="p-6 lg:p-8 space-y-6">
-        {/* Encabezado */}
-        <div className="bg-white dark:bg-gray-800 rounded-2xl shadow-lg p-6 border border-gray-100 dark:border-gray-700">
-          <div className="flex items-start justify-between gap-4">
-            <div className="flex-1">
-              <div className="flex items-center gap-4 mb-2">
-                <h1 className="text-3xl font-bold text-gray-900 dark:text-white">Ventas</h1>
-                <RealtimeStatusIndicator connected={rtConnected} lastUpdate={rtLastUpdate} error={rtError} onReconnect={onReconnect} compact />
-              </div>
-              <p className="text-gray-600 dark:text-gray-400">Resumen y análisis de ventas por sucursal</p>
-              <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">{headerNote}</p>
+    <div className="space-y-6">
+      {/* Header */}
+      <header className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
+        <div>
+          <h1 className="text-3xl font-bold text-bean">Ventas</h1>
+          <p className="text-slate7g">
+            Serie diaria, KPIs y ranking por sucursal.
+          </p>
+        </div>
+        <div className="flex flex-wrap items-center gap-3">
+          <button
+            type="button"
+            onClick={load}
+            className="inline-flex items-center gap-2 rounded-xl border border-sand px-4 py-2 text-sm text-bean shadow-sm"
+          >
+            <RefreshCw className={loading ? 'animate-spin h-4 w-4' : 'h-4 w-4'} />
+            {loading ? 'Actualizando…' : 'Actualizar'}
+          </button>
+        </div>
+      </header>
+
+      {/* Filtros */}
+      <section className="rounded-2xl border border-sand bg-white p-4 shadow-sm">
+        <div className="grid gap-4 md:grid-cols-5">
+          <label className="flex flex-col gap-2 text-sm text-slate7g">
+            Desde
+            <div className="relative">
+              <Calendar className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+              <input
+                type="date"
+                value={desde}
+                max={hasta}
+                onChange={(e) => setDesde(e.target.value)}
+                className="w-full rounded-xl border border-sand px-9 py-2"
+              />
             </div>
-            <button onClick={handleSync} disabled={syncing}
-              className="inline-flex items-center gap-2 px-5 py-3 rounded-xl text-white bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-700 hover:to-purple-700 shadow-lg disabled:opacity-50">
-              <RefreshCw className={`h-5 w-5 ${syncing ? 'animate-spin' : ''}`} />
-              {syncing ? 'Sincronizando…' : 'Sincronizar ahora'}
+          </label>
+          <label className="flex flex-col gap-2 text-sm text-slate7g">
+            Hasta
+            <div className="relative">
+              <Calendar className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+              <input
+                type="date"
+                value={hasta}
+                min={desde}
+                onChange={(e) => setHasta(e.target.value)}
+                className="w-full rounded-xl border border-sand px-9 py-2"
+              />
+            </div>
+          </label>
+          <label className="md:col-span-2 flex flex-col gap-2 text-sm text-slate7g">
+            Sucursal
+            <div className="relative">
+              <Building2 className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+              <select
+                value={selectedSucursal}
+                onChange={(e) => setSelectedSucursal(e.target.value)}
+                className="w-full rounded-xl border border-sand px-9 py-2"
+              >
+                <option value="">Todas mis sucursales</option>
+                {sucursales.map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.nombre}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </label>
+          <div className="flex items-end">
+            <button
+              type="button"
+              onClick={load}
+              className="w-full rounded-xl border border-sand px-4 py-2 text-sm text-bean hover:border-bean"
+              disabled={loading}
+            >
+              {loading ? 'Cargando…' : 'Aplicar'}
             </button>
           </div>
-          {syncBanner?.visible && (
-            <div className={`mt-4 text-sm rounded-xl border px-4 py-3 ${bannerClass}`}>
-              {syncBanner.message ?? `Actualizado: ${new Date(syncBanner.when).toLocaleString()}`}
+        </div>
+      </section>
+
+      {/* KPIs */}
+      <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+        <KpiCard
+          icon={<DollarSign className="h-4 w-4" />}
+          title="Ventas netas"
+          value={formatCurrencyUSD(kpis.ventas)}
+          helper={`${formatDateDDMMYYYY(desde)} — ${formatDateDDMMYYYY(hasta)}`}
+        />
+        <KpiCard
+          icon={<Receipt className="h-4 w-4" />}
+          title="ITBMS"
+          value={formatCurrencyUSD(kpis.itbms)}
+          helper="Impuesto agregado"
+        />
+        <KpiCard
+          icon={<TrendingUp className="h-4 w-4" />}
+          title="Transacciones"
+          value={kpis.tx.toLocaleString('en-US')}
+          helper="Cantidad de tickets"
+        />
+        <KpiCard
+          icon={<TrendingUp className="h-4 w-4" />}
+          title="Ticket promedio"
+          value={formatCurrencyUSD(kpis.ticket)}
+          helper="Ventas / Transacciones"
+        />
+      </section>
+
+      {/* Serie */}
+      <section className="rounded-2xl border border-sand bg-white shadow-sm">
+        <header className="flex items-center justify-between border-b border-sand px-6 py-4">
+          <div>
+            <h2 className="text-lg font-semibold text-slate-800">Serie 14 días</h2>
+            <p className="text-sm text-slate-500">Ventas netas, ITBMS y transacciones</p>
+          </div>
+        </header>
+        <div className="h-80 px-2 py-4">
+          {chartData.length > 0 ? (
+            <ResponsiveContainer>
+              <ComposedChart data={chartData}>
+                <CartesianGrid strokeDasharray="3 3" />
+                <XAxis dataKey="fecha" />
+                <YAxis yAxisId="left" tickFormatter={(v) => (Math.abs(v) >= 1000 ? `${(v/1000).toFixed(0)}k` : `${v}`)} />
+                <YAxis yAxisId="right" orientation="right" />
+                <Tooltip
+                  formatter={(val: any, name) => {
+                    if (name === 'tx') return [Number(val).toLocaleString('en-US'), 'TX'];
+                    return [formatCurrencyUSD(Number(val)), name === 'ventas' ? 'Ventas' : 'ITBMS'];
+                  }}
+                  labelFormatter={(l) => formatDateDDMMYYYY(String(l))}
+                />
+                <Bar yAxisId="right" dataKey="tx" name="TX" />
+                <Area yAxisId="left" dataKey="ventas" name="Ventas" type="monotone" strokeWidth={2} />
+                <Area yAxisId="left" dataKey="itbms" name="ITBMS" type="monotone" strokeWidth={2} />
+              </ComposedChart>
+            </ResponsiveContainer>
+          ) : (
+            <EmptyState message={loading ? 'Cargando…' : 'No hay datos en el rango seleccionado.'} />
           )}
         </div>
-        {/* Filtros */}
-          <h3 className="text-lg font-semibold text-gray-900 dark:text-white mb-4 flex items-center gap-2">
-            <Calendar className="h-5 w-5" /> Filtros
-          </h3>
-          <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+      </section>
+
+      {/* Ranking (solo cuando todas las sucursales) */}
+      {!selectedSucursal && (
+        <section className="rounded-2xl border border-sand bg-white shadow-sm">
+          <header className="flex items-center justify-between border-b border-sand px-6 py-4">
             <div>
-              <label className="block text-sm text-gray-600 dark:text-gray-400 mb-1">Desde</label>
-              <input type="date" value={desde} onChange={(e) => setDesde(e.target.value)}
-                className="w-full px-3 py-2 rounded-lg border dark:border-gray-700 bg-white dark:bg-gray-900 text-gray-900 dark:text-gray-100" />
-              <label className="block text-sm text-gray-600 dark:text-gray-400 mb-1">Hasta</label>
-              <input type="date" value={hasta} onChange={(e) => setHasta(e.target.value)}
-              <label className="block text-sm text-gray-600 dark:text-gray-400 mb-1">Sucursal</label>
-              <div className="flex gap-2">
-                <select
-                  value={viewingAll ? '' : String(selectedSucursalId ?? '')}
-                  onChange={(e) => setSelectedSucursalId(e.target.value ? String(e.target.value) : null)}
-                  className="flex-1 px-3 py-2 rounded-lg border dark:border-gray-700 bg-white dark:bg-gray-900 text-gray-900 dark:text-gray-100"
-                >
-                  <option value="">Todas las sucursales</option>
-                  {sucursales.map((s) => (
-                    <option key={String(s.id)} value={String(s.id)}>{s.nombre}</option>
-                  ))}
-                </select>
-                <div className="inline-flex items-center px-3 rounded-lg border dark:border-gray-700 bg-gray-50 dark:bg-gray-900 text-gray-700 dark:text-gray-300">
-                  <Building2 className="h-4 w-4 mr-2" />
-                  {viewingAll ? 'Todas' : 'Individual'}
-                </div>
-          {/* Debug */}
-          <div className="mt-3">
-            <button className="text-xs underline text-gray-500 dark:text-gray-400" onClick={() => setShowDebug(s => !s)}>
-              {showDebug ? 'Ocultar debug' : 'Mostrar debug'}
-            {showDebug && (
-              <pre className="mt-2 text-xs p-3 rounded-lg bg-gray-50 dark:bg-gray-900 border dark:border-gray-700 overflow-auto">
-{JSON.stringify(debugInfo, null, 2)}
-              </pre>
-            )}
-        {/* KPIs */}
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-          <KPICard title="Total Ventas" value={totalVentas} icon={DollarSign}
-            color="bg-gradient-to-br from-green-500 to-emerald-600" prefix="USD " trend={12} />
-          <KPICard title="Total ITBMS" value={totalITBMS} icon={TrendingUp}
-            color="bg-gradient-to-br from-indigo-500 to-purple-600" prefix="USD " trend={5} />
-          <KPICard title="# Transacciones" value={totalTransacciones} icon={Receipt}
-            color="bg-gradient-to-br from-blue-500 to-cyan-600" trend={8} />
-        {/* Serie (14 días o rango elegido) */}
-        <div className="bg-white dark:bg-gray-800 rounded-2xl shadow-lg border border-gray-100 dark:border-gray-700">
-          <div className="p-6 border-b border-gray-100 dark:border-gray-700 flex items-center justify-between">
-              <h3 className="text-xl font-bold text-gray-900 dark:text-white">Serie de ventas</h3>
-              <p className="text-sm text-gray-500 dark:text-gray-400">
-                Fuente: {viewingAll ? 'RPC rpc_ui_series_14d(desde,hasta)' : 'RPC rpc_ui_series_14d(p_desde,p_hasta,p_sucursal_id)'}
+              <h2 className="text-lg font-semibold text-slate-800">Ranking por sucursal</h2>
+              <p className="text-sm text-slate-500">
+                Agregado del rango seleccionado
               </p>
-          <div className="h-80 px-6 pb-6">
-            {seriesData.length === 0 ? (
-              <div className="h-full flex items-center justify-center text-gray-500 dark:text-gray-400 text-sm">
-                {loading ? 'Cargando…' : 'Sin datos en el período seleccionado.'}
-            ) : (
-              <ResponsiveContainer width="100%" height="100%">
-                <ComposedChart data={seriesData} margin={{ top: 20, right: 20, left: 0, bottom: 0 }}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
-                  <XAxis dataKey="fecha" stroke="#6b7280" fontSize={12} minTickGap={16} />
-                  <YAxis yAxisId="left" stroke="#6b7280" fontSize={12} tickFormatter={(v: number) => formatCurrencyUSD(v)} width={90} />
-                  <YAxis yAxisId="right" orientation="right" stroke="#6b7280" fontSize={12} width={70} />
-                  <Tooltip
-                    formatter={(value: number, name) => (name === 'Ventas' ? formatCurrencyUSD(value) : value.toLocaleString())}
-                    labelFormatter={(label) => `Día: ${label}`}
-                  />
-                  <Area yAxisId="left" type="monotone" dataKey="ventas" name="Ventas" fill="#3b82f6" stroke="#2563eb" strokeWidth={2} activeDot={{ r: 5 }} />
-                  <Bar yAxisId="right" dataKey="tickets" name="Tickets" opacity={0.75} barSize={24} />
-                </ComposedChart>
-              </ResponsiveContainer>
-        {/* Tabla por sucursal */}
-        <div className="bg-white dark:bg-gray-800 rounded-2xl shadow-lg border border-gray-100 dark:border-gray-700 overflow-hidden">
-          <div className="p-6 border-b border-gray-100 dark:border-gray-700">
-            <h3 className="text-xl font-bold text-gray-900 dark:text-white">
-              Resumen por sucursal ({desde} → {hasta})
-            </h3>
-          {loading ? (
-            <div className="p-8 text-center text-gray-500 dark:text-gray-400">Cargando…</div>
-          ) : rows.length === 0 ? (
-            <div className="p-12 text-center text-gray-500 dark:text-gray-400">No hay datos de ventas en el período seleccionado.</div>
-          ) : (
-            <div className="overflow-x-auto">
-              <table className="min-w-full">
-                <thead className="bg-gray-50 dark:bg-gray-900">
-                  <tr>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Sucursal</th>
-                    <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Ventas</th>
-                    <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Transacciones</th>
-                    <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Ticket Promedio</th>
-                  </tr>
-                </thead>
-                <tbody className="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
-                  {rows.map((r) => (
-                    <tr key={r.nombre} className="hover:bg-gray-50 dark:hover:bg-gray-700">
-                      <td className="px-6 py-4">{r.nombre}</td>
-                      <td className="px-6 py-4 text-right font-semibold">{formatCurrencyUSD(r.ventas)}</td>
-                      <td className="px-6 py-4 text-right">{r.transacciones.toLocaleString()}</td>
-                      <td className="px-6 py-4 text-right">{formatCurrencyUSD(r.ticketPromedio)}</td>
+            </div>
+          </header>
+          <div className="overflow-x-auto">
+            <table className="min-w-full divide-y divide-sand text-sm">
+              <thead className="bg-sand/40">
+                <tr>
+                  <th className="px-6 py-3 text-left font-medium text-slate-600">Sucursal</th>
+                  <th className="px-6 py-3 text-right font-medium text-slate-600">Ventas</th>
+                  <th className="px-6 py-3 text-right font-medium text-slate-600">TX</th>
+                  <th className="px-6 py-3 text-right font-medium text-slate-600">Ticket prom.</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-sand/70">
+                {ranking.length > 0 ? (
+                  ranking.map((r) => (
+                    <tr key={r.nombre}>
+                      <td className="px-6 py-3">{r.nombre}</td>
+                      <td className="px-6 py-3 text-right font-mono">{formatCurrencyUSD(r.ventas)}</td>
+                      <td className="px-6 py-3 text-right font-mono">{r.transacciones.toLocaleString('en-US')}</td>
+                      <td className="px-6 py-3 text-right font-mono">{formatCurrencyUSD(r.ticketPromedio)}</td>
                     </tr>
-                </tbody>
-              </table>
-      </div>
+                  ))
+                ) : (
+                  <tr>
+                    <td colSpan={4}>
+                      <EmptyState message={loading ? 'Cargando…' : 'Sin datos para mostrar.'} />
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      )}
+
+      {/* Errores */}
+      {error && (
+        <div className="rounded-xl border border-rose-200 bg-rose-50 p-4 text-rose-700">
+          {error}
+        </div>
+      )}
     </div>
+  );
+}
+
+/* ──────────────────────────────────────────────────────────
+   Pequeños componentes de UI internos (sin dependencias externas)
+────────────────────────────────────────────────────────── */
+function KpiCard({
+  icon,
+  title,
+  value,
+  helper,
+}: {
+  icon: React.ReactNode;
+  title: string;
+  value: string;
+  helper?: string;
+}) {
+  return (
+    <article className="rounded-2xl border border-sand bg-white p-4 shadow-sm">
+      <div className="flex items-center justify-between text-slate-500">
+        <span className="text-xs font-semibold uppercase tracking-wide">{title}</span>
+        {icon}
+      </div>
+      <p className="mt-3 text-2xl font-semibold text-slate-800">{value}</p>
+      {helper && <p className="text-xs text-slate-500">{helper}</p>}
+    </article>
+  );
+}
+
+function EmptyState({ message }: { message: string }) {
+  return (
+    <div className="flex h-full flex-col items-center justify-center gap-2 px-6 py-8 text-center text-sm text-slate-500">
+      <RefreshCw className="h-5 w-5 text-slate-400" />
+      <span>{message}</span>
+    </div>
+  );
+}
