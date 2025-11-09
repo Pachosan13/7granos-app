@@ -221,7 +221,7 @@ Deno.serve(async (req) => {
 
     const dateISO = q.get("date") ?? q.get("fecha") ?? undefined;
     const send = (q.get("send") ?? "").toString() === "1";
-    const webhook = q.get("webhook") ?? GHL_WEBHOOK_URL || "";
+    const webhook = (q.get("webhook") ?? (GHL_WEBHOOK_URL || ""));
     const branchesParam = (q.get("branches") ?? "sf,cangrejo,central,museo,costa")
       .split(",")
       .map(s => s.trim())
