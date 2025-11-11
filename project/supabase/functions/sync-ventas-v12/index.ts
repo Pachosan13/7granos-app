@@ -1,6 +1,6 @@
 // supabase/functions/sync-ventas-v12/index.ts
 // 7 Granos — INVU Sync (detalle)
-// - mode: "pull_detalle"  => descarga de INVU
+// - mode: "pull_detalle"   => descarga desde INVU (Adv con fallback a legacy)
 // - mode: "ingest_detalle" => upsert en invu_ventas
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
@@ -37,23 +37,64 @@ function getTokenPorSucursal(branch?: string) {
   }
 }
 
-function invuUrlDetalle(start: number, end: number) {
-  const u = new URL("https://api6.invupos.com/invuApiPos/index.php");
-  u.searchParams.set("r", `citas/ordenesAllAdv/fini/${start}/ffin/${end}/tipo/1`);
-  return u.toString();
-}
+// ---------- INVU helpers ----------
+const invuAdvUrl = (start: number, end: number, tipo = 1) =>
+  `https://api6.invupos.com/invuApiPos/index.php?r=citas/ordenesAllAdv/fini/${start}/ffin/${end}/tipo/${tipo}`;
 
-async function invuFetch(url: string, token: string) {
+const invuLegacyUrl = (start: number, end: number, tipo = 1) =>
+  `https://api6.invupos.com/invuApiPos/index.php?r=citas/ordenesAll/fini/${start}/ffin/${end}/tipo/${tipo}`;
+
+// INVU puede devolver HTTP 200 con body {status:403} o {error:true}. Lo normalizamos.
+async function invuFetchRaw(url: string, token: string) {
   const res = await fetch(url, {
     method: "GET",
-    headers: { accept: "application/json", AUTHORIZATION: token },
+    headers: {
+      accept: "application/json",
+      // ✅ SIN 'Bearer' — INVU espera el token plano
+      AUTHORIZATION: token,
+    },
   });
+
   const text = await res.text();
-  console.log(`[INVU] ${res.status} ${url} :: ${text.slice(0, 200)}`);
-  if (!res.ok) throw new Error(`INVU ${res.status}: ${text}`);
-  try { return JSON.parse(text); } catch { return { data: [] }; }
+  // Log compacto (primeros 250 chars) para diagnóstico
+  console.log(`[INVU] ${res.status} ${url} :: ${text.slice(0, 250)}`);
+
+  let json: any;
+  try {
+    json = text ? JSON.parse(text) : {};
+  } catch {
+    json = {};
+  }
+
+  // “Error lógico” aunque HTTP sea 200
+  const logicalError =
+    json?.status === 403 ||
+    json?.status === "403" ||
+    json?.error === true ||
+    json?.error === "true" ||
+    json?.message === "Parametros incorrectos";
+
+  return { ok: res.ok && !logicalError, status: res.status, body: json, raw: text };
 }
 
+async function invuFetchDetalle(start: number, end: number, token: string, tipo = 1) {
+  // 1) Adv
+  const advUrl = invuAdvUrl(start, end, tipo);
+  const adv = await invuFetchRaw(advUrl, token);
+  if (adv.ok) return adv.body;
+
+  // 2) Legacy fallback
+  const legacyUrl = invuLegacyUrl(start, end, tipo);
+  const legacy = await invuFetchRaw(legacyUrl, token);
+  if (legacy.ok) return legacy.body;
+
+  // 3) Falla total
+  throw new Error(
+    `INVU failed (adv:${adv.status}/${adv.body?.status || ""}, legacy:${legacy.status}/${legacy.body?.status || ""})`
+  );
+}
+
+// ---------- HTTP helpers ----------
 function j(status: number, body: any) {
   return new Response(JSON.stringify(body, null, 2), {
     status,
@@ -61,14 +102,14 @@ function j(status: number, body: any) {
   });
 }
 
+// ---------- Handler ----------
 Deno.serve(async (req) => {
   try {
     const body = await req.json().catch(() => ({}));
-    const { mode = "pull_detalle", sucursal, start_ts, end_ts } = body;
+    const { mode = "pull_detalle", sucursal, start_ts, end_ts, tipo = 1 } = body;
 
-    // Evita prefijo SUPABASE_ (CLI lo bloquea); usa fallback.
-    const supaUrl =
-      Deno.env.get("SERVICE_URL") || Deno.env.get("SUPABASE_URL");
+    // Evita prefijo SUPABASE_ (CLI lo bloquea); usa alias SERVICE_*
+    const supaUrl = Deno.env.get("SERVICE_URL") || Deno.env.get("SUPABASE_URL");
     const serviceKey =
       Deno.env.get("SERVICE_ROLE_KEY") || Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
     if (!supaUrl || !serviceKey) {
@@ -80,35 +121,56 @@ Deno.serve(async (req) => {
       if (!sucursal || !start_ts || !end_ts) {
         return j(400, { ok: false, error: "Faltan parámetros: sucursal, start_ts, end_ts" });
       }
+
       const token = body.token || getTokenPorSucursal(sucursal);
       if (!token) return j(400, { ok: false, error: "Token no encontrado para la sucursal" });
 
-      const url = invuUrlDetalle(Number(start_ts), Number(end_ts));
-      const data = await invuFetch(url, token);
+      const start = Number(start_ts);
+      const end = Number(end_ts);
+      if (!Number.isFinite(start) || !Number.isFinite(end)) {
+        return j(400, { ok: false, error: "start_ts/end_ts deben ser epoch (segundos)" });
+      }
+
+      const data = await invuFetchDetalle(start, end, token, Number(tipo) || 1);
+      // INVU devuelve {data:[...]} o array
       const rows = Array.isArray(data?.data) ? data.data : Array.isArray(data) ? data : [];
-      return j(200, { ok: true, kind: "detalle", count: rows.length, data });
+      return j(200, {
+        ok: true,
+        kind: "detalle",
+        count: rows.length,
+        data, // mantenemos crudo por si quieres auditar
+      });
     }
 
     if (mode === "ingest_detalle") {
       const root = body?.data ?? {};
       const rows =
-        Array.isArray(root?.data?.data) ? root.data.data
-        : Array.isArray(root?.data)     ? root.data
-        : Array.isArray(root)           ? root
-        : [];
+        Array.isArray(root?.data?.data) ? root.data.data :
+        Array.isArray(root?.data)       ? root.data :
+        Array.isArray(root)             ? root :
+        [];
+
       if (!rows.length) return j(200, { ok: true, upserted: 0, reason: "payload vacío" });
 
       const branch = String(body?.sucursal ?? "").toLowerCase();
+
       const mapped = rows.map((r: any) => ({
         fecha:       parseFecha(r.fecha_cierre_date ?? r.fecha_creacion ?? r.fecha_apertura_date),
         subtotal:    N(r.subtotal ?? r.totales?.subtotal),
         itbms:       N(r.tax ?? r.totales?.tax),
         total:       N(r.total ?? r.totales?.total ?? r.total_pagar),
         propina:     N(r.propina ?? r.totales?.propina),
-        num_items:   Array.isArray(r.items) ? r.items.length : Array.isArray(r.detalle) ? r.detalle.length : null,
-        sucursal_id: null,                         // se rellena por proceso aparte si quieres
-        branch,                                    // "costa", "cangrejo", etc.
-        invu_id:     String(r.num_orden ?? r.numero_factura ?? r.id_ord ?? r.id ?? crypto.randomUUID()),
+        num_items:   Array.isArray(r.items) ? r.items.length :
+                     Array.isArray(r.detalle) ? r.detalle.length : null,
+        sucursal_id: null, // se puede rellenar en proceso posterior
+        branch,            // "costa", "cangrejo", etc.
+        invu_id:     String(
+                       r.num_orden ??
+                       r.numero_factura ??
+                       r.id_ord ??
+                       r.id ??
+                       crypto.randomUUID()
+                     ),
         raw:         r,
         num_transacciones: 1,
         estado:      r.pagada ?? r.status ?? null,
@@ -118,6 +180,7 @@ Deno.serve(async (req) => {
         onConflict: "branch,invu_id",
       });
       if (error) return j(500, { ok: false, error: error.message || String(error) });
+
       return j(200, { ok: true, upserted: mapped.length });
     }
 
