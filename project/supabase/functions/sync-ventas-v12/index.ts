@@ -44,14 +44,14 @@ const invuAdvUrl = (start: number, end: number, tipo = 1) =>
 const invuLegacyUrl = (start: number, end: number, tipo = 1) =>
   `https://api6.invupos.com/invuApiPos/index.php?r=citas/ordenesAll/fini/${start}/ffin/${end}/tipo/${tipo}`;
 
-// INVU a veces devuelve HTTP 200 con body {status:403} o {error:true}. Normalizamos.
+// INVU puede devolver HTTP 200 con body {status:403} o {error:true}. Lo normalizamos.
 async function invuFetchRaw(url: string, token: string) {
   const res = await fetch(url, {
     method: "GET",
     headers: {
       accept: "application/json",
-      // ✅ SIN 'Bearer' — INVU espera el token plano
-      AUTHORIZATION: token,
+      // ✅ clave correcta, SIN 'Bearer'
+      Authorization: token,
     },
   });
 
