@@ -1,5 +1,10 @@
-// supabase/functions/sync-ventas-v12/index.ts
 // 7 Granos — INVU Sync (detalle): pull desde INVU + ingest a invu_ventas
+// Nota: INVU exige AUTHORIZATION con el token "plano" (sin "Bearer").
+//
+// Modes:
+//  - "pull_detalle"   => descarga desde INVU (adv con fallback a legacy)
+//  - "ingest_detalle" => upsert a public.invu_ventas
+
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
 const N = (x: any, def = 0) => (Number.isFinite(Number(x)) ? Number(x) : def);
@@ -62,6 +67,7 @@ Deno.serve(async (req) => {
     const body = await req.json().catch(() => ({}));
     const { mode = "pull_detalle", sucursal, start_ts, end_ts, tipo = 1 } = body;
 
+    // URL/KEY (alias SERVICE_* para evitar bloqueos de prefijos SUPABASE_ en CLI)
     const supaUrl =
       Deno.env.get("SERVICE_URL") || Deno.env.get("SUPABASE_URL");
     const serviceKey =
@@ -70,19 +76,25 @@ Deno.serve(async (req) => {
 
     const supabase = createClient(supaUrl, serviceKey);
 
+    // ---------------------- PULL ----------------------
     if (mode === "pull_detalle") {
-      if (!sucursal || !start_ts || !end_ts) return j(400, { ok: false, error: "Faltan parámetros: sucursal, start_ts, end_ts" });
+      if (!sucursal || !start_ts || !end_ts)
+        return j(400, { ok: false, error: "Faltan parámetros: sucursal, start_ts, end_ts" });
+
       const token = body.token || getTokenPorSucursal(sucursal);
       if (!token) return j(400, { ok: false, error: "Token no encontrado para la sucursal" });
 
-      const start = Number(start_ts), end = Number(end_ts);
-      if (!Number.isFinite(start) || !Number.isFinite(end)) return j(400, { ok: false, error: "start_ts/end_ts inválidos" });
+      const start = Number(start_ts);
+      const end = Number(end_ts);
+      if (!Number.isFinite(start) || !Number.isFinite(end))
+        return j(400, { ok: false, error: "start_ts/end_ts inválidos" });
 
       const data = await invuFetchDetalle(start, end, token, Number(tipo) || 1);
       const rows = Array.isArray(data?.data) ? data.data : Array.isArray(data) ? data : [];
       return j(200, { ok: true, kind: "detalle", count: rows.length, data });
     }
 
+    // --------------------- INGEST ---------------------
     if (mode === "ingest_detalle") {
       const root = body?.data ?? {};
       const rows =
@@ -95,16 +107,17 @@ Deno.serve(async (req) => {
       const branch = String(body?.sucursal ?? "").toLowerCase();
 
       const mapped = rows.map((r: any) => {
-        const invuId =
-          String(
-            r.num_orden ??
-            r.numero_factura ??
-            r.id_ord ??
-            r.id ??
-            crypto.randomUUID()
-          );
+        const invuId = String(
+          r.num_orden ??
+          r.numero_factura ??
+          r.id_ord ??
+          r.id ??
+          crypto.randomUUID()
+        );
+
         return {
-          id:          `${branch}:${invuId}`,                 // 🔑 PK lógica
+          // Mantén PK "id" si la tienes, pero el upsert se hará por (branch,invu_id)
+          id:          `${branch}:${invuId}`,
           fecha:       parseFecha(r.fecha_cierre_date ?? r.fecha_creacion ?? r.fecha_apertura_date),
           subtotal:    N(r.subtotal ?? r.totales?.subtotal),
           itbms:       N(r.tax ?? r.totales?.tax),
@@ -113,8 +126,8 @@ Deno.serve(async (req) => {
           num_items:   Array.isArray(r.items) ? r.items.length :
                        Array.isArray(r.detalle) ? r.detalle.length : null,
           sucursal_id: null,
-          branch,                                             // info útil para vistas
-          invu_id:     invuId,                                // guardamos igual
+          branch,
+          invu_id:     invuId,
           raw:         r,
           num_transacciones: 1,
           estado:      r.pagada ?? r.status ?? null,
@@ -123,17 +136,15 @@ Deno.serve(async (req) => {
         };
       });
 
+      // 🔐 Forzar schema y onConflict correcto para usar el índice único (branch,invu_id)
       const { error } = await supabase
+        .schema("public")
         .from("invu_ventas")
-        .upsert(mapped, { onConflict: "id" }); // ✅ sin tocar branch/invu_id
+        .upsert(mapped, { onConflict: "branch,invu_id" });
 
       if (error) return j(500, { ok: false, error: error.message || String(error) });
       return j(200, { ok: true, upserted: mapped.length });
     }
-const { error } = await supabase
-  .schema("public")                   // ⬅️ fuerza schema correcto
-  .from("invu_ventas")
-  .upsert(mapped, { onConflict: "branch,invu_id" });
 
     return j(400, { ok: false, error: "Modo inválido. Usa: pull_detalle | ingest_detalle" });
   } catch (e) {
