@@ -19,7 +19,9 @@ const parseFecha = (v: any): string | null => {
       const ms = s.length > 10 ? num : num * 1000;
       const d = new Date(ms);
       return isNaN(d.getTime()) ? null : d.toISOString().slice(0, 10);
-    } catch { return null; }
+    } catch {
+      return null;
+    }
   }
   return s.slice(0, 10);
 };
@@ -42,21 +44,28 @@ const invuAdvUrl = (start: number, end: number, tipo = 1) =>
 const invuLegacyUrl = (start: number, end: number, tipo = 1) =>
   `https://api6.invupos.com/invuApiPos/index.php?r=citas/ordenesAll/fini/${start}/ffin/${end}/tipo/${tipo}`;
 
-// INVU a veces devuelve HTTP 200 con {status:403} / {error:true} / "Parametros incorrectos".
+// INVU a veces devuelve HTTP 200 con body {status:403} o {error:true}. Normalizamos.
 async function invuFetchRaw(url: string, token: string) {
   const res = await fetch(url, {
     method: "GET",
-    headers: { accept: "application/json", AUTHORIZATION: token }, // SIN "Bearer"
+    headers: {
+      accept: "application/json",
+      // ✅ SIN 'Bearer' — INVU espera el token plano
+      AUTHORIZATION: token,
+    },
   });
+
   const text = await res.text();
   console.log(`[INVU] ${res.status} ${url} :: ${text.slice(0, 250)}`);
 
-  let json: any = {};
-  try { json = text ? JSON.parse(text) : {}; } catch {}
+  let json: any;
+  try { json = text ? JSON.parse(text) : {}; } catch { json = {}; }
 
   const logicalError =
-    json?.status == 403 ||
+    json?.status === 403 ||
+    json?.status === "403" ||
     json?.error === true ||
+    json?.error === "true" ||
     json?.message === "Parametros incorrectos";
 
   return { ok: res.ok && !logicalError, status: res.status, body: json, raw: text };
@@ -74,7 +83,7 @@ async function invuFetchDetalle(start: number, end: number, token: string, tipo 
   );
 }
 
-// ---------- HTTP helper ----------
+// ---------- HTTP helpers ----------
 function j(status: number, body: any) {
   return new Response(JSON.stringify(body, null, 2), {
     status,
@@ -82,28 +91,35 @@ function j(status: number, body: any) {
   });
 }
 
+const SAFE_ID = () => crypto.randomUUID(); // usamos como fallback para id
+
 // ---------- Handler ----------
 Deno.serve(async (req) => {
   try {
     const body = await req.json().catch(() => ({}));
     const { mode = "pull_detalle", sucursal, start_ts, end_ts, tipo = 1 } = body;
 
-    // Credenciales Supabase (alias SERVICE_* para evitar bloqueo CLI)
+    // Evita prefijo SUPABASE_* (CLI lo bloquea); usa alias SERVICE_*
     const supaUrl = Deno.env.get("SERVICE_URL") || Deno.env.get("SUPABASE_URL");
-    const serviceKey = Deno.env.get("SERVICE_ROLE_KEY") || Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
-    if (!supaUrl || !serviceKey) return j(500, { ok: false, error: "Faltan SERVICE_URL / SERVICE_ROLE_KEY" });
+    const serviceKey =
+      Deno.env.get("SERVICE_ROLE_KEY") || Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+    if (!supaUrl || !serviceKey) {
+      return j(500, { ok: false, error: "Faltan SERVICE_URL / SERVICE_ROLE_KEY" });
+    }
     const supabase = createClient(supaUrl, serviceKey);
 
     if (mode === "pull_detalle") {
-      if (!sucursal || !start_ts || !end_ts)
+      if (!sucursal || !start_ts || !end_ts) {
         return j(400, { ok: false, error: "Faltan parámetros: sucursal, start_ts, end_ts" });
-
+      }
       const token = body.token || getTokenPorSucursal(sucursal);
       if (!token) return j(400, { ok: false, error: "Token no encontrado para la sucursal" });
 
-      const start = Number(start_ts), end = Number(end_ts);
-      if (!Number.isFinite(start) || !Number.isFinite(end))
+      const start = Number(start_ts);
+      const end = Number(end_ts);
+      if (!Number.isFinite(start) || !Number.isFinite(end)) {
         return j(400, { ok: false, error: "start_ts/end_ts deben ser epoch (segundos)" });
+      }
 
       const data = await invuFetchDetalle(start, end, token, Number(tipo) || 1);
       const rows = Array.isArray(data?.data) ? data.data : Array.isArray(data) ? data : [];
@@ -122,39 +138,48 @@ Deno.serve(async (req) => {
 
       const branch = String(body?.sucursal ?? "").toLowerCase();
 
-      const mapped = rows.map((r: any) => ({
-        fecha:       parseFecha(r.fecha_cierre_date ?? r.fecha_creacion ?? r.fecha_apertura_date),
-        subtotal:    N(r.subtotal ?? r.totales?.subtotal),
-        itbms:       N(r.tax ?? r.totales?.tax),
-        total:       N(r.total ?? r.totales?.total ?? r.total_pagar),
-        propina:     N(r.propina ?? r.totales?.propina),
-        num_items:   Array.isArray(r.items) ? r.items.length :
-                     Array.isArray(r.detalle) ? r.detalle.length : null,
-        sucursal_id: null,
-        branch,
-        invu_id:     String(r.num_orden ?? r.numero_factura ?? r.id_ord ?? r.id ?? crypto.randomUUID()),
-        raw:         r,
-        num_transacciones: 1,
-        estado:      r.pagada ?? r.status ?? null,
-      }));
+      const mapped = rows.map((r: any) => {
+        const invu_id =
+          String(
+            r.num_orden ??
+            r.numero_factura ??
+            r.id_ord ??
+            r.id ??
+            SAFE_ID()
+          );
 
-      // Upsert + conteo exacto
+        return {
+          // Id interno: si tabla lo requiere (id TEXT sin default), lo ponemos.
+          id: SAFE_ID(),
+          fecha:       parseFecha(r.fecha_cierre_date ?? r.fecha_creacion ?? r.fecha_apertura_date),
+          subtotal:    N(r.subtotal ?? r.totales?.subtotal),
+          itbms:       N(r.tax ?? r.totales?.tax),
+          total:       N(r.total ?? r.totales?.total ?? r.total_pagar),
+          propina:     N(r.propina ?? r.totales?.propina),
+          num_items:   Array.isArray(r.items) ? r.items.length :
+                       Array.isArray(r.detalle) ? r.detalle.length : null,
+          sucursal_id: null,           // se puede rellenar después por proceso
+          branch,                      // "costa", "cangrejo", etc.
+          invu_id,                     // <- clave natural
+          raw:         r,
+          num_transacciones: 1,
+          estado:      r.pagada ?? r.status ?? null,
+          source:      "invu",
+          version:     "v12",
+          // created_at / inserted_at / updated_at usan defaults de DB si los configuraste
+        };
+      });
+
+      // Requiere UNIQUE (branch, invu_id)
       const { error } = await supabase
         .from("invu_ventas")
-        .upsert(mapped, { onConflict: "branch,invu_id", ignoreDuplicates: false });
+        .upsert(mapped, { onConflict: "branch,invu_id" });
 
-      if (error) return j(500, { ok: false, upserted: 0, error: error.message || String(error) });
+      if (error) {
+        return j(500, { ok: false, error: error.message || String(error) });
+      }
 
-      // cuenta exacta (head) de las filas afectadas
-      const { count, error: countErr } = await supabase
-        .from("invu_ventas")
-        .select("invu_id", { count: "exact", head: true })
-        .eq("branch", branch)
-        .in("invu_id", mapped.map((m) => m.invu_id));
-
-      if (countErr) console.log("[ingest] count warn:", countErr.message);
-
-      return j(200, { ok: true, upserted: count ?? mapped.length, received: rows.length, mapped: mapped.length });
+      return j(200, { ok: true, upserted: mapped.length });
     }
 
     return j(400, { ok: false, error: "Modo inválido. Usa: pull_detalle | ingest_detalle" });
