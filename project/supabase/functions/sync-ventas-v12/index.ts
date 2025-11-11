@@ -130,6 +130,10 @@ Deno.serve(async (req) => {
       if (error) return j(500, { ok: false, error: error.message || String(error) });
       return j(200, { ok: true, upserted: mapped.length });
     }
+const { error } = await supabase
+  .schema("public")                   // ⬅️ fuerza schema correcto
+  .from("invu_ventas")
+  .upsert(mapped, { onConflict: "branch,invu_id" });
 
     return j(400, { ok: false, error: "Modo inválido. Usa: pull_detalle | ingest_detalle" });
   } catch (e) {
