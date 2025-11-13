@@ -97,9 +97,9 @@ async function fetchSerieRPC(
   sucursalId: string | null
 ): Promise<RpcSerieRow[]> {
   const { data, error } = await supabase.rpc('rpc_ui_series_14d', {
-    p_desde: desde,
-    p_hasta: hasta,
-    p_sucursal_id: sucursalId,
+    _desde: desde,
+    _hasta: hasta,
+    _sucursal_id: sucursalId,
   });
   if (error) throw error;
   // normaliza nulls → números
