@@ -1,4 +1,5 @@
 // project/src/pages/VentasPage.tsx
+import type React from 'react';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { RefreshCw, TrendingUp, DollarSign, Receipt, Building2, Calendar } from 'lucide-react';
 import {
@@ -37,8 +38,9 @@ function addDays(ymd: string, days: number) {
 
 function startOfNDaysAgo(n: number, tz = 'America/Panama') {
   const now = new Date(new Date().toLocaleString('en-US', { timeZone: tz }));
-  // aseguramos que corte en el día local, no UTC
-  const end = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+  const end = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(
+    now.getDate(),
+  ).padStart(2, '0')}`;
   const start = addDays(end, -n + 1);
   return { start, end };
 }
@@ -60,19 +62,19 @@ function formatDateDDMMYYYY(ymd: string) {
    Tipos
 ────────────────────────────────────────────────────────── */
 
-// RPC única (agrega por día). Con p_sucursal_id = null → agrega TODAS.
+// RPC (serie diaria). Con _sucursal_id = null → todas.
 type RpcSerieRow = {
-  d: string;            // 'YYYY-MM-DD'
-  ventas_netas: number; // numeric
-  itbms: number;        // numeric
-  tx: number;           // bigint
+  d: string; // 'YYYY-MM-DD'
+  ventas_netas: number;
+  itbms: number;
+  tx: number;
 };
 
 // Vista por día/sucursal (para ranking cuando “todas”)
 type ViewSeriesRow = {
-  dia: string;          // 'YYYY-MM-DD'
-  sucursal_id: string;  // uuid
-  sucursal: string;     // nombre
+  dia: string;
+  sucursal_id: string;
+  sucursal: string;
   ventas_brutas: number;
   itbms: number;
   tickets: number;
@@ -94,7 +96,7 @@ type TablaSucursal = {
 async function fetchSerieRPC(
   desde: string,
   hasta: string,
-  sucursalId: string | null
+  sucursalId: string | null,
 ): Promise<RpcSerieRow[]> {
   const { data, error } = await supabase.rpc('rpc_ui_series_14d', {
     _desde: desde,
@@ -102,7 +104,7 @@ async function fetchSerieRPC(
     _sucursal_id: sucursalId,
   });
   if (error) throw error;
-  // normaliza nulls → números
+
   return (data ?? []).map((r: any) => ({
     d: String(r.d),
     ventas_netas: Number(r.ventas_netas ?? 0),
@@ -112,10 +114,7 @@ async function fetchSerieRPC(
 }
 
 /** Para “todas”: ranking por sucursal desde la vista v_ui_series_14d */
-async function fetchRankingView(
-  desde: string,
-  hasta: string
-): Promise<TablaSucursal[]> {
+async function fetchRankingView(desde: string, hasta: string): Promise<TablaSucursal[]> {
   const { data, error } = await supabase
     .from('v_ui_series_14d')
     .select('dia,sucursal,ventas_brutas,tickets')
@@ -124,7 +123,6 @@ async function fetchRankingView(
 
   if (error) throw error;
 
-  // Agregamos por sucursal
   const map = new Map<string, { ventas: number; tx: number }>();
   for (const row of (data ?? []) as any[]) {
     const nombre = String(row.sucursal ?? 'Sin asignar');
@@ -145,7 +143,6 @@ async function fetchRankingView(
     });
   }
 
-  // orden descendente por ventas
   out.sort((a, b) => b.ventas - a.ventas);
   return out;
 }
@@ -156,21 +153,18 @@ async function fetchRankingView(
 export default function VentasPage() {
   const { sucursales, sucursalSeleccionada } = useAuthOrg();
 
-  // Filtros de fecha
   const { start: defStart, end: defEnd } = startOfNDaysAgo(14);
   const [desde, setDesde] = useState(defStart);
   const [hasta, setHasta] = useState(defEnd);
 
-  // Filtro de sucursal ('' = todas)
+  // '' = todas
   const [selectedSucursal, setSelectedSucursal] = useState<string>('');
 
-  // Datos
   const [serie, setSerie] = useState<RpcSerieRow[]>([]);
   const [ranking, setRanking] = useState<TablaSucursal[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Sincroniza el dropdown si el contexto cambia
   useEffect(() => {
     if (sucursalSeleccionada?.id) {
       setSelectedSucursal(String(sucursalSeleccionada.id));
@@ -185,7 +179,6 @@ export default function VentasPage() {
 
       const [serieRows, rankingRows] = await Promise.all([
         fetchSerieRPC(desde, hasta, sucId),
-        // ranking solo tiene sentido cuando son todas
         selectedSucursal ? Promise.resolve([]) : fetchRankingView(desde, hasta),
       ]);
 
@@ -204,7 +197,6 @@ export default function VentasPage() {
     load();
   }, [load]);
 
-  // KPIs
   const kpis = useMemo(() => {
     const ventas = serie.reduce((acc, r) => acc + (r.ventas_netas || 0), 0);
     const itbms = serie.reduce((acc, r) => acc + (r.itbms || 0), 0);
@@ -213,7 +205,6 @@ export default function VentasPage() {
     return { ventas, itbms, tx, ticket };
   }, [serie]);
 
-  // Datos para chart
   const chartData = useMemo(
     () =>
       serie.map((r) => ({
@@ -222,7 +213,7 @@ export default function VentasPage() {
         itbms: r.itbms,
         tx: r.tx,
       })),
-    [serie]
+    [serie],
   );
 
   return (
@@ -231,9 +222,7 @@ export default function VentasPage() {
       <header className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
         <div>
           <h1 className="text-3xl font-bold text-bean">Ventas</h1>
-          <p className="text-slate7g">
-            Serie diaria, KPIs y ranking por sucursal.
-          </p>
+          <p className="text-slate7g">Serie diaria, KPIs y ranking por sucursal.</p>
         </div>
         <div className="flex flex-wrap items-center gap-3">
           <button
@@ -241,7 +230,7 @@ export default function VentasPage() {
             onClick={load}
             className="inline-flex items-center gap-2 rounded-xl border border-sand px-4 py-2 text-sm text-bean shadow-sm"
           >
-            <RefreshCw className={loading ? 'animate-spin h-4 w-4' : 'h-4 w-4'} />
+            <RefreshCw className={loading ? 'h-4 w-4 animate-spin' : 'h-4 w-4'} />
             {loading ? 'Actualizando…' : 'Actualizar'}
           </button>
         </div>
@@ -276,7 +265,7 @@ export default function VentasPage() {
               />
             </div>
           </label>
-          <label className="md:col-span-2 flex flex-col gap-2 text-sm text-slate7g">
+          <label className="flex flex-col gap-2 text-sm text-slate7g md:col-span-2">
             Sucursal
             <div className="relative">
               <Building2 className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
@@ -349,7 +338,12 @@ export default function VentasPage() {
               <ComposedChart data={chartData}>
                 <CartesianGrid strokeDasharray="3 3" />
                 <XAxis dataKey="fecha" />
-                <YAxis yAxisId="left" tickFormatter={(v) => (Math.abs(v) >= 1000 ? `${(v/1000).toFixed(0)}k` : `${v}`)} />
+                <YAxis
+                  yAxisId="left"
+                  tickFormatter={(v) =>
+                    Math.abs(v) >= 1000 ? `${(v / 1000).toFixed(0)}k` : `${v}`
+                  }
+                />
                 <YAxis yAxisId="right" orientation="right" />
                 <Tooltip
                   formatter={(val: any, name) => {
@@ -364,7 +358,9 @@ export default function VentasPage() {
               </ComposedChart>
             </ResponsiveContainer>
           ) : (
-            <EmptyState message={loading ? 'Cargando…' : 'No hay datos en el rango seleccionado.'} />
+            <EmptyState
+              message={loading ? 'Cargando…' : 'No hay datos en el rango seleccionado.'}
+            />
           )}
         </div>
       </section>
@@ -375,9 +371,7 @@ export default function VentasPage() {
           <header className="flex items-center justify-between border-b border-sand px-6 py-4">
             <div>
               <h2 className="text-lg font-semibold text-slate-800">Ranking por sucursal</h2>
-              <p className="text-sm text-slate-500">
-                Agregado del rango seleccionado
-              </p>
+              <p className="text-sm text-slate-500">Agregado del rango seleccionado</p>
             </div>
           </header>
           <div className="overflow-x-auto">
@@ -395,9 +389,15 @@ export default function VentasPage() {
                   ranking.map((r) => (
                     <tr key={r.nombre}>
                       <td className="px-6 py-3">{r.nombre}</td>
-                      <td className="px-6 py-3 text-right font-mono">{formatCurrencyUSD(r.ventas)}</td>
-                      <td className="px-6 py-3 text-right font-mono">{r.transacciones.toLocaleString('en-US')}</td>
-                      <td className="px-6 py-3 text-right font-mono">{formatCurrencyUSD(r.ticketPromedio)}</td>
+                      <td className="px-6 py-3 text-right font-mono">
+                        {formatCurrencyUSD(r.ventas)}
+                      </td>
+                      <td className="px-6 py-3 text-right font-mono">
+                        {r.transacciones.toLocaleString('en-US')}
+                      </td>
+                      <td className="px-6 py-3 text-right font-mono">
+                        {formatCurrencyUSD(r.ticketPromedio)}
+                      </td>
                     </tr>
                   ))
                 ) : (
@@ -413,7 +413,6 @@ export default function VentasPage() {
         </section>
       )}
 
-      {/* Errores */}
       {error && (
         <div className="rounded-xl border border-rose-200 bg-rose-50 p-4 text-rose-700">
           {error}
@@ -424,7 +423,7 @@ export default function VentasPage() {
 }
 
 /* ──────────────────────────────────────────────────────────
-   Pequeños componentes de UI internos (sin dependencias externas)
+   Componentes de UI internos
 ────────────────────────────────────────────────────────── */
 function KpiCard({
   icon,
