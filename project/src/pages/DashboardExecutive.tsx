@@ -131,23 +131,40 @@ export default function DashboardExecutive() {
           { desde, hasta },
         ])) ?? [];
 
-      const normalizedSucursalName = selectedSucursalName?.toLowerCase().trim();
-      const serieFiltrada = serieRpc.filter((row: any) => {
-        if (viewingAll) return true;
-        const rowSucursalId = row.sucursal_id ?? row.sucursalId ?? row.sucursal ?? null;
-        const rowSucursalName = (row.sucursal_nombre ?? row.sucursalName ?? row.sucursal ?? '')
-          .toString()
-          .toLowerCase()
-          .trim();
+      const filtroIds = viewingAll
+        ? (Array.isArray(ids) ? ids.map((value) => String(value)) : [])
+        : selectedSucursalId
+          ? [String(selectedSucursalId)]
+          : [];
+      const filtroNombres = viewingAll
+        ? new Set(
+            sucursales
+              .filter((sucursal) => filtroIds.length === 0 || filtroIds.includes(String(sucursal.id)))
+              .map((sucursal) => sucursal.nombre.toLowerCase().trim())
+          )
+        : new Set(
+            selectedSucursalName ? [selectedSucursalName.toLowerCase().trim()].filter(Boolean) : []
+          );
+      const shouldFilterSerie = viewingAll && (filtroIds.length > 0 || filtroNombres.size > 0);
+      const serieFiltrada = shouldFilterSerie
+        ? serieRpc.filter((row: any) => {
+            const rowSucursalId = row.sucursal_id ?? row.sucursalId ?? row.sucursal ?? null;
+            if (rowSucursalId && filtroIds.includes(String(rowSucursalId))) {
+              return true;
+            }
 
-        if (selectedSucursalId && rowSucursalId && String(rowSucursalId) === String(selectedSucursalId)) {
-          return true;
-        }
-        if (normalizedSucursalName && rowSucursalName && rowSucursalName === normalizedSucursalName) {
-          return true;
-        }
-        return false;
-      });
+            const rowSucursalName = (row.sucursal_nombre ?? row.sucursalName ?? row.sucursal ?? '')
+              .toString()
+              .toLowerCase()
+              .trim();
+
+            if (rowSucursalName && filtroNombres.has(rowSucursalName)) {
+              return true;
+            }
+
+            return filtroIds.length === 0 && filtroNombres.size === 0;
+          })
+        : serieRpc;
 
       const agrupada = new Map<string, SerieRow>();
       for (const row of serieFiltrada) {
