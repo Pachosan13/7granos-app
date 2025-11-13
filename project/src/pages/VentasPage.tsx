@@ -110,35 +110,55 @@ export default function VentasPage() {
     : `Viendo únicamente: ${selectedSucursalName ?? 'Sucursal'}`;
 
   /*
-   * Carga métrica principal usando la RPC agregada por día.
-   * Para el ranking en modo "todas" reutilizamos la vista v_ui_series_14d.
-   * Los KPIs se alimentan exclusivamente de la respuesta de Supabase.
+   * Ventas usa rpc_ui_series_14d como única fuente para KPIs y serie diaria.
+   * Cuando se envía p_sucursal_id no re-filtramos la respuesta; sólo sumamos
+   * por día y dejamos el ranking global a la vista v_ui_series_14d.
    */
   const loadData = useCallback(async () => {
     setLoading(true);
     try {
-      const { data: serie, error: rpcError } = await supabase.rpc<RpcSerieRow>('rpc_ui_series_14d', {
-        p_desde: desde,
-        p_hasta: hasta,
-        p_sucursal_id: viewingAll ? null : selectedSucursalId,
-      });
+      const { data: serie, error: rpcError } = await supabase.rpc<RpcSerieRow[]>(
+        'rpc_ui_series_14d',
+        {
+          p_desde: desde,
+          p_hasta: hasta,
+          p_sucursal_id: viewingAll ? null : selectedSucursalId,
+        }
+      );
       if (rpcError) throw rpcError;
 
-      const serieRows = serie ?? [];
-      const serieFmt = serieRows
-        .map((row) => ({
-          dia: row.d,
-          fecha: formatDateDDMMYYYY(row.d),
-          ventas: toNumber(row.ventas_netas),
-          tickets: toNumber(row.tx),
-        }))
-        .sort((a, b) => a.dia.localeCompare(b.dia));
+      const serieRows = Array.isArray(serie) ? serie : [];
+      const agrupada = new Map<string, SerieChartRow>();
+      for (const row of serieRows) {
+        const rawDia = row.d ?? (row as any).dia ?? (row as any).fecha;
+        if (!rawDia) continue;
+        const dia = String(rawDia);
+        if (!agrupada.has(dia)) {
+          agrupada.set(dia, {
+            dia,
+            fecha: formatDateDDMMYYYY(dia),
+            ventas: 0,
+            tickets: 0,
+          });
+        }
+        const actual = agrupada.get(dia)!;
+        actual.ventas += toNumber(row.ventas_netas ?? (row as any).ventas_brutas ?? (row as any).ventas);
+        actual.tickets += toNumber(row.tx ?? (row as any).tickets ?? (row as any).transacciones);
+      }
+
+      const serieFmt = Array.from(agrupada.values()).sort((a, b) => a.dia.localeCompare(b.dia));
 
       setSeriesData(serieFmt);
 
-      const sumVentas = serieRows.reduce((acc, row) => acc + toNumber(row.ventas_netas), 0);
-      const sumTickets = serieRows.reduce((acc, row) => acc + toNumber(row.tx), 0);
-      const sumITBMS = serieRows.reduce((acc, row) => acc + toNumber(row.itbms), 0);
+      const sumVentas = serieRows.reduce(
+        (acc, row) => acc + toNumber(row.ventas_netas ?? (row as any).ventas_brutas ?? (row as any).ventas),
+        0
+      );
+      const sumTickets = serieRows.reduce(
+        (acc, row) => acc + toNumber(row.tx ?? (row as any).tickets ?? (row as any).transacciones),
+        0
+      );
+      const sumITBMS = serieRows.reduce((acc, row) => acc + toNumber(row.itbms ?? (row as any).total_itbms), 0);
       setTotalVentas(sumVentas);
       setTotalTransacciones(sumTickets);
       setTotalITBMS(sumITBMS);

@@ -43,23 +43,13 @@ import {
 /* ────────────────────────────────────────────────────────────────────────────
    Tipos
 --------------------------------------------------------------------------- */
-interface PnLRawRow {
-  mes?: string;
-  periodo?: string;
-  sucursal_id?: string | null;
-  sucursalId?: string | null;
-  ingresos?: number | string | null;
-  cogs?: number | string | null;
-  gastos_totales?: number | string | null;
-  gastos?: number | string | null;
-  utilidad_operativa?: number | string | null;
-  utilidad?: number | string | null;
-}
 interface PnLRow {
   mes: string;
   sucursalId: string | null;
   ingresos: number;
   cogs: number;
+  gastosOperativos: number;
+  planilla: number;
   gastosTotales: number;
   utilidadOperativa: number;
 }
@@ -79,13 +69,251 @@ const getErrorMessage = (error: unknown) => {
   return 'Error desconocido';
 };
 
-const buildVariants = (mes: string, sucursalId: string | null): RpcParams[] => [
-  { p_mes: mes, p_sucursal_id: sucursalId },
-  { mes, p_sucursal_id: sucursalId },
-  { mes, sucursal_id: sucursalId },
-  { p_mes: mes, sucursal_id: sucursalId },
-  { mes, sucursalId },
+const VALUE_FIELDS = {
+  ingresos: ['ingresos', 'total_ingresos', 'venta_neta', 'ventas_netas', 'ventas_brutas', 'ventas'],
+  cogs: ['cogs', 'total_cogs', 'costo', 'costo_total', 'costo_ventas'],
+  gastos: ['gastos', 'gastos_totales', 'gasto_total', 'total_gastos', 'monto_total', 'monto'],
+  planilla: ['total_planilla', 'planilla', 'labor', 'total_labor', 'costo_planilla', 'monto'],
+} as const;
+
+const SUCURSAL_ID_FIELDS = [
+  'sucursal_id',
+  'sucursalId',
+  'branch_id',
+  'tienda_id',
+  'local_id',
+  'id_sucursal',
 ];
+
+const SUCURSAL_NAME_FIELDS = [
+  'sucursal_nombre',
+  'sucursal',
+  'nombre_sucursal',
+  'branch_name',
+  'tienda_nombre',
+];
+
+const PERIOD_FIELDS = ['mes', 'periodo', 'fecha', 'period', 'periodo_inicio'];
+
+const YEAR_FIELDS = ['ano', 'anio', 'year'];
+const MONTH_FIELDS = ['mes', 'month', 'mes_numero'];
+
+const padMonth = (value: number) => String(value).padStart(2, '0');
+
+const ensureMonthIso = (value: string): string => {
+  if (!value) return '';
+  if (/^\d{4}-\d{2}$/.test(value)) return `${value}-01`;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) return value.slice(0, 10);
+  const cleaned = value.split('T')[0]?.split(' ')[0];
+  if (cleaned && /^\d{4}-\d{2}-\d{2}$/.test(cleaned)) return cleaned;
+  return value;
+};
+
+const toMonthStart = (input: unknown): string | null => {
+  if (!input && input !== 0) return null;
+  if (input instanceof Date) {
+    return `${input.getFullYear()}-${padMonth(input.getMonth() + 1)}-01`;
+  }
+  if (typeof input === 'string') {
+    const trimmed = input.trim();
+    if (!trimmed) return null;
+    if (/^\d{4}-\d{2}-\d{2}/.test(trimmed)) return trimmed.slice(0, 10);
+    if (/^\d{4}-\d{2}$/.test(trimmed)) return `${trimmed}-01`;
+    if (/^\d{4}\d{2}$/.test(trimmed)) {
+      const year = Number(trimmed.slice(0, 4));
+      const month = Number(trimmed.slice(4, 6));
+      if (!Number.isNaN(year) && !Number.isNaN(month)) return `${year}-${padMonth(month)}-01`;
+    }
+    if (/^\d{2}\/\d{2}\/\d{4}$/.test(trimmed)) {
+      const [dd, mm, yyyy] = trimmed.split('/');
+      return `${yyyy}-${mm}-01`;
+    }
+  }
+  if (typeof input === 'number') {
+    const str = String(input);
+    if (str.length === 6) {
+      const year = Number(str.slice(0, 4));
+      const month = Number(str.slice(4, 6));
+      if (!Number.isNaN(year) && !Number.isNaN(month)) return `${year}-${padMonth(month)}-01`;
+    }
+  }
+  return null;
+};
+
+const extractPeriod = (row: Record<string, any>): string | null => {
+  for (const key of PERIOD_FIELDS) {
+    if (row[key] !== undefined) {
+      const iso = toMonthStart(row[key]);
+      if (iso) return iso;
+    }
+  }
+
+  const yearField = YEAR_FIELDS.find((key) => row[key] !== undefined && row[key] !== null);
+  const monthField = MONTH_FIELDS.find((key) => row[key] !== undefined && row[key] !== null);
+  if (yearField && monthField) {
+    const year = Number(row[yearField]);
+    const month = Number(row[monthField]);
+    if (!Number.isNaN(year) && !Number.isNaN(month)) {
+      return `${year}-${padMonth(month)}-01`;
+    }
+  }
+
+  return null;
+};
+
+const extractSucursalId = (row: Record<string, any>): string | null => {
+  for (const key of SUCURSAL_ID_FIELDS) {
+    const value = row[key];
+    if (value !== undefined && value !== null && value !== '') {
+      return String(value);
+    }
+  }
+  return null;
+};
+
+const extractSucursalName = (row: Record<string, any>): string | null => {
+  for (const key of SUCURSAL_NAME_FIELDS) {
+    const value = row[key];
+    if (typeof value === 'string' && value.trim()) {
+      return value.trim();
+    }
+  }
+  return null;
+};
+
+const matchesSucursal = (
+  row: Record<string, any>,
+  sucursalId: string | null,
+  sucursalName: string | null
+) => {
+  if (!sucursalId) return true;
+  const rowId = extractSucursalId(row);
+  if (rowId) return String(rowId) === String(sucursalId);
+  const rowName = extractSucursalName(row);
+  if (rowName && sucursalName) {
+    return rowName.toLowerCase() === sucursalName.toLowerCase();
+  }
+  return false;
+};
+
+const sumFields = (row: Record<string, any>, fields: readonly string[]): number => {
+  let total = 0;
+  let matched = false;
+  for (const field of fields) {
+    const value = row[field];
+    if (value !== undefined && value !== null && value !== '') {
+      total += toNumber(value);
+      matched = true;
+    }
+  }
+  return matched ? total : 0;
+};
+
+const aggregateByMonth = (
+  rows: Record<string, any>[],
+  months: Set<string>,
+  sucursalId: string | null,
+  sucursalName: string | null,
+  fields: readonly string[]
+) => {
+  const map = new Map<string, number>();
+  months.forEach((month) => map.set(month, 0));
+
+  for (const row of rows) {
+    const period = extractPeriod(row);
+    if (!period || !months.has(period)) continue;
+    if (!matchesSucursal(row, sucursalId, sucursalName)) continue;
+    const amount = sumFields(row, fields);
+    if (!amount && amount !== 0) continue;
+    map.set(period, (map.get(period) ?? 0) + amount);
+  }
+
+  return map;
+};
+
+const isRetryableError = (error: any) => {
+  if (!error) return false;
+  const message = String(error.message ?? error?.details ?? '').toLowerCase();
+  return (
+    message.includes('column') ||
+    message.includes('operator does not exist') ||
+    message.includes('invalid input syntax') ||
+    message.includes('function ') ||
+    message.includes('date/time field value out of range')
+  );
+};
+
+const fetchViewRowsForRange = async (
+  view: string,
+  from: string,
+  to: string
+): Promise<Record<string, any>[]> => {
+  const fromMonth = from.slice(0, 7);
+  const toMonth = to.slice(0, 7);
+  const fromYear = Number(from.slice(0, 4));
+  const toYear = Number(to.slice(0, 4));
+  const fromMonthNum = Number(from.slice(5, 7));
+
+  const variants = [
+    () => supabase.from(view).select('*').gte('mes', from).lte('mes', to),
+    () => supabase.from(view).select('*').gte('mes', fromMonth).lte('mes', toMonth),
+    () => supabase.from(view).select('*').gte('periodo', from).lte('periodo', to),
+    () => supabase.from(view).select('*').gte('periodo', fromMonth).lte('periodo', toMonth),
+    () => supabase.from(view).select('*').gte('fecha', from).lte('fecha', to),
+    () =>
+      supabase
+        .from(view)
+        .select('*')
+        .eq('ano', fromYear)
+        .eq('mes', Number.isNaN(fromMonthNum) ? fromMonth : fromMonthNum),
+    () =>
+      supabase
+        .from(view)
+        .select('*')
+        .eq('anio', fromYear)
+        .eq('mes', Number.isNaN(fromMonthNum) ? fromMonth : fromMonthNum),
+    () =>
+      supabase
+        .from(view)
+        .select('*')
+        .gte('ano', fromYear)
+        .lte('ano', toYear),
+  ];
+
+  for (const factory of variants) {
+    try {
+      const { data, error } = await factory();
+      if (error) {
+        if (isRetryableError(error)) {
+          continue;
+        }
+        throw error;
+      }
+      return data ?? [];
+    } catch (err: any) {
+      if (!isRetryableError(err)) throw err;
+    }
+  }
+
+  const { data, error } = await supabase.from(view).select('*');
+  if (error) throw error;
+  return data ?? [];
+};
+
+const buildMonthsWindow = (current: string, size: number): string[] => {
+  const iso = ensureMonthIso(current);
+  if (!iso) return [];
+  const [year, month] = iso.split('-').map(Number);
+  if (Number.isNaN(year) || Number.isNaN(month)) return [];
+  const base = new Date(Date.UTC(year, month - 1, 1));
+  const months: string[] = [];
+  for (let offset = size - 1; offset >= 0; offset -= 1) {
+    const d = new Date(base);
+    d.setUTCMonth(d.getUTCMonth() - offset);
+    months.push(`${d.getUTCFullYear()}-${padMonth(d.getUTCMonth() + 1)}-01`);
+  }
+  return months;
+};
 
 const buildPostVariants = (mes: string, sucursalId: string | null): RpcParams[] => [
   { p_mes: mes, p_sucursal_id: sucursalId },
@@ -94,63 +322,6 @@ const buildPostVariants = (mes: string, sucursalId: string | null): RpcParams[] 
   { p_mes: mes, sucursal_id: sucursalId },
   { mes, sucursalId },
 ];
-
-const normalize = (rows: PnLRawRow[]): PnLRow[] =>
-  rows.map((row) => {
-    const mes = row.mes || row.periodo || '';
-    const sucursalId =
-      (row.sucursal_id ?? row.sucursalId ?? null) !== undefined
-        ? (row.sucursal_id ?? row.sucursalId ?? null)
-        : null;
-
-    const ingresos = toNumber(row.ingresos);
-    const cogs = toNumber(row.cogs);
-    const gastosTotales = toNumber(row.gastos_totales ?? row.gastos ?? 0);
-    const utilidadOperativa = toNumber(
-      row.utilidad_operativa ?? row.utilidad ?? ingresos - cogs - gastosTotales
-    );
-
-    return {
-      mes: mes ? mes.slice(0, 10) : '',
-      sucursalId: sucursalId ? String(sucursalId) : null,
-      ingresos,
-      cogs,
-      gastosTotales,
-      utilidadOperativa,
-    };
-  });
-
-const aggregate = (rows: PnLRow[]): PnLRow => {
-  const agg = rows.reduce(
-    (acc, r) => {
-      acc.ingresos += r.ingresos || 0;
-      acc.cogs += r.cogs || 0;
-      acc.gastosTotales += r.gastosTotales || 0;
-      acc.utilidadOperativa += r.utilidadOperativa || 0;
-      return acc;
-    },
-    { ingresos: 0, cogs: 0, gastosTotales: 0, utilidadOperativa: 0 }
-  );
-  return {
-    mes: rows[0]?.mes ?? '',
-    sucursalId: null,
-    ...agg,
-  };
-};
-
-const getPreviousMonth = (isoDate: string) => {
-  try {
-    const d = new Date(isoDate);
-    if (Number.isNaN(d.getTime())) return null;
-    d.setMonth(d.getMonth() - 1);
-    const yyyy = d.getFullYear();
-    const mm = String(d.getMonth() + 1).padStart(2, '0');
-    return `${yyyy}-${mm}-01`;
-  } catch {
-    return null;
-  }
-};
-
 const getNetMargin = (row: PnLRow) =>
   !row.ingresos ? 0 : (row.utilidadOperativa / row.ingresos) * 100;
 
@@ -181,62 +352,90 @@ export const PnLPage = () => {
     }
   }, [sucursalSeleccionada?.id]);
 
+  /*
+   * Estado de resultados mensual: agregamos ingresos, COGS, gastos operativos
+   * y planilla usando las vistas contables oficiales y filtramos por mes/sucursal
+   * sin depender de la RPC previa.
+   */
   const fetchData = useCallback(async () => {
     if (!mes) return;
     setLoading(true);
     setError(null);
-    const filterMes = `${mes}-01`;
+
+    const periodIso = ensureMonthIso(mes);
     const sucursalId = selectedSucursal || null;
+    const sucursalName = sucursalId
+      ? sucursales.find((s) => String(s.id) === String(sucursalId))?.nombre ?? null
+      : null;
 
     try {
-      // a) Sucursal específica -> RPC
-      if (sucursalId) {
-        const data =
-          (await rpcWithFallback<PnLRawRow[]>(
-            'api_get_pyg',
-            buildVariants(filterMes, sucursalId)
-          )) ?? [];
-        setRows(normalize(data));
-      } else {
-        // b) Todas -> vista y agregamos en cliente (nunca pedimos "sucursal_id is null")
-        const { data, error } = await supabase
-          .from('v_pyg_comparativo')
-          .select('*')
-          .eq('mes', filterMes)
-          .order('sucursal_id', { ascending: true });
+      const months = buildMonthsWindow(periodIso, 6);
+      const rangeStart = months[0] ?? periodIso;
+      const rangeEnd = months[months.length - 1] ?? periodIso;
+      const monthsSet = new Set(months);
 
-        if (error) throw error;
-        const normalized = normalize((data ?? []) as PnLRawRow[]);
-        setRows(normalized.length ? [aggregate(normalized)] : []);
-      }
+      const [ingresosRows, cogsRows, gastosRows, planillaRows] = await Promise.all([
+        fetchViewRowsForRange('v_pnl_mensual_ingresos', rangeStart, rangeEnd),
+        fetchViewRowsForRange('v_cogs_mensual_sucursal', rangeStart, rangeEnd),
+        fetchViewRowsForRange('v_gastos_mensual_sucursal', rangeStart, rangeEnd),
+        fetchViewRowsForRange('v_planilla_totales_norm', rangeStart, rangeEnd),
+      ]);
 
-      // Mes anterior
-      const prevMonth = getPreviousMonth(filterMes);
-      if (prevMonth) {
-        if (sucursalId) {
-          const prev =
-            (await rpcWithFallback<PnLRawRow[]>(
-              'api_get_pyg',
-              buildVariants(prevMonth, sucursalId)
-            )) ?? [];
-          setPreviousRow(normalize(prev)[0] ?? null);
-        } else {
-          const { data: prevData, error: prevErr } = await supabase
-            .from('v_pyg_comparativo')
-            .select('*')
-            .eq('mes', prevMonth);
+      const ingresosMap = aggregateByMonth(
+        ingresosRows,
+        monthsSet,
+        sucursalId,
+        sucursalName,
+        VALUE_FIELDS.ingresos
+      );
+      const cogsMap = aggregateByMonth(
+        cogsRows,
+        monthsSet,
+        sucursalId,
+        sucursalName,
+        VALUE_FIELDS.cogs
+      );
+      const gastosMap = aggregateByMonth(
+        gastosRows,
+        monthsSet,
+        sucursalId,
+        sucursalName,
+        VALUE_FIELDS.gastos
+      );
+      const planillaMap = aggregateByMonth(
+        planillaRows,
+        monthsSet,
+        sucursalId,
+        sucursalName,
+        VALUE_FIELDS.planilla
+      );
 
-          if (prevErr) throw prevErr;
-          const normPrev = normalize((prevData ?? []) as PnLRawRow[]);
-          setPreviousRow(normPrev.length ? aggregate(normPrev) : null);
-        }
-      } else {
-        setPreviousRow(null);
-      }
+      const monthlyRows: PnLRow[] = months.map((month) => {
+        const ingresos = ingresosMap.get(month) ?? 0;
+        const cogs = cogsMap.get(month) ?? 0;
+        const gastosOperativos = gastosMap.get(month) ?? 0;
+        const planilla = planillaMap.get(month) ?? 0;
+        const gastosTotales = gastosOperativos + planilla;
+        const utilidadOperativa = ingresos - cogs - gastosTotales;
+        return {
+          mes: month,
+          sucursalId: sucursalId ? String(sucursalId) : null,
+          ingresos,
+          cogs,
+          gastosOperativos,
+          planilla,
+          gastosTotales,
+          utilidadOperativa,
+        };
+      });
 
-      // Historial (últimos 6)
-      const history = await loadHistory(sucursalId, filterMes);
-      setHistoryRows(history);
+      const currentRow = monthlyRows.find((row) => row.mes === periodIso) ?? null;
+      const previousRowCandidate =
+        monthlyRows.length >= 2 ? monthlyRows[monthlyRows.length - 2] : null;
+
+      setRows(currentRow ? [currentRow] : []);
+      setPreviousRow(previousRowCandidate);
+      setHistoryRows(monthlyRows);
     } catch (err: unknown) {
       console.error('Error cargando P&L', err);
       setRows([]);
@@ -246,7 +445,7 @@ export const PnLPage = () => {
     } finally {
       setLoading(false);
     }
-  }, [mes, selectedSucursal]);
+  }, [mes, selectedSucursal, sucursales]);
 
   useEffect(() => {
     fetchData();
@@ -261,6 +460,8 @@ export const PnLPage = () => {
         sucursalId: null,
         ingresos: 0,
         cogs: 0,
+        gastosOperativos: 0,
+        planilla: 0,
         gastosTotales: 0,
         utilidadOperativa: 0,
       },
@@ -361,12 +562,23 @@ export const PnLPage = () => {
       row.sucursalId ?? 'Todas',
       formatNumber(row.ingresos),
       formatNumber(row.cogs),
+      formatNumber(row.planilla),
+      formatNumber(row.gastosOperativos),
       formatNumber(row.gastosTotales),
       formatNumber(row.utilidadOperativa),
     ]);
     exportToCsv(
       csvRows,
-      ['Mes', 'Sucursal', 'Ingresos', 'COGS', 'Gastos', 'Utilidad'],
+      [
+        'Mes',
+        'Sucursal',
+        'Ingresos',
+        'COGS',
+        'Planilla',
+        'Gastos operativos',
+        'Gastos totales',
+        'Utilidad',
+      ],
       { suffix: 'pnl' }
     );
   };
@@ -378,7 +590,9 @@ export const PnLPage = () => {
       Sucursal: row.sucursalId ?? 'Todas',
       Ingresos: row.ingresos,
       COGS: row.cogs,
-      Gastos: row.gastosTotales,
+      Planilla: row.planilla,
+      'Gastos operativos': row.gastosOperativos,
+      'Gastos totales': row.gastosTotales,
       Utilidad: row.utilidadOperativa,
     }));
     exportToXlsx(data, 'P&L', { suffix: 'pnl' });
@@ -582,7 +796,19 @@ export const PnLPage = () => {
                 </td>
               </tr>
               <tr>
+                <td className="px-6 py-3 font-medium text-slate-600">Planilla (labor)</td>
+                <td className="px-6 py-3 text-right font-mono text-base">
+                  {formatCurrencyUSD(totals.planilla ?? 0)}
+                </td>
+              </tr>
+              <tr>
                 <td className="px-6 py-3 font-medium text-slate-600">Gastos operativos</td>
+                <td className="px-6 py-3 text-right font-mono text-base">
+                  {formatCurrencyUSD(totals.gastosOperativos ?? 0)}
+                </td>
+              </tr>
+              <tr>
+                <td className="px-6 py-3 font-medium text-slate-600">Gastos totales</td>
                 <td className="px-6 py-3 text-right font-mono text-base">
                   {formatCurrencyUSD(totals.gastosTotales)}
                 </td>
@@ -611,47 +837,6 @@ export const PnLPage = () => {
 };
 
 export default PnLPage;
-
-/* ────────────────────────────────────────────────────────────────────────────
-   Historial
---------------------------------------------------------------------------- */
-const loadHistory = async (sucursalId: string | null, currentMesISO: string) => {
-  try {
-    let q = supabase
-      .from('v_pyg_comparativo')
-      .select('*')
-      .lte('mes', currentMesISO)
-      .order('mes', { ascending: true })
-      .limit(6);
-
-    if (sucursalId) q = q.eq('sucursal_id', sucursalId); // nunca usamos is.null
-
-    const { data, error } = await q;
-    if (error || !data) {
-      if (error) console.warn('Error cargando v_pyg_comparativo', error);
-      return [];
-    }
-
-    const normalized = normalize(data as PnLRawRow[]);
-    if (!sucursalId) {
-      // agregamos por mes
-      const byMes = new Map<string, PnLRow[]>();
-      for (const r of normalized) {
-        const arr = byMes.get(r.mes) ?? [];
-        arr.push(r);
-        byMes.set(r.mes, arr);
-      }
-      const agg = Array.from(byMes.entries())
-        .map(([mes, arr]) => ({ ...aggregate(arr), mes }))
-        .sort((a, b) => a.mes.localeCompare(b.mes));
-      return agg;
-    }
-    return normalized.sort((a, b) => a.mes.localeCompare(b.mes));
-  } catch (err) {
-    console.warn('Error inesperado cargando historial de P&L', err);
-    return [];
-  }
-};
 
 /* ────────────────────────────────────────────────────────────────────────────
    UI helpers

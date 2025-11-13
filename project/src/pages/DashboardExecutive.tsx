@@ -91,8 +91,9 @@ export default function DashboardExecutive() {
   const [serie, setSerie] = useState<SerieRow[]>([]);
 
   /*
-   * Consulta KPIs diarios y serie agregada usando la RPC principal (rpc_ui_series_14d).
-   * Filtra resultados cuando hay sucursal seleccionada para evitar mezclar datos.
+   * Dashboard Ejecutivo usa v_ui_kpis_hoy para los KPIs diarios
+   * y rpc_ui_series_14d para el gráfico. No debemos filtrar la serie
+   * cuando la RPC ya recibe p_sucursal_id — solo agregamos por día.
    */
   const cargarDatos = useCallback(async () => {
     setLoading(true);
@@ -131,43 +132,10 @@ export default function DashboardExecutive() {
           { desde, hasta },
         ])) ?? [];
 
-      const filtroIds = viewingAll
-        ? (Array.isArray(ids) ? ids.map((value) => String(value)) : [])
-        : selectedSucursalId
-          ? [String(selectedSucursalId)]
-          : [];
-      const filtroNombres = viewingAll
-        ? new Set(
-            sucursales
-              .filter((sucursal) => filtroIds.length === 0 || filtroIds.includes(String(sucursal.id)))
-              .map((sucursal) => sucursal.nombre.toLowerCase().trim())
-          )
-        : new Set(
-            selectedSucursalName ? [selectedSucursalName.toLowerCase().trim()].filter(Boolean) : []
-          );
-      const shouldFilterSerie = viewingAll && (filtroIds.length > 0 || filtroNombres.size > 0);
-      const serieFiltrada = shouldFilterSerie
-        ? serieRpc.filter((row: any) => {
-            const rowSucursalId = row.sucursal_id ?? row.sucursalId ?? row.sucursal ?? null;
-            if (rowSucursalId && filtroIds.includes(String(rowSucursalId))) {
-              return true;
-            }
-
-            const rowSucursalName = (row.sucursal_nombre ?? row.sucursalName ?? row.sucursal ?? '')
-              .toString()
-              .toLowerCase()
-              .trim();
-
-            if (rowSucursalName && filtroNombres.has(rowSucursalName)) {
-              return true;
-            }
-
-            return filtroIds.length === 0 && filtroNombres.size === 0;
-          })
-        : serieRpc;
+      const serieRows = Array.isArray(serieRpc) ? serieRpc : serieRpc ? [serieRpc] : [];
 
       const agrupada = new Map<string, SerieRow>();
-      for (const row of serieFiltrada) {
+      for (const row of serieRows) {
         const key = String(row.d ?? row.dia ?? row.fecha ?? hoy);
         if (!agrupada.has(key)) {
           agrupada.set(key, {
@@ -178,8 +146,10 @@ export default function DashboardExecutive() {
           });
         }
         const actual = agrupada.get(key)!;
-        actual.ventas += toNumber(row.ventas ?? row.ventas_netas);
-        actual.tickets += toNumber(row.transacciones ?? row.tx);
+        actual.ventas += toNumber(
+          row.ventas ?? row.ventas_netas ?? row.ventas_brutas ?? row.total ?? row.total_ventas
+        );
+        actual.tickets += toNumber(row.transacciones ?? row.tx ?? row.tickets ?? row.num_transacciones);
       }
 
       const ordenada = Array.from(agrupada.values()).sort((a, b) => a.dia.localeCompare(b.dia));
@@ -212,7 +182,7 @@ export default function DashboardExecutive() {
   ]);
 
   const handleSync = useCallback(async () => {
-    const base = getFunctionsBase();
+    const base = functionsBase;
     if (!base) return;
     setSyncing(true);
     try {
@@ -226,7 +196,7 @@ export default function DashboardExecutive() {
     } finally {
       setSyncing(false);
     }
-  }, [cargarDatos]);
+  }, [cargarDatos, functionsBase]);
 
   useEffect(() => {
     cargarDatos();
