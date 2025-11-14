@@ -15,31 +15,37 @@ import {
 } from 'recharts';
 import { useAuthOrg } from '../../context/AuthOrgContext';
 import { formatCurrencyUSD } from '../../lib/format';
-import {
-  formatDateIso,
-  rpcWithFallback,
-  toNumber,
-  type RpcParams,
-} from './rpcHelpers';
+import { formatDateIso } from './rpcHelpers';
 import { exportToCsv, exportToXlsx, formatNumber } from './exportUtils';
-
-interface BalanceRawRow {
-  mes?: string;
-  periodo?: string;
-  sucursal_id?: string | null;
-  sucursalId?: string | null;
-  type?: string;
-  tipo?: string;
-  balance?: number | string | null;
-  monto?: number | string | null;
-}
+import {
+  fetchAccountCatalog,
+  fetchJournalsInRange,
+  getMonthBounds,
+  getMonthSequence,
+  monthKeyFromDate,
+  normalizeAccountType,
+  type AccountCatalogEntry,
+} from './glData';
 
 interface BalanceRow {
   mes: string;
   sucursalId: string | null;
-  type: string;
+  type: 'activos' | 'pasivos' | 'patrimonio';
   balance: number;
 }
+
+interface BalanceHistoryPoint {
+  mes: string;
+  activos: number;
+  pasivos: number;
+  patrimonio: number;
+}
+
+const COLORS: Record<string, string> = {
+  activos: '#2563eb',
+  pasivos: '#dc2626',
+  patrimonio: '#059669',
+};
 
 const getErrorMessage = (error: unknown) => {
   if (error instanceof Error) return error.message;
@@ -47,50 +53,107 @@ const getErrorMessage = (error: unknown) => {
   return 'Error desconocido';
 };
 
-const buildVariants = (
-  mes: string,
-  sucursalId: string | null
-): RpcParams[] => [
-  { p_mes: mes, p_sucursal_id: sucursalId },
-  { mes, p_sucursal_id: sucursalId },
-  { mes, sucursal_id: sucursalId },
-  { p_mes: mes, sucursal_id: sucursalId },
-  { mes, sucursalId },
-];
+const ASSET_TYPES = new Set(['asset', 'assets', 'activo', 'activos', 'current_asset', 'noncurrent_asset']);
+const LIABILITY_TYPES = new Set(['liability', 'liabilities', 'pasivo', 'pasivos']);
+const EQUITY_TYPES = new Set(['equity', 'patrimonio', 'capital', 'capital_social']);
+const INCOME_TYPES = new Set(['income', 'ingreso', 'ingresos', 'revenue', 'revenues']);
+const EXPENSE_TYPES = new Set(['expense', 'expenses', 'gasto', 'gastos', 'operating_expense']);
+const COGS_TYPES = new Set(['cogs', 'cost_of_goods', 'costo', 'costodeventa', 'cost']);
 
-const COLORS: Record<string, string> = {
-  activo: '#2563eb',
-  pasivo: '#dc2626',
-  capital: '#059669',
-  patrimonio: '#7c3aed',
-  otros: '#0f172a',
+interface MonthAccumulator {
+  activos: number;
+  pasivos: number;
+  equity: number;
+  ingresos: number;
+  gastos: number;
+  cogs: number;
+}
+
+const ensureAccumulator = (map: Map<string, MonthAccumulator>, key: string) => {
+  if (!map.has(key)) {
+    map.set(key, {
+      activos: 0,
+      pasivos: 0,
+      equity: 0,
+      ingresos: 0,
+      gastos: 0,
+      cogs: 0,
+    });
+  }
+  return map.get(key)!;
 };
 
-const normalize = (rows: BalanceRawRow[]): BalanceRow[] =>
-  rows.map((row) => {
-    const mes = row.mes || row.periodo || '';
-    const sucursalId =
-      (row.sucursal_id ?? row.sucursalId ?? null) !== undefined
-        ? (row.sucursal_id ?? row.sucursalId ?? null)
-        : null;
-    const type = (row.type || row.tipo || 'otros').toString().toLowerCase();
-    const balance = toNumber(row.balance ?? row.monto);
+const computeBalanceAggregates = (
+  monthKeys: string[],
+  journals: Awaited<ReturnType<typeof fetchJournalsInRange>>,
+  catalog: Record<string, AccountCatalogEntry>,
+  sucursalId: string | null
+): { rows: BalanceRow[]; history: BalanceHistoryPoint[] } => {
+  const accumulator = new Map<string, MonthAccumulator>();
+  monthKeys.forEach((month) => {
+    ensureAccumulator(accumulator, month);
+  });
+
+  journals.forEach((journal) => {
+    const monthKey = monthKeyFromDate(journal.journal_date);
+    const bucket = accumulator.get(monthKey);
+    if (!bucket) return;
+
+    journal.lines.forEach((line) => {
+      const account = catalog[line.account_id ?? ''];
+      const type = normalizeAccountType(account?.type);
+      const debit = line.debit ?? 0;
+      const credit = line.credit ?? 0;
+      if (ASSET_TYPES.has(type)) {
+        bucket.activos += debit - credit;
+      } else if (LIABILITY_TYPES.has(type)) {
+        bucket.pasivos += credit - debit;
+      } else if (EQUITY_TYPES.has(type)) {
+        bucket.equity += credit - debit;
+      } else if (INCOME_TYPES.has(type)) {
+        bucket.ingresos += credit - debit;
+      } else if (EXPENSE_TYPES.has(type)) {
+        bucket.gastos += debit - credit;
+      } else if (COGS_TYPES.has(type)) {
+        bucket.cogs += debit - credit;
+      }
+    });
+  });
+
+  const history = monthKeys.map<BalanceHistoryPoint>((month) => {
+    const bucket = ensureAccumulator(accumulator, month);
+    const patrimonio = bucket.equity + bucket.ingresos - bucket.gastos - bucket.cogs;
     return {
-      mes: mes ? mes.slice(0, 10) : '',
-      sucursalId: sucursalId ? String(sucursalId) : null,
-      type,
-      balance,
+      mes: month,
+      activos: bucket.activos,
+      pasivos: bucket.pasivos,
+      patrimonio,
     };
   });
+
+  const selectedMonth = monthKeys[monthKeys.length - 1];
+  const selectedBucket = ensureAccumulator(accumulator, selectedMonth);
+  const patrimonioActual =
+    selectedBucket.equity + selectedBucket.ingresos - selectedBucket.gastos - selectedBucket.cogs;
+
+  const rows: BalanceRow[] = [
+    { mes: selectedMonth, sucursalId, type: 'activos', balance: selectedBucket.activos },
+    { mes: selectedMonth, sucursalId, type: 'pasivos', balance: selectedBucket.pasivos },
+    { mes: selectedMonth, sucursalId, type: 'patrimonio', balance: patrimonioActual },
+  ];
+
+  return { rows, history };
+};
 
 export const BalancePage = () => {
   const { sucursales, sucursalSeleccionada } = useAuthOrg();
   const [mes, setMes] = useState('');
   const [selectedSucursal, setSelectedSucursal] = useState('');
   const [rows, setRows] = useState<BalanceRow[]>([]);
-  const [historyTotals, setHistoryTotals] = useState<BalanceRow[][]>([]);
+  const [historyTotals, setHistoryTotals] = useState<BalanceHistoryPoint[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [catalog, setCatalog] = useState<Record<string, AccountCatalogEntry>>({});
 
   useEffect(() => {
     const today = new Date();
@@ -104,6 +167,13 @@ export const BalancePage = () => {
     }
   }, [sucursalSeleccionada?.id]);
 
+  const ensureCatalog = useCallback(async () => {
+    if (Object.keys(catalog).length > 0) return catalog;
+    const data = await fetchAccountCatalog();
+    setCatalog(data);
+    return data;
+  }, [catalog]);
+
   const fetchData = useCallback(async () => {
     if (!mes) return;
     setLoading(true);
@@ -111,38 +181,52 @@ export const BalancePage = () => {
     try {
       const filterMes = `${mes}-01`;
       const sucursalId = selectedSucursal || null;
-      const data =
-        (await rpcWithFallback<BalanceRawRow[]>(
-          'api_get_balance',
-          buildVariants(filterMes, sucursalId)
-        )) ?? [];
-      const normalized = normalize(data);
-      setRows(normalized);
+      const historyMonths = getMonthSequence(filterMes, 6);
+      if (historyMonths.length === 0) {
+        setRows([]);
+        setHistoryTotals([]);
+        setError('Mes inválido');
+        setLoading(false);
+        return;
+      }
 
-      const history = await loadBalanceHistory(filterMes, sucursalId);
+      const historyStart = historyMonths[0];
+      const { end: historyEnd } = getMonthBounds(historyMonths[historyMonths.length - 1]);
+
+      const [catalogData, journals] = await Promise.all([
+        ensureCatalog(),
+        fetchJournalsInRange({ from: historyStart, to: historyEnd, sucursalId }),
+      ]);
+
+      const { rows: monthRows, history } = computeBalanceAggregates(
+        historyMonths,
+        journals,
+        catalogData,
+        sucursalId
+      );
+
+      const currentRow = monthRows.filter((row) => row.mes === filterMes);
+      const hasData =
+        journals.some((journal) => monthKeyFromDate(journal.journal_date) === filterMes) ||
+        currentRow.some((row) => Math.abs(row.balance) > 0.0001);
+
+      setRows(hasData ? monthRows : []);
       setHistoryTotals(history);
     } catch (err: unknown) {
-      console.error('Error cargando api_get_balance', err);
+      console.error('Error cargando Balance', err);
       setRows([]);
-      setError(getErrorMessage(err) ?? 'No fue posible obtener el balance general.');
       setHistoryTotals([]);
+      setError(getErrorMessage(err) ?? 'No fue posible obtener el balance general.');
     } finally {
       setLoading(false);
     }
-  }, [mes, selectedSucursal]);
+  }, [ensureCatalog, mes, selectedSucursal]);
 
   useEffect(() => {
     fetchData();
   }, [fetchData]);
 
-  const totals = useMemo(() => {
-    const map = new Map<string, number>();
-    for (const row of rows) {
-      const key = row.type || 'otros';
-      map.set(key, (map.get(key) ?? 0) + row.balance);
-    }
-    return Array.from(map.entries()).map(([type, balance]) => ({ type, balance }));
-  }, [rows]);
+  const totals = useMemo(() => rows, [rows]);
 
   const totalBalance = useMemo(
     () => totals.reduce((acc, row) => acc + row.balance, 0),
@@ -154,17 +238,17 @@ export const BalancePage = () => {
       totals.map((item) => ({
         name: item.type.charAt(0).toUpperCase() + item.type.slice(1),
         value: item.balance,
+        key: item.type,
       })),
     [totals]
   );
 
   const historyChartData = useMemo(() => {
     return historyTotals
-      .map((historySet) => {
-        const month = historySet[0]?.mes ?? '';
-        const total = historySet.reduce((acc, row) => acc + row.balance, 0);
-        return { mes: formatDateIso(month), balance: total };
-      })
+      .map((historySet) => ({
+        mes: formatDateIso(historySet.mes),
+        balance: historySet.activos,
+      }))
       .filter((row) => row.mes);
   }, [historyTotals]);
 
@@ -308,8 +392,8 @@ export const BalancePage = () => {
                     label={(entry) => `${entry.name}: ${formatCurrencyUSD(entry.value)}`}
                   >
                     {chartData.map((entry, index) => {
-                      const colorKey = entry.name.toLowerCase();
-                      const fill = COLORS[colorKey] ?? COLORS.otros;
+                      const colorKey = entry.key.toLowerCase();
+                      const fill = COLORS[colorKey] ?? '#0f172a';
                       return <Cell key={`cell-${index}`} fill={fill} />;
                     })}
                   </Pie>
@@ -374,42 +458,6 @@ export const BalancePage = () => {
 
 export default BalancePage;
 
-const loadBalanceHistory = async (mes: string, sucursalId: string | null) => {
-  const months = buildMonthSequence(mes, 6);
-  const history: BalanceRow[][] = [];
-  for (const month of months) {
-    try {
-      const data =
-        (await rpcWithFallback<BalanceRawRow[]>(
-          'api_get_balance',
-          buildVariants(month, sucursalId)
-        )) ?? [];
-      history.push(normalize(data));
-    } catch (err) {
-      console.warn('Error cargando historial de balance para', month, err);
-    }
-  }
-  return history;
-};
-
-const buildMonthSequence = (mes: string, limit: number) => {
-  const dates: string[] = [];
-  try {
-    const base = new Date(mes);
-    if (Number.isNaN(base.getTime())) return dates;
-    for (let index = limit - 1; index >= 0; index -= 1) {
-      const copy = new Date(base);
-      copy.setMonth(copy.getMonth() - index);
-      const yyyy = copy.getFullYear();
-      const mm = String(copy.getMonth() + 1).padStart(2, '0');
-      dates.push(`${yyyy}-${mm}-01`);
-    }
-  } catch (err) {
-    console.warn('Error generando secuencia de meses', err);
-  }
-  return dates;
-};
-
 const EmptyState = ({ message }: { message: string }) => (
   <div className="flex h-full flex-col items-center justify-center gap-2 px-6 py-8 text-center text-sm text-slate-500">
     <Download className="h-5 w-5 text-slate-400" />
@@ -418,15 +466,11 @@ const EmptyState = ({ message }: { message: string }) => (
 );
 
 const ErrorState = ({ message }: { message: string }) => (
-  <div className="px-6 pb-6 text-center text-sm text-rose-600">{message}</div>
+  <div className="px-6 py-6 text-center text-sm text-rose-600">{message}</div>
 );
 
 const formatAxisCurrency = (value: number) => {
-  if (Math.abs(value) >= 1_000_000) {
-    return `${(value / 1_000_000).toFixed(1)}M`;
-  }
-  if (Math.abs(value) >= 1_000) {
-    return `${(value / 1_000).toFixed(0)}k`;
-  }
+  if (Math.abs(value) >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
+  if (Math.abs(value) >= 1_000) return `${(value / 1_000).toFixed(0)}k`;
   return value.toFixed(0);
 };

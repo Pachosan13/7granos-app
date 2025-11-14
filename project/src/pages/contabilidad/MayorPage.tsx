@@ -2,12 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Download, FileSpreadsheet, Filter, Loader2, Search } from 'lucide-react';
 import { supabase } from '../../lib/supabase';
 import { useAuthOrg } from '../../context/AuthOrgContext';
-import {
-  formatDateIso,
-  rpcWithFallback,
-  toNumber,
-  type RpcParams,
-} from './rpcHelpers';
+import { formatDateIso, toNumber } from './rpcHelpers';
 import { formatCurrencyUSD } from '../../lib/format';
 import { exportToCsv, exportToXlsx, formatNumber } from './exportUtils';
 
@@ -20,16 +15,11 @@ interface AccountOption {
 interface MayorRawRow {
   fecha?: string;
   journal_date?: string;
-  journalDate?: string;
-  date?: string;
-  doc_id?: string;
-  docId?: string;
-  journal_id?: string;
   account_code?: string;
-  accountCode?: string;
+  cuenta_codigo?: string;
   cuenta?: string;
   cuenta_nombre?: string;
-  cuentaNombre?: string;
+  descripcion?: string;
   description?: string;
   concepto?: string;
   debe?: number | string | null;
@@ -40,7 +30,8 @@ interface MayorRawRow {
   credito?: number | string | null;
   sucursal_id?: string | null;
   sucursalId?: string | null;
-  sucursal?: string | null;
+  doc_id?: string | null;
+  journal_id?: string | null;
 }
 
 interface MayorRow {
@@ -66,20 +57,6 @@ const getErrorMessage = (error: unknown) => {
   if (typeof error === 'string') return error;
   return 'Error desconocido';
 };
-
-const buildVariants = (
-  desde: string,
-  hasta: string,
-  sucursalId: string | null,
-  cuenta: string | null
-): RpcParams[] => [
-  { p_desde: desde, p_hasta: hasta, p_sucursal_id: sucursalId, p_cuenta: cuenta },
-  { desde, hasta, p_sucursal_id: sucursalId, p_cuenta: cuenta },
-  { desde, hasta, sucursal_id: sucursalId, p_cuenta: cuenta },
-  { desde, hasta, sucursal_id: sucursalId, cuenta },
-  { desde, hasta, sucursalId, cuenta },
-  { p_desde: desde, p_hasta: hasta, sucursal_id: sucursalId, cuenta },
-];
 
 export const MayorPage = () => {
   const { sucursales, sucursalSeleccionada } = useAuthOrg();
@@ -136,35 +113,42 @@ export const MayorPage = () => {
     try {
       const sucursalId = selectedSucursal || null;
       const cuenta = accountQuery ? accountQuery.trim() : null;
-      const data =
-        (await rpcWithFallback<MayorRawRow[]>(
-          'api_get_mayor',
-          buildVariants(desde, hasta, sucursalId, cuenta)
-        )) ?? [];
 
-      const sorted = [...data]
+      const query = supabase
+        .from('v_cont_mayor_movimientos')
+        .select(
+          'fecha, cuenta_codigo, cuenta_nombre, descripcion, concepto, debe, haber, sucursal_id, doc_id, journal_id, account_code'
+        )
+        .gte('fecha', desde)
+        .lte('fecha', hasta)
+        .order('cuenta_codigo', { ascending: true })
+        .order('fecha', { ascending: true });
+
+      if (sucursalId) {
+        query.eq('sucursal_id', sucursalId);
+      }
+
+      if (cuenta) {
+        query.eq('cuenta_codigo', cuenta);
+      }
+
+      const { data, error: fetchError } = await query;
+      if (fetchError) {
+        throw fetchError;
+      }
+
+      const normalized = (data as MayorRawRow[] | null) ?? [];
+      const mapped = normalized
         .map<MayorRow>((row) => {
-          const fecha =
-            row.fecha ||
-            row.journal_date ||
-            row.journalDate ||
-            row.date ||
-            '';
+          const fecha = row.fecha || row.journal_date || '';
           const cuentaCodigo =
-            row.cuenta ||
-            row.account_code ||
-            row.accountCode ||
-            '';
-          const cuentaNombre =
-            row.cuenta_nombre ||
-            row.cuentaNombre ||
-            '';
-          const descripcion = row.description || row.concepto || '';
+            row.cuenta_codigo || row.account_code || row.cuenta || '';
+          const cuentaNombre = row.cuenta_nombre || '';
+          const descripcion = row.descripcion || row.description || row.concepto || '';
           const debe = toNumber(row.debe ?? row.debit ?? row.debito);
           const haber = toNumber(row.haber ?? row.credit ?? row.credito);
-          const sucursal =
-            (row.sucursal_id ?? row.sucursalId ?? row.sucursal ?? null) ?? null;
-          const docId = row.doc_id || row.docId || row.journal_id || null;
+          const sucursal = (row.sucursal_id ?? row.sucursalId ?? null) ?? null;
+          const docId = row.doc_id || row.journal_id || null;
           return {
             fecha: fecha ? fecha.slice(0, 10) : '',
             cuenta: cuentaCodigo,
@@ -177,17 +161,20 @@ export const MayorPage = () => {
             saldo: 0,
           };
         })
-        .sort((a, b) => a.fecha.localeCompare(b.fecha) || a.cuenta.localeCompare(b.cuenta));
+        .sort((a, b) => a.cuenta.localeCompare(b.cuenta) || a.fecha.localeCompare(b.fecha));
 
-      let running = 0;
-      const withBalance = sorted.map((row) => {
-        running += row.debe - row.haber;
-        return { ...row, saldo: running };
+      const runningByAccount = new Map<string, number>();
+      const withBalance = mapped.map((row) => {
+        const key = row.cuenta || 'SIN-CUENTA';
+        const prev = runningByAccount.get(key) ?? 0;
+        const next = prev + (row.debe - row.haber);
+        runningByAccount.set(key, next);
+        return { ...row, saldo: next };
       });
 
       setRows(withBalance);
     } catch (err: unknown) {
-      console.error('Error cargando api_get_mayor', err);
+      console.error('Error cargando Libro Mayor', err);
       setRows([]);
       setError(getErrorMessage(err) ?? 'No fue posible obtener el libro mayor.');
     } finally {

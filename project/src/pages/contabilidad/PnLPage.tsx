@@ -14,11 +14,9 @@ import {
 } from 'lucide-react';
 import { useAuthOrg } from '../../context/AuthOrgContext';
 import { formatCurrencyUSD } from '../../lib/format';
-import { supabase } from '../../lib/supabase';
 import {
   formatDateIso,
   rpcWithFallback,
-  toNumber,
   type RpcParams,
 } from './rpcHelpers';
 import { exportToCsv, exportToXlsx, formatNumber } from './exportUtils';
@@ -40,26 +38,22 @@ import {
   LineChart,
   Line,
 } from 'recharts';
+import {
+  fetchAccountCatalog,
+  fetchJournalsInRange,
+  getMonthBounds,
+  getMonthSequence,
+  monthKeyFromDate,
+  normalizeAccountType,
+  type AccountCatalogEntry,
+} from './glData';
 
 /* ────────────────────────────────────────────────────────────────────────────
    Tipos
 --------------------------------------------------------------------------- */
-interface PnLRawRow {
-  mes?: string;                 // 'YYYY-MM-01'
-  periodo?: string;             // alias posible
-  sucursal_id?: string | null;
-  sucursalId?: string | null;   // variante defensiva
-  ingresos?: number | string | null;
-  cogs?: number | string | null;
-  gastos_totales?: number | string | null;
-  gastos?: number | string | null;
-  utilidad_operativa?: number | string | null;
-  utilidad?: number | string | null;
-}
-
 interface PnLRow {
-  mes: string;                  // 'YYYY-MM-01'
-  sucursalId: string | null;    // uuid o null cuando total
+  mes: string; // 'YYYY-MM-01'
+  sucursalId: string | null; // uuid o null cuando total
   ingresos: number;
   cogs: number;
   gastosTotales: number;
@@ -73,6 +67,12 @@ interface PostJournalResult {
   journalId?: string;
 }
 
+type AccountTypeKey = 'income' | 'cogs' | 'expense' | '';
+
+const INCOME_TYPES = new Set(['income', 'ingreso', 'revenue', 'revenues']);
+const COGS_TYPES = new Set(['cogs', 'cost_of_goods', 'costodeventa', 'costo', 'cost']);
+const EXPENSE_TYPES = new Set(['expense', 'expenses', 'gasto', 'gastos', 'operating_expense']);
+
 /* ────────────────────────────────────────────────────────────────────────────
    Helpers base
 --------------------------------------------------------------------------- */
@@ -82,14 +82,6 @@ const getErrorMessage = (error: unknown) => {
   return 'Error desconocido';
 };
 
-const buildVariants = (mes: string, sucursalId: string | null): RpcParams[] => [
-  { p_mes: mes, p_sucursal_id: sucursalId },
-  { mes, p_sucursal_id: sucursalId },
-  { mes, sucursal_id: sucursalId },
-  { p_mes: mes, sucursal_id: sucursalId },
-  { mes, sucursalId },
-];
-
 const buildPostVariants = (mes: string, sucursalId: string | null): RpcParams[] => [
   { p_mes: mes, p_sucursal_id: sucursalId },
   { mes, p_sucursal_id: sucursalId },
@@ -98,126 +90,69 @@ const buildPostVariants = (mes: string, sucursalId: string | null): RpcParams[] 
   { mes, sucursalId },
 ];
 
-const normalize = (rows: PnLRawRow[]): PnLRow[] =>
-  rows.map((row) => {
-    const mes = row.mes || row.periodo || '';
-    const sucursalId =
-      (row.sucursal_id ?? row.sucursalId ?? null) !== undefined
-        ? (row.sucursal_id ?? row.sucursalId ?? null)
-        : null;
+const DEFAULT_ROW: PnLRow = {
+  mes: '',
+  sucursalId: null,
+  ingresos: 0,
+  cogs: 0,
+  gastosTotales: 0,
+  utilidadOperativa: 0,
+};
 
-    const ingresos = toNumber(row.ingresos);
-    const cogs = toNumber(row.cogs);
-    const gastosTotales = toNumber(row.gastos_totales ?? row.gastos ?? 0);
-    const utilidadOperativa = toNumber(
-      row.utilidad_operativa ?? row.utilidad ?? ingresos - cogs - gastosTotales
-    );
+const mapAccountType = (entry: AccountCatalogEntry | undefined): AccountTypeKey => {
+  const normalized = normalizeAccountType(entry?.type);
+  if (INCOME_TYPES.has(normalized)) return 'income';
+  if (COGS_TYPES.has(normalized)) return 'cogs';
+  if (EXPENSE_TYPES.has(normalized)) return 'expense';
+  return '';
+};
 
-    return {
-      mes: mes ? mes.slice(0, 10) : '',
-      sucursalId: sucursalId ? String(sucursalId) : null,
-      ingresos,
-      cogs,
-      gastosTotales,
-      utilidadOperativa,
-    };
+const computePnLAggregates = (
+  monthKeys: string[],
+  journals: Awaited<ReturnType<typeof fetchJournalsInRange>>,
+  catalog: Record<string, AccountCatalogEntry>,
+  sucursalId: string | null
+): PnLRow[] => {
+  const base = new Map<string, PnLRow>();
+  monthKeys.forEach((month) => {
+    base.set(month, {
+      mes: month,
+      sucursalId,
+      ingresos: 0,
+      cogs: 0,
+      gastosTotales: 0,
+      utilidadOperativa: 0,
+    });
   });
 
-const aggregate = (rows: PnLRow[]): PnLRow => {
-  const agg = rows.reduce(
-    (acc, r) => {
-      acc.ingresos += r.ingresos || 0;
-      acc.cogs += r.cogs || 0;
-      acc.gastosTotales += r.gastosTotales || 0;
-      acc.utilidadOperativa += r.utilidadOperativa || 0;
-      return acc;
-    },
-    { ingresos: 0, cogs: 0, gastosTotales: 0, utilidadOperativa: 0 }
-  );
-  return {
-    mes: rows[0]?.mes ?? '',
-    sucursalId: null,
-    ...agg,
-  };
+  journals.forEach((journal) => {
+    const monthKey = monthKeyFromDate(journal.journal_date);
+    const target = base.get(monthKey);
+    if (!target) return;
+    journal.lines.forEach((line) => {
+      const account = catalog[line.account_id ?? ''];
+      const type = mapAccountType(account);
+      if (!type) return;
+      const debit = line.debit ?? 0;
+      const credit = line.credit ?? 0;
+      if (type === 'income') {
+        target.ingresos += credit - debit;
+      } else if (type === 'cogs') {
+        target.cogs += debit - credit;
+      } else if (type === 'expense') {
+        target.gastosTotales += debit - credit;
+      }
+    });
+  });
+
+  return Array.from(base.values()).map((row) => ({
+    ...row,
+    ingresos: row.ingresos,
+    cogs: row.cogs,
+    gastosTotales: row.gastosTotales,
+    utilidadOperativa: row.ingresos - row.cogs - row.gastosTotales,
+  }));
 };
-
-const getPreviousMonth = (isoDate: string) => {
-  try {
-    const d = new Date(isoDate);
-    if (Number.isNaN(d.getTime())) return null;
-    d.setMonth(d.getMonth() - 1);
-    const yyyy = d.getFullYear();
-    const mm = String(d.getMonth() + 1).padStart(2, '0');
-    return `${yyyy}-${mm}-01`;
-  } catch {
-    return null;
-  }
-};
-
-const getNetMargin = (row: PnLRow) =>
-  !row.ingresos ? 0 : (row.utilidadOperativa / row.ingresos) * 100;
-
-/* ────────────────────────────────────────────────────────────────────────────
-   Capa de datos vía RPC (RLS-safe)
---------------------------------------------------------------------------- */
-/** Lee P&L de un mes. Si sucursalId === null, trae todas las sucursales. */
-async function rpcGetPyg(mesISO: string, sucursalId: string | null) {
-  const data =
-    (await rpcWithFallback<PnLRawRow[]>(
-      'api_get_pyg',
-      buildVariants(mesISO, sucursalId)
-    )) ?? [];
-  return normalize(data);
-}
-
-/** Devuelve un total agregado para “todas las sucursales”. */
-async function fetchTotalsAll(mesISO: string): Promise<PnLRow | null> {
-  const rows = await rpcGetPyg(mesISO, null);
-  if (!rows.length) return null;
-  return aggregate(rows);
-}
-
-/** Devuelve el histórico de los últimos N meses usando solo RPC. */
-async function fetchHistoryRPC(
-  currentMesISO: string,
-  sucursalId: string | null,
-  n: number = 6
-): Promise<PnLRow[]> {
-  // currentMesISO es 'YYYY-MM-01'
-  const base = new Date(currentMesISO);
-  if (Number.isNaN(base.getTime())) return [];
-
-  const months: string[] = [];
-  const d = new Date(base);
-  // queremos n meses hacia atrás incluyendo el actual
-  for (let i = n - 1; i >= 0; i--) {
-    const t = new Date(base);
-    t.setMonth(base.getMonth() - i);
-    const yyyy = t.getFullYear();
-    const mm = String(t.getMonth() + 1).padStart(2, '0');
-    months.push(`${yyyy}-${mm}-01`);
-  }
-
-  const out: PnLRow[] = [];
-  for (const m of months) {
-    const rows = await rpcGetPyg(m, sucursalId);
-    if (!rows.length) {
-      // Sin datos: devolvemos cero
-      out.push({
-        mes: m,
-        sucursalId,
-        ingresos: 0,
-        cogs: 0,
-        gastosTotales: 0,
-        utilidadOperativa: 0,
-      });
-      continue;
-    }
-    // si piden “todas”: agregamos; si piden sucursal: suele venir una fila
-    out.push(sucursalId ? rows[0] : aggregate(rows));
-  }
-  return out;
-}
 
 /* ────────────────────────────────────────────────────────────────────────────
    Componente principal
@@ -233,6 +168,7 @@ export const PnLPage = () => {
   const [error, setError] = useState<string | null>(null);
   const [posting, setPosting] = useState(false);
   const [toasts, setToasts] = useState<ToastItem[]>([]);
+  const [catalog, setCatalog] = useState<Record<string, AccountCatalogEntry>>({});
 
   useEffect(() => {
     const today = new Date();
@@ -244,48 +180,60 @@ export const PnLPage = () => {
     if (sucursalSeleccionada?.id) setSelectedSucursal(String(sucursalSeleccionada.id));
   }, [sucursalSeleccionada?.id]);
 
-  /* ────────────────────────────────────────────────────────────────────────────
-     Carga de datos (todo por RPC para evitar RLS)
-  --------------------------------------------------------------------------- */
+  const ensureCatalog = useCallback(async () => {
+    if (Object.keys(catalog).length > 0) return catalog;
+    const data = await fetchAccountCatalog();
+    setCatalog(data);
+    return data;
+  }, [catalog]);
+
   const fetchData = useCallback(async () => {
     if (!mes) return;
     setLoading(true);
     setError(null);
+
     const filterMes = `${mes}-01`;
     const sucursalId = selectedSucursal || null;
+    const historyMonths = getMonthSequence(filterMes, 6);
+    if (historyMonths.length === 0) {
+      setRows([]);
+      setHistoryRows([]);
+      setPreviousRow(null);
+      setError('Mes inválido');
+      setLoading(false);
+      return;
+    }
+
+    const historyStart = historyMonths[0];
+    const { end: historyEnd } = getMonthBounds(historyMonths[historyMonths.length - 1]);
 
     try {
-      if (sucursalId) {
-        // Sucursal específica
-        const data = await rpcGetPyg(filterMes, sucursalId);
-        setRows(data);
+      const [catalogData, journals] = await Promise.all([
+        ensureCatalog(),
+        fetchJournalsInRange({ from: historyStart, to: historyEnd, sucursalId }),
+      ]);
 
-        const prevMonth = getPreviousMonth(filterMes);
-        if (prevMonth) {
-          const prev = await rpcGetPyg(prevMonth, sucursalId);
-          setPreviousRow(prev[0] ?? null);
-        } else {
-          setPreviousRow(null);
-        }
-      } else {
-        // Todas las sucursales → total agregado por RPC
-        const totalAll = await fetchTotalsAll(filterMes);
-        setRows(totalAll ? [totalAll] : []);
+      const aggregates = computePnLAggregates(historyMonths, journals, catalogData, sucursalId);
+      setHistoryRows(aggregates);
 
-        const prevMonth = getPreviousMonth(filterMes);
-        if (prevMonth) {
-          const prevTotal = await fetchTotalsAll(prevMonth);
-          setPreviousRow(prevTotal);
-        } else {
-          setPreviousRow(null);
-        }
-      }
+      const current = aggregates.find((row) => row.mes === filterMes) ?? {
+        ...DEFAULT_ROW,
+        mes: filterMes,
+        sucursalId,
+      };
+      const prevIndex = historyMonths.indexOf(filterMes) - 1;
+      const previous = prevIndex >= 0 ? aggregates[prevIndex] ?? null : null;
 
-      // Historial (últimos 6) por RPC
-      const hist = await fetchHistoryRPC(filterMes, sucursalId, 6);
-      setHistoryRows(hist);
-    } catch (err: unknown) {
-      console.error('Error cargando P&L', err);
+      const hasData =
+        journals.some((journal) => monthKeyFromDate(journal.journal_date) === filterMes) ||
+        Math.abs(current.ingresos) > 0 ||
+        Math.abs(current.cogs) > 0 ||
+        Math.abs(current.gastosTotales) > 0;
+
+      setRows(hasData ? [current] : []);
+      setPreviousRow(previous);
+    } catch (err) {
+      console.error('Error cargando Estado de Resultados', err);
       setRows([]);
       setPreviousRow(null);
       setHistoryRows([]);
@@ -293,7 +241,7 @@ export const PnLPage = () => {
     } finally {
       setLoading(false);
     }
-  }, [mes, selectedSucursal]);
+  }, [ensureCatalog, mes, selectedSucursal]);
 
   useEffect(() => {
     fetchData();
@@ -304,14 +252,11 @@ export const PnLPage = () => {
   const totals = useMemo(
     () =>
       currentRow ?? {
-        mes: '',
-        sucursalId: null,
-        ingresos: 0,
-        cogs: 0,
-        gastosTotales: 0,
-        utilidadOperativa: 0,
+        ...DEFAULT_ROW,
+        mes: mes ? `${mes}-01` : '',
+        sucursalId: selectedSucursal || null,
       },
-    [currentRow]
+    [currentRow, mes, selectedSucursal]
   );
 
   const netMargin = useMemo(() => {
@@ -332,18 +277,20 @@ export const PnLPage = () => {
       cogs: build(currentRow?.cogs ?? 0, previous?.cogs ?? 0),
       gastos: build(currentRow?.gastosTotales ?? 0, previous?.gastosTotales ?? 0),
       utilidad: build(currentRow?.utilidadOperativa ?? 0, previous?.utilidadOperativa ?? 0),
-      margen: build(netMargin, previous ? getNetMargin(previous) : 0),
+      margen: build(netMargin, previous && previous.ingresos !== 0 ? (previous.utilidadOperativa / previous.ingresos) * 100 : 0),
     };
   }, [currentRow, netMargin, previousRow]);
 
   const historyData = useMemo(
     () =>
-      historyRows.map((row) => ({
-        mes: formatDateIso(row.mes),
-        ingresos: row.ingresos,
-        cogs: row.cogs,
-        utilidad: row.utilidadOperativa,
-      })),
+      historyRows
+        .map((row) => ({
+          mes: formatDateIso(row.mes),
+          ingresos: row.ingresos,
+          cogs: row.cogs,
+          utilidad: row.utilidadOperativa,
+        }))
+        .filter((row) => row.mes),
     [historyRows]
   );
 
@@ -373,8 +320,7 @@ export const PnLPage = () => {
         'api_post_journal_auto',
         buildPostVariants(filterMes, sucursalId)
       );
-      const success =
-        result?.ok ?? Boolean(result?.journal_id ?? result?.journalId);
+      const success = result?.ok ?? Boolean(result?.journal_id ?? result?.journalId);
       if (success) {
         pushToast({
           tone: 'success',
@@ -666,14 +612,6 @@ export const PnLPage = () => {
 export default PnLPage;
 
 /* ────────────────────────────────────────────────────────────────────────────
-   Historial (RPC)
---------------------------------------------------------------------------- */
-const loadHistory = async (sucursalId: string | null, currentMesISO: string) => {
-  // Mantengo una firma compatible, pero internamente usamos la versión RPC
-  return fetchHistoryRPC(currentMesISO, sucursalId, 6);
-};
-
-/* ────────────────────────────────────────────────────────────────────────────
    UI helpers
 --------------------------------------------------------------------------- */
 interface Comparison {
@@ -740,8 +678,7 @@ const ComparisonPill = ({
       ? 'text-emerald-700 bg-emerald-50'
       : 'text-rose-700 bg-rose-50';
   const Icon = isPositive ? ArrowUpRight : ArrowDownRight;
-  const formatValue = (value: number) =>
-    isMargin ? `${value.toFixed(1)}%` : formatCurrencyUSD(value);
+  const formatValue = (value: number) => (isMargin ? `${value.toFixed(1)}%` : formatCurrencyUSD(value));
 
   return (
     <div className={`mt-3 inline-flex items-center gap-2 rounded-full px-3 py-1 text-xs font-medium ${tone}`}>
