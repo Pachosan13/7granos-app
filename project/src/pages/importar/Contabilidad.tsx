@@ -9,6 +9,7 @@ import { saveUpload, logSync, updateSyncCursor } from '../../lib/storage/saveUpl
 import { fetchVentas, fetchCompras } from '../../services/invu';
 import { InlineSucursalSelector } from '../../components/InlineSucursalSelector';
 import { Layout } from '../../components/Layout';
+import { supabase } from '../../lib/supabase';
 
 type TabType = 'ventas' | 'compras';
 

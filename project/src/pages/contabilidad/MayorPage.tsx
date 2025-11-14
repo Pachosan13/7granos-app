@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Download, FileSpreadsheet, Filter, Loader2, Search } from 'lucide-react';
-import { supabase } from '../../lib/supabase';
 import { useAuthOrg } from '../../context/AuthOrgContext';
 import {
   formatDateIso,
@@ -10,12 +9,7 @@ import {
 } from './rpcHelpers';
 import { formatCurrencyUSD } from '../../lib/format';
 import { exportToCsv, exportToXlsx, formatNumber } from './exportUtils';
-
-interface AccountOption {
-  id: string;
-  code: string;
-  name: string;
-}
+import { useContAccounts } from './hooks';
 
 interface MayorRawRow {
   fecha?: string;
@@ -55,12 +49,6 @@ interface MayorRow {
   saldo: number;
 }
 
-type ContAccountRow = {
-  id?: string | number;
-  code?: string | number | null;
-  name?: string | null;
-};
-
 const getErrorMessage = (error: unknown) => {
   if (error instanceof Error) return error.message;
   if (typeof error === 'string') return error;
@@ -81,16 +69,20 @@ const buildVariants = (
   { p_desde: desde, p_hasta: hasta, sucursal_id: sucursalId, cuenta },
 ];
 
-export const MayorPage = () => {
+export interface MayorViewProps {
+  embedded?: boolean;
+}
+
+export const MayorView = ({ embedded = false }: MayorViewProps) => {
   const { sucursales, sucursalSeleccionada } = useAuthOrg();
   const [desde, setDesde] = useState('');
   const [hasta, setHasta] = useState('');
   const [selectedSucursal, setSelectedSucursal] = useState<string>('');
   const [accountQuery, setAccountQuery] = useState('');
-  const [accounts, setAccounts] = useState<AccountOption[]>([]);
   const [rows, setRows] = useState<MayorRow[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const { accounts, loading: accountsLoading, error: accountsError } = useContAccounts();
 
   useEffect(() => {
     const today = new Date();
@@ -106,28 +98,6 @@ export const MayorPage = () => {
       setSelectedSucursal(String(sucursalSeleccionada.id));
     }
   }, [sucursalSeleccionada?.id]);
-
-  useEffect(() => {
-    (async () => {
-      const { data, error: accountsError } = await supabase
-        .from('cont_account')
-        .select('id,code,name')
-        .eq('is_active', true)
-        .order('code');
-      if (accountsError) {
-        console.warn('[contabilidad] error cargando cuentas', accountsError);
-        return;
-      }
-      const rows = (data as ContAccountRow[] | null) ?? [];
-      setAccounts(
-        rows.map((row) => ({
-          id: String(row.id ?? ''),
-          code: row.code ? String(row.code) : '',
-          name: row.name ? String(row.name) : '',
-        }))
-      );
-    })();
-  }, []);
 
   const fetchMayor = useCallback(async () => {
     if (!desde || !hasta) return;
@@ -243,33 +213,35 @@ export const MayorPage = () => {
 
   return (
     <div className="space-y-6">
-      <header className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
-        <div>
-          <h1 className="text-3xl font-bold text-bean">Libro Mayor</h1>
-          <p className="text-slate7g">Movimientos contables consolidados por sucursal.</p>
-          <p className="text-xs uppercase tracking-wide text-slate-500">
-            {rows.length} movimientos visibles
-          </p>
-        </div>
-        <div className="flex flex-wrap items-center gap-3">
-          <button
-            type="button"
-            onClick={handleExportXlsx}
-            disabled={rows.length === 0}
-            className="inline-flex items-center gap-2 rounded-xl bg-bean px-4 py-2 text-white shadow disabled:opacity-60"
-          >
-            <FileSpreadsheet size={16} /> Exportar XLSX
-          </button>
-          <button
-            type="button"
-            onClick={handleExportCsv}
-            disabled={rows.length === 0}
-            className="inline-flex items-center gap-2 rounded-xl border border-sand px-4 py-2 text-sm text-bean shadow-sm disabled:opacity-60"
-          >
-            <Download size={16} /> CSV
-          </button>
-        </div>
-      </header>
+      {!embedded && (
+        <header className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
+          <div>
+            <h1 className="text-3xl font-bold text-bean">Libro Mayor</h1>
+            <p className="text-slate7g">Movimientos contables consolidados por sucursal.</p>
+            <p className="text-xs uppercase tracking-wide text-slate-500">
+              {rows.length} movimientos visibles
+            </p>
+          </div>
+          <div className="flex flex-wrap items-center gap-3">
+            <button
+              type="button"
+              onClick={handleExportXlsx}
+              disabled={rows.length === 0}
+              className="inline-flex items-center gap-2 rounded-xl bg-bean px-4 py-2 text-white shadow disabled:opacity-60"
+            >
+              <FileSpreadsheet size={16} /> Exportar XLSX
+            </button>
+            <button
+              type="button"
+              onClick={handleExportCsv}
+              disabled={rows.length === 0}
+              className="inline-flex items-center gap-2 rounded-xl border border-sand px-4 py-2 text-sm text-bean shadow-sm disabled:opacity-60"
+            >
+              <Download size={16} /> CSV
+            </button>
+          </div>
+        </header>
+      )}
 
       <section className="rounded-2xl border border-sand bg-white p-4 shadow-sm">
         <div className="grid gap-4 md:grid-cols-5">
@@ -330,7 +302,8 @@ export const MayorPage = () => {
         <div className="mt-4 flex flex-wrap items-center gap-3 text-xs text-slate-500">
           <Filter size={14} />
           <span>
-            {sucursales.length} sucursales disponibles • {accounts.length} cuentas activas
+            {sucursales.length} sucursales disponibles •{' '}
+            {accountsLoading ? 'cargando cuentas…' : `${accounts.length} cuentas activas`}
           </span>
           <button
             type="button"
@@ -340,6 +313,11 @@ export const MayorPage = () => {
             Actualizar
           </button>
         </div>
+        {accountsError && (
+          <div className="mt-4 rounded-lg border border-amber-400 bg-amber-50 px-3 py-2 text-sm text-amber-700">
+            {accountsError}
+          </div>
+        )}
       </section>
 
       <section className="rounded-2xl border border-sand bg-white shadow-sm">
@@ -404,5 +382,7 @@ export const MayorPage = () => {
     </div>
   );
 };
+
+export const MayorPage = () => <MayorView embedded={false} />;
 
 export default MayorPage;
