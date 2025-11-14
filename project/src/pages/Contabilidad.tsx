@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useMemo, useState, type ComponentType } from 'react';
 import {
   LayoutDashboard,
   BookOpen,
@@ -22,7 +22,7 @@ type TabType = 'dashboard' | 'diario' | 'mayor' | 'auxiliares' | 'reportes' | 'a
 const ALL_TABS: Array<{
   id: TabType;
   label: string;
-  icon: React.ComponentType<{ size?: number; className?: string }>;
+  icon: ComponentType<{ size?: number; className?: string }>;
   requiresAccounting?: boolean;
 }> = [
   { id: 'dashboard',  label: 'Dashboard',  icon: LayoutDashboard },
@@ -46,7 +46,11 @@ export const Contabilidad = () => {
 
   const handleTabChange = (tab: TabType) => {
     setActiveTab(tab);
-    setSearchParams({ tab });
+    setSearchParams((prev) => {
+      const params = new URLSearchParams(prev);
+      params.set('tab', tab);
+      return params;
+    });
   };
 
   // Roles permitidos para ver "Admin"
@@ -84,7 +88,7 @@ export const Contabilidad = () => {
                   <button
                     key={tab.id}
                     onClick={() => handleTabChange(tab.id)}
-                    className={`flex items-center space-x-2 px-6 py-3 rounded-xl font-semibold transition-all duration-200 whitespace-nowrap ${
+                    className={`flex items-center space-x-2 whitespace-nowrap px-6 py-3 rounded-xl font-semibold transition-all duration-200 ${
                       isActive ? 'bg-accent text-white shadow-md' : 'text-slate-700 hover:text-bean hover:bg-off/50'
                     }`}
                     aria-current={isActive ? 'page' : undefined}
