@@ -1,26 +1,24 @@
 # INVU COGS Integration Notes
 
-## Nuevas vistas y funciones
-- `public.v_invu_cogs_diario_sucursal`: vista diaria por sucursal que calcula el costo real a partir de `invu_ventas.raw->'items'` y sus modificadores.
-- `public.cont_resolve_auto_account(text[])`: helper para obtener códigos de cuenta desde `cont_account_auto_map`.
-- `public.cont_apply_invu_cogs_to_sales_journal(uuid, boolean)`: aplica (o refresca) COGS reales a un journal de ventas existente.
-- `public.cont_apply_invu_cogs_for_range(date, date, uuid)`: recorre un rango de fechas y aplica COGS a todos los journals de ventas.
-- `public.cont_apply_invu_cogs_for_month(text, uuid)`: envoltura mensual usada por los RPC.
-- `public.cont_post_sales_from_norm_view(...)`: ahora es un wrapper que llama a la versión original y, después de postear ventas, sincroniza los COGS reales usando `cont_apply_invu_cogs_for_month`.
+## Fuente de datos
+- `public.vw_cogs_diarios` expone el costo real diario por sucursal calculado desde `invu_ventas.raw`.
+- `public.v_cogs_dia_norm` normaliza esa vista y es la fuente directa para el posteo.
 
-## Cuentas utilizadas
-- COGS: se resuelve con `cont_account_auto_map` (`ventas_cogs`, `ventas_cogs_account`, `cogs_ventas`, `ventas_costo`). Si no existe, cae al primer `cont_account` de tipo `cogs` (o `expense` como respaldo).
-- Inventario: se resuelve con `cont_account_auto_map` (`ventas_inventario`, `inventario`, `inventory`, `ventas_inventory`). Como respaldo usa la primera cuenta `asset` cuyo nombre contiene "invent".
+## Posteo al GL nuevo
+- `public.cont_post_cogs_from_inv(desde, hasta, sucursal_id)` ahora inserta los COGS en `contabilidad_journal` y `contabilidad_journal_line`.
+- Cada día genera (o actualiza) un journal `source = 'cogs'` con dos líneas balanceadas:
+  - Débito a `cont_account.code = '5.1.1'` (COGS). Si no existe, usa la primera cuenta con `type = 'cogs'`.
+  - Crédito a `cont_account.code = '1.3.1'` (Inventario). Si no existe, cae a la primera cuenta `type = 'asset'`.
+- El meta de las líneas marca `origin = 'cont_post_cogs_from_inv'` para facilitar reprocesos idempotentes.
 
-## Cómo re-postear COGS para un mes
-Ejecutar desde SQL (ajustar mes/sucursal según necesidad):
+## Reprocesar un rango
+Ejecutar desde SQL:
 ```sql
-select public.cont_apply_invu_cogs_for_month('2025-10', null);
+select *
+from public.cont_post_cogs_from_inv(
+  date '2025-11-01',
+  date '2025-11-30',
+  null
+);
 ```
-
-Para un rango específico:
-```sql
-select public.cont_apply_invu_cogs_for_range('2025-10-01', '2025-10-31', '00000000-0000-0000-0000-000000000000');
-```
-
-El wrapper de `cont_post_sales_from_norm_view` ejecuta automáticamente estas funciones después de postear ventas, por lo que basta con volver a correr el flujo mensual desde Contabilidad PRO para recalcular COGS reales.
+Esto recalcula (o crea) los journals `source = 'cogs'` para todas las sucursales en el rango indicado.
