@@ -86,6 +86,56 @@ export const getMonthSequence = (baseMonthISO: string, count: number): string[] 
   return out;
 };
 
+export interface MonthlyPnlResult {
+  ingresos: number;
+  cogs: number;
+  gastos: number;
+  utilidad: number;
+}
+
+const toMonthDate = (month: string): string => {
+  if (!month) return month;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(month)) {
+    return month;
+  }
+  if (/^\d{4}-\d{2}$/.test(month)) {
+    return `${month}-01`;
+  }
+  const parsed = new Date(month);
+  if (Number.isNaN(parsed.getTime())) {
+    return month;
+  }
+  const yyyy = parsed.getUTCFullYear();
+  const mm = String(parsed.getUTCMonth() + 1).padStart(2, '0');
+  return `${yyyy}-${mm}-01`;
+};
+
+export async function fetchMonthlyPnl(params: {
+  month: string;
+  sucursalId?: string | null;
+}): Promise<MonthlyPnlResult> {
+  const mes = toMonthDate(params.month);
+  const payload: Record<string, string | null> = { mes };
+  if (params.sucursalId) {
+    payload.sucursal_id = params.sucursalId;
+  }
+
+  const { data, error } = await supabase.rpc('rpc_gl_pnl_monthly', payload);
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  const row = Array.isArray(data) && data.length > 0 ? (data[0] as Partial<MonthlyPnlResult>) : null;
+
+  return {
+    ingresos: toNumber(row?.ingresos),
+    cogs: toNumber(row?.cogs),
+    gastos: toNumber(row?.gastos),
+    utilidad: toNumber(row?.utilidad),
+  };
+}
+
 export async function fetchAccountCatalog(): Promise<Record<string, AccountCatalogEntry>> {
   const { data, error } = await supabase
     .from('cont_account')

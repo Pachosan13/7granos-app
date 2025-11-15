@@ -38,15 +38,7 @@ import {
   LineChart,
   Line,
 } from 'recharts';
-import {
-  fetchAccountCatalog,
-  fetchJournalsInRange,
-  getMonthBounds,
-  getMonthSequence,
-  monthKeyFromDate,
-  normalizeAccountType,
-  type AccountCatalogEntry,
-} from './glData';
+import { fetchMonthlyPnl, getMonthSequence } from './glData';
 
 /* ────────────────────────────────────────────────────────────────────────────
    Tipos
@@ -66,12 +58,6 @@ interface PostJournalResult {
   journal_id?: string;
   journalId?: string;
 }
-
-type AccountTypeKey = 'income' | 'cogs' | 'expense' | '';
-
-const INCOME_TYPES = new Set(['income', 'ingreso', 'revenue', 'revenues']);
-const COGS_TYPES = new Set(['cogs', 'cost_of_goods', 'costodeventa', 'costo', 'cost']);
-const EXPENSE_TYPES = new Set(['expense', 'expenses', 'gasto', 'gastos', 'operating_expense']);
 
 /* ────────────────────────────────────────────────────────────────────────────
    Helpers base
@@ -99,61 +85,6 @@ const DEFAULT_ROW: PnLRow = {
   utilidadOperativa: 0,
 };
 
-const mapAccountType = (entry: AccountCatalogEntry | undefined): AccountTypeKey => {
-  const normalized = normalizeAccountType(entry?.type);
-  if (INCOME_TYPES.has(normalized)) return 'income';
-  if (COGS_TYPES.has(normalized)) return 'cogs';
-  if (EXPENSE_TYPES.has(normalized)) return 'expense';
-  return '';
-};
-
-const computePnLAggregates = (
-  monthKeys: string[],
-  journals: Awaited<ReturnType<typeof fetchJournalsInRange>>,
-  catalog: Record<string, AccountCatalogEntry>,
-  sucursalId: string | null
-): PnLRow[] => {
-  const base = new Map<string, PnLRow>();
-  monthKeys.forEach((month) => {
-    base.set(month, {
-      mes: month,
-      sucursalId,
-      ingresos: 0,
-      cogs: 0,
-      gastosTotales: 0,
-      utilidadOperativa: 0,
-    });
-  });
-
-  journals.forEach((journal) => {
-    const monthKey = monthKeyFromDate(journal.journal_date);
-    const target = base.get(monthKey);
-    if (!target) return;
-    journal.lines.forEach((line) => {
-      const account = catalog[line.account_id ?? ''];
-      const type = mapAccountType(account);
-      if (!type) return;
-      const debit = line.debit ?? 0;
-      const credit = line.credit ?? 0;
-      if (type === 'income') {
-        target.ingresos += credit - debit;
-      } else if (type === 'cogs') {
-        target.cogs += debit - credit;
-      } else if (type === 'expense') {
-        target.gastosTotales += debit - credit;
-      }
-    });
-  });
-
-  return Array.from(base.values()).map((row) => ({
-    ...row,
-    ingresos: row.ingresos,
-    cogs: row.cogs,
-    gastosTotales: row.gastosTotales,
-    utilidadOperativa: row.ingresos - row.cogs - row.gastosTotales,
-  }));
-};
-
 /* ────────────────────────────────────────────────────────────────────────────
    Componente principal
 --------------------------------------------------------------------------- */
@@ -168,7 +99,6 @@ export const PnLPage = () => {
   const [error, setError] = useState<string | null>(null);
   const [posting, setPosting] = useState(false);
   const [toasts, setToasts] = useState<ToastItem[]>([]);
-  const [catalog, setCatalog] = useState<Record<string, AccountCatalogEntry>>({});
 
   useEffect(() => {
     const today = new Date();
@@ -179,13 +109,6 @@ export const PnLPage = () => {
   useEffect(() => {
     if (sucursalSeleccionada?.id) setSelectedSucursal(String(sucursalSeleccionada.id));
   }, [sucursalSeleccionada?.id]);
-
-  const ensureCatalog = useCallback(async () => {
-    if (Object.keys(catalog).length > 0) return catalog;
-    const data = await fetchAccountCatalog();
-    setCatalog(data);
-    return data;
-  }, [catalog]);
 
   const fetchData = useCallback(async () => {
     if (!mes) return;
@@ -204,16 +127,23 @@ export const PnLPage = () => {
       return;
     }
 
-    const historyStart = historyMonths[0];
-    const { end: historyEnd } = getMonthBounds(historyMonths[historyMonths.length - 1]);
-
     try {
-      const [catalogData, journals] = await Promise.all([
-        ensureCatalog(),
-        fetchJournalsInRange({ from: historyStart, to: historyEnd, sucursalId }),
-      ]);
+      const results = await Promise.all(
+        historyMonths.map((month) => fetchMonthlyPnl({ month, sucursalId }))
+      );
 
-      const aggregates = computePnLAggregates(historyMonths, journals, catalogData, sucursalId);
+      const aggregates = historyMonths.map<PnLRow>((month, index) => {
+        const row = results[index];
+        return {
+          mes: month,
+          sucursalId,
+          ingresos: row?.ingresos ?? 0,
+          cogs: row?.cogs ?? 0,
+          gastosTotales: row?.gastos ?? 0,
+          utilidadOperativa: row?.utilidad ?? (row?.ingresos ?? 0) - (row?.cogs ?? 0) - (row?.gastos ?? 0),
+        };
+      });
+
       setHistoryRows(aggregates);
 
       const current = aggregates.find((row) => row.mes === filterMes) ?? {
@@ -225,10 +155,10 @@ export const PnLPage = () => {
       const previous = prevIndex >= 0 ? aggregates[prevIndex] ?? null : null;
 
       const hasData =
-        journals.some((journal) => monthKeyFromDate(journal.journal_date) === filterMes) ||
         Math.abs(current.ingresos) > 0 ||
         Math.abs(current.cogs) > 0 ||
-        Math.abs(current.gastosTotales) > 0;
+        Math.abs(current.gastosTotales) > 0 ||
+        Math.abs(current.utilidadOperativa) > 0;
 
       setRows(hasData ? [current] : []);
       setPreviousRow(previous);
@@ -241,7 +171,7 @@ export const PnLPage = () => {
     } finally {
       setLoading(false);
     }
-  }, [ensureCatalog, mes, selectedSucursal]);
+  }, [mes, selectedSucursal]);
 
   useEffect(() => {
     fetchData();

@@ -20,11 +20,13 @@ import { exportToCsv, exportToXlsx, formatNumber } from './exportUtils';
 import {
   fetchAccountCatalog,
   fetchJournalsInRange,
+  fetchMonthlyPnl,
   getMonthBounds,
   getMonthSequence,
   monthKeyFromDate,
   normalizeAccountType,
   type AccountCatalogEntry,
+  type MonthlyPnlResult,
 } from './glData';
 
 interface BalanceRow {
@@ -56,17 +58,10 @@ const getErrorMessage = (error: unknown) => {
 const ASSET_TYPES = new Set(['asset', 'assets', 'activo', 'activos', 'current_asset', 'noncurrent_asset']);
 const LIABILITY_TYPES = new Set(['liability', 'liabilities', 'pasivo', 'pasivos']);
 const EQUITY_TYPES = new Set(['equity', 'patrimonio', 'capital', 'capital_social']);
-const INCOME_TYPES = new Set(['income', 'ingreso', 'ingresos', 'revenue', 'revenues']);
-const EXPENSE_TYPES = new Set(['expense', 'expenses', 'gasto', 'gastos', 'operating_expense']);
-const COGS_TYPES = new Set(['cogs', 'cost_of_goods', 'costo', 'costodeventa', 'cost']);
-
 interface MonthAccumulator {
   activos: number;
   pasivos: number;
   equity: number;
-  ingresos: number;
-  gastos: number;
-  cogs: number;
 }
 
 const ensureAccumulator = (map: Map<string, MonthAccumulator>, key: string) => {
@@ -75,9 +70,6 @@ const ensureAccumulator = (map: Map<string, MonthAccumulator>, key: string) => {
       activos: 0,
       pasivos: 0,
       equity: 0,
-      ingresos: 0,
-      gastos: 0,
-      cogs: 0,
     });
   }
   return map.get(key)!;
@@ -87,7 +79,8 @@ const computeBalanceAggregates = (
   monthKeys: string[],
   journals: Awaited<ReturnType<typeof fetchJournalsInRange>>,
   catalog: Record<string, AccountCatalogEntry>,
-  sucursalId: string | null
+  sucursalId: string | null,
+  pnlByMonth: Record<string, MonthlyPnlResult>
 ): { rows: BalanceRow[]; history: BalanceHistoryPoint[] } => {
   const accumulator = new Map<string, MonthAccumulator>();
   monthKeys.forEach((month) => {
@@ -110,19 +103,16 @@ const computeBalanceAggregates = (
         bucket.pasivos += credit - debit;
       } else if (EQUITY_TYPES.has(type)) {
         bucket.equity += credit - debit;
-      } else if (INCOME_TYPES.has(type)) {
-        bucket.ingresos += credit - debit;
-      } else if (EXPENSE_TYPES.has(type)) {
-        bucket.gastos += debit - credit;
-      } else if (COGS_TYPES.has(type)) {
-        bucket.cogs += debit - credit;
       }
     });
   });
 
+  const emptyPnl: MonthlyPnlResult = { ingresos: 0, cogs: 0, gastos: 0, utilidad: 0 };
+
   const history = monthKeys.map<BalanceHistoryPoint>((month) => {
     const bucket = ensureAccumulator(accumulator, month);
-    const patrimonio = bucket.equity + bucket.ingresos - bucket.gastos - bucket.cogs;
+    const pnl = pnlByMonth[month] ?? emptyPnl;
+    const patrimonio = bucket.equity + pnl.ingresos - pnl.gastos - pnl.cogs;
     return {
       mes: month,
       activos: bucket.activos,
@@ -133,8 +123,9 @@ const computeBalanceAggregates = (
 
   const selectedMonth = monthKeys[monthKeys.length - 1];
   const selectedBucket = ensureAccumulator(accumulator, selectedMonth);
+  const selectedPnl = pnlByMonth[selectedMonth] ?? emptyPnl;
   const patrimonioActual =
-    selectedBucket.equity + selectedBucket.ingresos - selectedBucket.gastos - selectedBucket.cogs;
+    selectedBucket.equity + selectedPnl.ingresos - selectedPnl.gastos - selectedPnl.cogs;
 
   const rows: BalanceRow[] = [
     { mes: selectedMonth, sucursalId, type: 'activos', balance: selectedBucket.activos },
@@ -193,22 +184,37 @@ export const BalancePage = () => {
       const historyStart = historyMonths[0];
       const { end: historyEnd } = getMonthBounds(historyMonths[historyMonths.length - 1]);
 
-      const [catalogData, journals] = await Promise.all([
+      const [catalogData, journals, pnlResults] = await Promise.all([
         ensureCatalog(),
         fetchJournalsInRange({ from: historyStart, to: historyEnd, sucursalId }),
+        Promise.all(historyMonths.map((month) => fetchMonthlyPnl({ month, sucursalId }))),
       ]);
+
+      const pnlByMonth = historyMonths.reduce<Record<string, MonthlyPnlResult>>(
+        (acc, month, index) => {
+          const value = pnlResults[index];
+          acc[month] = value ?? { ingresos: 0, cogs: 0, gastos: 0, utilidad: 0 };
+          return acc;
+        },
+        {}
+      );
 
       const { rows: monthRows, history } = computeBalanceAggregates(
         historyMonths,
         journals,
         catalogData,
-        sucursalId
+        sucursalId,
+        pnlByMonth
       );
 
       const currentRow = monthRows.filter((row) => row.mes === filterMes);
+      const currentPnl = pnlByMonth[filterMes] ?? { ingresos: 0, cogs: 0, gastos: 0, utilidad: 0 };
       const hasData =
         journals.some((journal) => monthKeyFromDate(journal.journal_date) === filterMes) ||
-        currentRow.some((row) => Math.abs(row.balance) > 0.0001);
+        currentRow.some((row) => Math.abs(row.balance) > 0.0001) ||
+        Math.abs(currentPnl.ingresos) > 0.0001 ||
+        Math.abs(currentPnl.cogs) > 0.0001 ||
+        Math.abs(currentPnl.gastos) > 0.0001;
 
       setRows(hasData ? monthRows : []);
       setHistoryTotals(history);
