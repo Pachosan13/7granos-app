@@ -282,3 +282,91 @@ $$;
 
 COMMENT ON FUNCTION public.api_post_sales_to_gl IS 'Post sales from both INVU API and CSV imports to general ledger';
 COMMENT ON FUNCTION public.api_post_purchases_to_gl IS 'Post purchases from CSV imports to general ledger';
+
+-- =====================================================
+-- 3. POST COGS FROM INVENTORY MOVEMENTS TO NEW GL
+-- =====================================================
+
+CREATE OR REPLACE FUNCTION public.cont_post_cogs_from_inv(
+  desde date,
+  hasta date,
+  p_sucursal_id uuid DEFAULT NULL
+)
+RETURNS TABLE (
+  journal_id uuid,
+  journal_date date,
+  sucursal_id uuid,
+  total_cogs numeric
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+  rec RECORD;
+  v_journal_id uuid;
+  v_description text;
+BEGIN
+  FOR rec IN (
+    SELECT
+      c.fecha::date AS journal_date,
+      c.sucursal_id,
+      SUM(c.cogs)::numeric AS total_cogs
+    FROM public.v_cogs_dia_norm c
+    WHERE c.fecha::date BETWEEN desde AND hasta
+      AND (p_sucursal_id IS NULL OR c.sucursal_id = p_sucursal_id)
+    GROUP BY c.fecha::date, c.sucursal_id
+    HAVING SUM(c.cogs) <> 0
+    ORDER BY c.fecha::date, c.sucursal_id
+  ) LOOP
+    v_description := 'COGS real ' || to_char(rec.journal_date, 'YYYY-MM-DD');
+    IF rec.sucursal_id IS NOT NULL THEN
+      v_description := v_description || ' / sucursal ' || rec.sucursal_id;
+    END IF;
+
+    SELECT id INTO v_journal_id
+    FROM public.contabilidad_journal
+    WHERE journal_date = rec.journal_date
+      AND description = v_description
+      AND source = 'cogs';
+
+    IF v_journal_id IS NOT NULL THEN
+      CONTINUE;
+    END IF;
+
+    INSERT INTO public.contabilidad_journal (
+      journal_date,
+      description,
+      source,
+      sucursal_id
+    )
+    VALUES (
+      rec.journal_date,
+      v_description,
+      'cogs',
+      rec.sucursal_id
+    )
+    RETURNING id INTO v_journal_id;
+
+    INSERT INTO public.contabilidad_journal_line (
+      journal_id,
+      account_code,
+      debit,
+      credit
+    )
+    VALUES
+      (v_journal_id, '5.1.1', rec.total_cogs, 0),
+      (v_journal_id, '1.3.1', 0, rec.total_cogs);
+
+    RETURN NEXT (
+      v_journal_id,
+      rec.journal_date,
+      rec.sucursal_id,
+      rec.total_cogs
+    );
+  END LOOP;
+
+  RETURN;
+END;
+$$;
+
+COMMENT ON FUNCTION public.cont_post_cogs_from_inv IS 'Posts real COGS from v_cogs_dia_norm into contabilidad journal tables';
