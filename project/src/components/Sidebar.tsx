@@ -11,6 +11,7 @@ import {
   BarChart3,
   PieChart,
   Landmark,
+  ClipboardCheck,
 } from 'lucide-react';
 import { NavLink, useLocation } from 'react-router-dom';
 
@@ -34,6 +35,7 @@ const menuItems: MenuItem[] = [
       { to: '/contabilidad/pnl', icon: BarChart3, label: 'P&L mensual', depth: 1 },
       { to: '/contabilidad/balance', icon: PieChart, label: 'Balance general', depth: 1 },
       { to: '/contabilidad/conciliacion', icon: Landmark, label: 'Conciliación', depth: 1 },
+      { to: '/contabilidad/ajustes', icon: ClipboardCheck, label: 'Ajustes contables', depth: 1 },
     ],
   },
 

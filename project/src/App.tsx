@@ -36,6 +36,7 @@ import * as MayorPageMod from './pages/contabilidad/MayorPage';
 import * as PnLPageMod from './pages/contabilidad/PnLPage';
 import * as BalancePageMod from './pages/contabilidad/BalancePage';
 import * as ConciliacionPageMod from './pages/contabilidad/ConciliacionPage';
+import * as AjustesContablesPageMod from './pages/contabilidad/AjustesContablesPage';
 import * as IniciarSesionMod from './pages/Auth/IniciarSesion';
 import * as GastosFijosListaMod from './pages/gastos-fijos/Lista';
 import * as GastosFijosImportarMod from './pages/gastos-fijos/Importar';
@@ -71,6 +72,11 @@ const ContabilidadConciliacion = pick(
   ConciliacionPageMod,
   ['default', 'ConciliacionPage'],
   'ContabilidadConciliacion'
+);
+const ContabilidadAjustes = pick(
+  AjustesContablesPageMod,
+  ['default', 'AjustesContablesPage'],
+  'ContabilidadAjustes'
 );
 const IniciarSesion = pick(IniciarSesionMod, ['default', 'IniciarSesion'], 'IniciarSesion');
 const GastosFijosLista = pick(GastosFijosListaMod, ['default'], 'GastosFijosLista');
@@ -111,6 +117,7 @@ export const App = () => (
                 <Route path="/contabilidad/pnl" element={<ContabilidadPnL />} />
                 <Route path="/contabilidad/balance" element={<ContabilidadBalance />} />
                 <Route path="/contabilidad/conciliacion" element={<ContabilidadConciliacion />} />
+                <Route path="/contabilidad/ajustes" element={<ContabilidadAjustes />} />
                 <Route path="/gastos-fijos" element={<GastosFijosLista />} />
                 <Route path="/gastos-fijos/importar" element={<GastosFijosImportar />} />
 

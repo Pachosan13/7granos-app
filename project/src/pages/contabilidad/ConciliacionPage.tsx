@@ -76,6 +76,11 @@ export const ConciliacionPage = () => {
 
   const resumen = useMemo(() => getConciliacionResumen(filteredRows), [filteredRows]);
 
+  const discrepantes = useMemo(
+    () => filteredRows.filter((row) => row.diferencia !== 0).length,
+    [filteredRows]
+  );
+
   const handleAccion = (row: ConciliacionRow) => {
     // DEMO: en la versión real, este botón abrirá el detalle de conciliación y permitirá crear ajustes contables.
     // eslint-disable-next-line no-console
@@ -186,17 +191,23 @@ export const ConciliacionPage = () => {
       <div className="bg-white rounded-2xl shadow-lg border border-sand p-6 mb-6">
         <h2 className="text-xl font-semibold text-bean mb-4">Resumen de conciliación</h2>
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-          <ResumenItem label="Ventas INVU" value={money(resumen.ventasInvu)} />
-          <ResumenItem label="Ventas GL" value={money(resumen.ventasGl)} />
-          <ResumenItem label="Depósitos banco" value={money(resumen.depositosBanco)} />
-          <ResumenItem label="Diferencia total" value={money(resumen.diferencia)} emphasize />
+          <ResumenItem label="Ventas INVU" value={resumen.ventasInvu} />
+          <ResumenItem label="Ventas GL" value={resumen.ventasGl} />
+          <ResumenItem label="Depósitos banco" value={resumen.depositosBanco} />
+          <ResumenItem label="Diferencia total" value={resumen.diferencia} emphasizeOnNonZero />
         </div>
+        <p className="text-sm text-slate-600 mt-3">
+          La diferencia total refleja el desajuste entre las ventas reportadas en INVU, los depósitos
+          bancarios y los registros contables en el GL para el período seleccionado.
+        </p>
       </div>
 
       <div className="bg-white rounded-2xl shadow-lg border border-sand p-6">
         <div className="flex items-center justify-between mb-4">
           <h2 className="text-xl font-semibold text-bean">Detalle de conciliación</h2>
-          <span className="text-sm text-slate-500">{filteredRows.length} registros</span>
+          <span className="text-sm text-slate-500">
+            {filteredRows.length} registros · {discrepantes} con discrepancias
+          </span>
         </div>
         <div className="overflow-x-auto">
           <table className="min-w-full">
@@ -269,20 +280,23 @@ export const ConciliacionPage = () => {
 const ResumenItem = ({
   label,
   value,
-  emphasize = false,
+  emphasizeOnNonZero = false,
 }: {
   label: string;
-  value: string;
-  emphasize?: boolean;
-}) => (
-  <div
-    className={`rounded-xl border border-sand p-4 shadow-sm ${
-      emphasize ? 'bg-amber-50 border-amber-200' : 'bg-off'
-    }`}
-  >
-    <p className="text-sm text-slate-500 mb-1">{label}</p>
-    <p className="text-2xl font-bold text-bean">{value}</p>
-  </div>
-);
+  value: number;
+  emphasizeOnNonZero?: boolean;
+}) => {
+  const highlight = emphasizeOnNonZero && value !== 0;
+  return (
+    <div
+      className={`rounded-xl border p-4 shadow-sm ${
+        highlight ? 'bg-red-50 border-red-200' : 'bg-off border-sand'
+      }`}
+    >
+      <p className="text-sm text-slate-500 mb-1">{label}</p>
+      <p className={`text-2xl font-bold ${highlight ? 'text-red-700' : 'text-bean'}`}>{money(value)}</p>
+    </div>
+  );
+};
 
 export default ConciliacionPage;
