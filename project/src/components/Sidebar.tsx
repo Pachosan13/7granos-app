@@ -10,6 +10,7 @@ import {
   FileText,
   BarChart3,
   PieChart,
+  Landmark,
 } from 'lucide-react';
 import { NavLink, useLocation } from 'react-router-dom';
 
@@ -32,6 +33,7 @@ const menuItems: MenuItem[] = [
       { to: '/contabilidad/mayor', icon: FileText, label: 'Libro Mayor', depth: 1 },
       { to: '/contabilidad/pnl', icon: BarChart3, label: 'P&L mensual', depth: 1 },
       { to: '/contabilidad/balance', icon: PieChart, label: 'Balance general', depth: 1 },
+      { to: '/contabilidad/conciliacion', icon: Landmark, label: 'Conciliación', depth: 1 },
     ],
   },
 

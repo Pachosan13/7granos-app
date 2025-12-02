@@ -35,6 +35,7 @@ import * as ContabilidadMod from './pages/Contabilidad';
 import * as MayorPageMod from './pages/contabilidad/MayorPage';
 import * as PnLPageMod from './pages/contabilidad/PnLPage';
 import * as BalancePageMod from './pages/contabilidad/BalancePage';
+import * as ConciliacionPageMod from './pages/contabilidad/ConciliacionPage';
 import * as IniciarSesionMod from './pages/Auth/IniciarSesion';
 import * as GastosFijosListaMod from './pages/gastos-fijos/Lista';
 import * as GastosFijosImportarMod from './pages/gastos-fijos/Importar';
@@ -66,6 +67,11 @@ const Contabilidad = pick(ContabilidadMod, ['default', 'Contabilidad'], 'Contabi
 const ContabilidadMayor = pick(MayorPageMod, ['default', 'MayorPage'], 'ContabilidadMayor');
 const ContabilidadPnL = pick(PnLPageMod, ['default', 'PnLPage'], 'ContabilidadPnL');
 const ContabilidadBalance = pick(BalancePageMod, ['default', 'BalancePage'], 'ContabilidadBalance');
+const ContabilidadConciliacion = pick(
+  ConciliacionPageMod,
+  ['default', 'ConciliacionPage'],
+  'ContabilidadConciliacion'
+);
 const IniciarSesion = pick(IniciarSesionMod, ['default', 'IniciarSesion'], 'IniciarSesion');
 const GastosFijosLista = pick(GastosFijosListaMod, ['default'], 'GastosFijosLista');
 const GastosFijosImportar = pick(GastosFijosImportarMod, ['default'], 'GastosFijosImportar');
@@ -104,6 +110,7 @@ export const App = () => (
                 <Route path="/contabilidad/mayor" element={<ContabilidadMayor />} />
                 <Route path="/contabilidad/pnl" element={<ContabilidadPnL />} />
                 <Route path="/contabilidad/balance" element={<ContabilidadBalance />} />
+                <Route path="/contabilidad/conciliacion" element={<ContabilidadConciliacion />} />
                 <Route path="/gastos-fijos" element={<GastosFijosLista />} />
                 <Route path="/gastos-fijos/importar" element={<GastosFijosImportar />} />
 
