@@ -13,6 +13,7 @@ import {
   Landmark,
   ClipboardCheck,
   LineChart,
+  Banknote,
 } from 'lucide-react';
 import { NavLink, useLocation } from 'react-router-dom';
 
