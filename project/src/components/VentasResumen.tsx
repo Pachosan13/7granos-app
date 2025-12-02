@@ -1,10 +1,5 @@
-import { createClient } from '@supabase/supabase-js'
-import { useEffect, useState } from 'react'
-
-const supabase = createClient(
-  import.meta.env.VITE_SUPABASE_URL!,
-  import.meta.env.VITE_SUPABASE_ANON_KEY!
-)
+import { useMemo } from 'react'
+import { useResumenVentas } from '../hooks/useResumenVentas'
 
 type Row = {
   fecha: string
@@ -15,22 +10,8 @@ type Row = {
 }
 
 export default function VentasResumen({ desde, hasta }: { desde: string; hasta: string }) {
-  const [rows, setRows] = useState<Row[]>([])
-  const [loading, setLoading] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-
-  useEffect(() => {
-    (async () => {
-      setLoading(true); setError(null)
-      const { data, error } = await supabase.rpc('api_resumen_ventas', {
-        p_desde: desde,
-        p_hasta: hasta
-      })
-      if (error) setError(error.message)
-      else setRows(data ?? [])
-      setLoading(false)
-    })()
-  }, [desde, hasta])
+  const { data, loading, error } = useResumenVentas({ desde, hasta })
+  const rows = useMemo(() => (data?.rows as Row[] | undefined) ?? [], [data?.rows])
 
   if (loading) return <div>Cargando…</div>
   if (error) return <div className="text-red-600">Error: {error}</div>

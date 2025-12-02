@@ -10,6 +10,7 @@ import Leaderboard, { LeaderboardRow } from '../components/dashboard/Leaderboard
 import DonutTop5, { TopProductItem } from '../components/dashboard/DonutTop5';
 import HeatmapHours, { HeatmapPoint } from '../components/dashboard/HeatmapHours';
 import AlertPill from '../components/dashboard/AlertPill';
+import { useResumenVentas } from '../hooks/useResumenVentas';
 
 interface Summary7d {
   ventas_netas: number;
@@ -450,11 +451,6 @@ function computeCashflow(summary: Summary7d | null): CashflowSnapshot {
   return { diasCaja, puntoEquilibrio };
 }
 
-function formatPercent(value: number | null | undefined) {
-  if (value === null || value === undefined || Number.isNaN(value)) return '—';
-  return `${(value * 100).toFixed(1)}%`;
-}
-
 export default function DashboardExecutive() {
   const { sucursales, sucursalSeleccionada, setSucursalSeleccionada, isAdmin } = useAuthOrg();
   const [summary, setSummary] = useState<Summary7d | null>(null);
@@ -470,6 +466,15 @@ export default function DashboardExecutive() {
   const [range, setRange] = useState(() => sevenDayWindow(true));
 
   const selectedSucursalId = sucursalSeleccionada?.id ?? null;
+  const {
+    data: resumenVentas,
+    loading: resumenLoading,
+    error: resumenError,
+  } = useResumenVentas({
+    desde: range.desde,
+    hasta: range.hasta,
+    sucursalId: selectedSucursalId,
+  });
 
   const loadData = useCallback(async () => {
     if (shouldUseDemoMode) {
@@ -489,7 +494,7 @@ export default function DashboardExecutive() {
     }
 
     setLoading(true);
-    setError(null);
+      setError(null);
     try {
       const primaryRange = sevenDayWindow(true);
       const chartDesde = addDays(primaryRange.desde, -7);
@@ -553,6 +558,16 @@ export default function DashboardExecutive() {
 
   const cashflow = useMemo(() => computeCashflow(summary), [summary]);
   const rangeLabel = useMemo(() => safeFormatRangeLabel(range.desde, range.hasta), [range.desde, range.hasta]);
+
+  const resumenData = resumenVentas?.resumen;
+  const ventasNetas = resumenData?.ventasNetas ?? 0;
+  const cogs = resumenData?.cogs ?? 0;
+  const gastos = resumenData?.gastos ?? 0;
+  const numTransacciones = resumenData?.numTransacciones ?? 0;
+  const ticketPromedio = numTransacciones > 0 ? ventasNetas / numTransacciones : 0;
+  const margenBrutoPct = ventasNetas > 0 ? ((ventasNetas - cogs) / ventasNetas) * 100 : 0;
+  const summaryError = error ?? resumenError;
+  const showSkeleton = (loading || resumenLoading) && !summary && !resumenData;
 
   return (
     <div className="min-h-screen bg-slate-50 pb-16 pt-8">
@@ -623,15 +638,15 @@ export default function DashboardExecutive() {
               </div>
             ) : null}
           </div>
-          {error ? (
+          {summaryError ? (
             <div className="mt-4 rounded-xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-700">
-              {error}
+              {summaryError}
             </div>
           ) : null}
         </section>
 
         <section>
-          {loading && !summary ? (
+          {showSkeleton ? (
             <div className="grid grid-cols-1 gap-6 md:grid-cols-2 xl:grid-cols-3">
               {Array.from({ length: 6 }).map((_, index) => (
                 <div key={index} className="h-32 rounded-2xl bg-slate-100 animate-pulse" />
@@ -641,36 +656,36 @@ export default function DashboardExecutive() {
             <div className="grid grid-cols-1 gap-6 md:grid-cols-2 xl:grid-cols-3">
               <KpiCard
                 title="Ventas Netas"
-                value={summary?.ventas_netas ?? 0}
+                value={ventasNetas}
                 deltaPct={summary?.ventas_vs_semana_ant_pct ?? null}
                 tooltip="Comparado con la semana anterior"
               />
               <KpiCard
                 title="COGS"
-                value={summary?.cogs ?? 0}
+                value={cogs}
                 tooltip="Costo de bienes vendidos"
               />
               <KpiCard
                 title="Gastos"
-                value={summary?.gastos ?? 0}
+                value={gastos}
                 tooltip="Planilla + gastos fijos"
               />
               <KpiCard
                 title="Utilidad"
-                value={summary?.utilidad ?? 0}
+                value={ventasNetas - cogs - gastos}
                 tooltip="Ventas - COGS - Gastos"
                 highlight="warning"
               />
               <KpiCard
                 title="Ticket Promedio"
-                value={summary?.ticket_promedio ?? 0}
+                value={ticketPromedio}
                 formatter={(value) => formatCurrencyUSD(value)}
                 tooltip="Ventas / Transacciones"
               />
               <KpiCard
                 title="Margen Bruto %"
-                value={summary?.margen_bruto_pct ?? 0}
-                formatter={(value) => formatPercent(value)}
+                value={margenBrutoPct}
+                formatter={(value) => `${value.toFixed(1)}%`}
                 tooltip="(Ventas - COGS) / Ventas"
               />
             </div>
