@@ -1,40 +1,32 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react"
 import { CalendarDays, RefreshCw, Store } from "lucide-react"
-import { createClient } from "@supabase/supabase-js"
 
-import { formatCurrencyUSD } from "../lib/format"
 import { useAuthOrg } from "../context/AuthOrgContext"
+import { formatCurrencyUSD } from "../lib/format"
 import KpiCard from "../components/dashboard/KpiCard"
-import { shouldUseDemoMode } from "../lib/supabase"
 
-// -----------------------------------------------------------------------------
-// Supabase client (mismo estilo que VentasResumen)
-// -----------------------------------------------------------------------------
-const supabase = createClient(
-  import.meta.env.VITE_SUPABASE_URL!,
-  import.meta.env.VITE_SUPABASE_ANON_KEY!
-)
+// 🔒 Flag: este dashboard es 100% MOCK (no llama Supabase)
+const USE_MOCK_DASHBOARD = true
 
 // -----------------------------------------------------------------------------
 // Tipos
 // -----------------------------------------------------------------------------
-interface Summary7d {
-  ventas_netas: number
-  cogs: number
-  gastos: number
-  utilidad: number
-  tx: number
-  ticket_promedio: number
-  margen_bruto_pct: number
-  ventas_vs_semana_ant_pct: number | null
-}
+interface SummaryKpi {
+  ventas_totales: number
+  transacciones: number
+  costo_ventas: number
+  costo_alimentos: number
+  costo_bebidas: number
+  costo_mano_obra: number
+  gastos_operativos: number
+  utilidad_operativa: number
 
-interface VentasResumenRow {
-  fecha: string
-  nombre: string
-  total: number
-  itbms: number
-  num_transacciones: number
+  margen_bruto_pct: number
+  margen_operativo_pct: number
+  food_cost_pct: number
+  beverage_cost_pct: number
+  labor_cost_pct: number
+  ticket_promedio: number
 }
 
 interface CashflowSnapshot {
@@ -49,22 +41,13 @@ function fmt(date: Date) {
   return date.toLocaleDateString("en-CA")
 }
 
-function sevenDayWindow(includeToday: boolean) {
+function fourteenDayWindow(): { desde: string; hasta: string } {
   const now = new Date()
-  const end = new Date(
-    now.getFullYear(),
-    now.getMonth(),
-    now.getDate() - (includeToday ? 0 : 1)
-  )
-  const start = new Date(end)
-  start.setDate(end.getDate() - 6)
-  return { desde: fmt(start), hasta: fmt(end) }
-}
-
-function addDays(iso: string, delta: number) {
-  const base = new Date(`${iso}T00:00:00`)
-  base.setDate(base.getDate() + delta)
-  return fmt(base)
+  const hasta = fmt(now)
+  const start = new Date(now)
+  start.setDate(start.getDate() - 13)
+  const desde = fmt(start)
+  return { desde, hasta }
 }
 
 function formatRangeLabel(desde: string, hasta: string) {
@@ -75,6 +58,7 @@ function formatRangeLabel(desde: string, hasta: string) {
     const opts: Intl.DateTimeFormatOptions = sameMonth
       ? { day: "2-digit" }
       : { day: "2-digit", month: "short" }
+
     const startLabel = s.toLocaleDateString("es-PA", opts)
     const endLabel = e.toLocaleDateString("es-PA", {
       day: "2-digit",
@@ -87,73 +71,87 @@ function formatRangeLabel(desde: string, hasta: string) {
 }
 
 function formatPercent(value: number | null | undefined) {
-  if (!value) return "—"
+  if (value == null || Number.isNaN(value)) return "—"
   return `${(value * 100).toFixed(1)}%`
 }
 
 // -----------------------------------------------------------------------------
-// Fetch de resumen, usando api_resumen_ventas / api_resumen_ventas_por_sucursal
+// MOCK DATA
 // -----------------------------------------------------------------------------
-async function fetchResumenVentas(
-  desde: string,
-  hasta: string,
-  sucursalId: string | null
-): Promise<Summary7d | null> {
-  const fnName = sucursalId
-    ? "api_resumen_ventas_por_sucursal"
-    : "api_resumen_ventas"
+// Ajusta estos números para que reflejen un 7 Granos “típico”
+function buildMockSummary(): SummaryKpi {
+  const ventas_totales = 11375.04
+  const transacciones = 320 // ej. 320 tickets en 14 días
 
-  const params: Record<string, any> = {
-    p_desde: desde,
-    p_hasta: hasta,
-  }
-  if (sucursalId) params.p_sucursal_id = sucursalId
+  const costo_ventas = 4800
+  const costo_alimentos = 3000
+  const costo_bebidas = 900
+  const costo_mano_obra = 2500
+  const gastos_operativos = 1800
 
-  const { data, error } = await supabase.rpc<VentasResumenRow>(fnName, params)
+  const utilidad_operativa =
+    ventas_totales -
+    costo_ventas -
+    gastos_operativos -
+    costo_mano_obra
 
-  if (error) {
-    console.error("[dashboard] Error en", fnName, error)
-    return null
-  }
+  const margen_bruto_pct =
+    ventas_totales > 0 ? (ventas_totales - costo_ventas) / ventas_totales : 0
 
-  const rows = (data ?? []) as VentasResumenRow[]
-  if (!rows.length) {
-    console.log("[dashboard] Resumen sin filas para rango", { desde, hasta })
-    return null
-  }
+  const margen_operativo_pct =
+    ventas_totales > 0 ? utilidad_operativa / ventas_totales : 0
 
-  const ventas_netas = rows.reduce(
-    (acc, r) => acc + Number(r.total ?? 0),
-    0
-  )
-  const tx = rows.reduce(
-    (acc, r) => acc + Number(r.num_transacciones ?? 0),
-    0
-  )
-  const ticket_promedio = tx > 0 ? ventas_netas / tx : 0
+  const food_cost_pct =
+    ventas_totales > 0 ? costo_alimentos / ventas_totales : 0
+
+  const beverage_cost_pct =
+    ventas_totales > 0 ? costo_bebidas / ventas_totales : 0
+
+  const labor_cost_pct =
+    ventas_totales > 0 ? costo_mano_obra / ventas_totales : 0
+
+  const ticket_promedio =
+    transacciones > 0 ? ventas_totales / transacciones : 0
 
   return {
-    ventas_netas,
-    cogs: 0,
-    gastos: 0,
-    utilidad: ventas_netas, // hasta que conectemos COGS/Gastos reales
-    tx,
+    ventas_totales,
+    transacciones,
+    costo_ventas,
+    costo_alimentos,
+    costo_bebidas,
+    costo_mano_obra,
+    gastos_operativos,
+    utilidad_operativa,
+    margen_bruto_pct,
+    margen_operativo_pct,
+    food_cost_pct,
+    beverage_cost_pct,
+    labor_cost_pct,
     ticket_promedio,
-    margen_bruto_pct: ventas_netas > 0 ? 1 : 0,
-    ventas_vs_semana_ant_pct: null,
   }
 }
 
-function computeCashflow(summary: Summary7d | null): CashflowSnapshot {
+function computeCashflow(summary: SummaryKpi | null): CashflowSnapshot {
   if (!summary) return { diasCaja: 0, puntoEquilibrio: 0 }
-  return {
-    diasCaja: summary.utilidad > 0 ? 10 : 0,
-    puntoEquilibrio: 0,
-  }
+
+  const gastosFijos =
+    summary.gastos_operativos + summary.costo_mano_obra
+  const promedioDiario = gastosFijos / 30
+  const cajaSimulada = 2 * gastosFijos // 2 meses de gastos, demo
+
+  const diasCaja =
+    promedioDiario > 0 ? Math.max(0, cajaSimulada / promedioDiario) : 0
+
+  const puntoEquilibrio =
+    summary.margen_bruto_pct > 0
+      ? gastosFijos / summary.margen_bruto_pct
+      : 0
+
+  return { diasCaja, puntoEquilibrio }
 }
 
 // -----------------------------------------------------------------------------
-// Componente principal
+// Componente principal (solo MOCK, sin Supabase)
 // -----------------------------------------------------------------------------
 export default function DashboardExecutive() {
   const {
@@ -163,62 +161,32 @@ export default function DashboardExecutive() {
     isAdmin,
   } = useAuthOrg()
 
-  const [summary, setSummary] = useState<Summary7d | null>(null)
+  const [summary, setSummary] = useState<SummaryKpi | null>(null)
   const [loading, setLoading] = useState(true)
-  const [range, setRange] = useState(() => sevenDayWindow(true))
-  const [usedFallback14d, setUsedFallback14d] = useState(false)
+  const [range, setRange] = useState(() => fourteenDayWindow())
 
   const selectedSucursalId = sucursalSeleccionada?.id ?? null
 
   const loadData = useCallback(async () => {
-    if (shouldUseDemoMode) {
+    setLoading(true)
+
+    if (USE_MOCK_DASHBOARD) {
+      const mockRange = fourteenDayWindow()
+      setRange(mockRange)
+      const mockSummary = buildMockSummary()
+      setSummary(mockSummary)
       setLoading(false)
       return
     }
 
-    setLoading(true)
+    // 🔒 Cuando tengamos RPC real, aquí conectamos Supabase.
     setSummary(null)
-    setUsedFallback14d(false)
-
-    // 1) Intento con ventana de 7 días (como estaba antes)
-    const primaryRange = sevenDayWindow(true)
-    let effectiveRange = primaryRange
-
-    console.log("[dashboard] Intentando resumen 7d:", primaryRange)
-
-    let summary7d = await fetchResumenVentas(
-      primaryRange.desde,
-      primaryRange.hasta,
-      selectedSucursalId
-    )
-
-    // 2) Si 7 días no tienen ventas, hacemos fallback a 14 días (como Ventas)
-    if (!summary7d) {
-      const altDesde = addDays(primaryRange.desde, -7) // 14 días hacia atrás
-      const altRange = { desde: altDesde, hasta: primaryRange.hasta }
-      console.log("[dashboard] Sin datos en 7d, probando 14d:", altRange)
-
-      const summary14d = await fetchResumenVentas(
-        altRange.desde,
-        altRange.hasta,
-        selectedSucursalId
-      )
-
-      if (summary14d) {
-        summary7d = summary14d
-        effectiveRange = altRange
-        setUsedFallback14d(true)
-      }
-    }
-
-    setSummary(summary7d)
-    setRange(effectiveRange)
     setLoading(false)
-  }, [selectedSucursalId])
+  }, [])
 
   useEffect(() => {
     loadData()
-  }, [loadData])
+  }, [loadData, selectedSucursalId])
 
   const sucursalesOptions = useMemo(() => sucursales ?? [], [sucursales])
   const rangeLabel = useMemo(
@@ -237,13 +205,13 @@ export default function DashboardExecutive() {
               Dashboard Ejecutivo
             </h1>
             <p className="text-sm text-slate-500">
-              Ventas y rentabilidad consolidadas.
+              KPIs financieros simulados (modo demo).
             </p>
-            <p className="mt-1 text-xs text-slate-400">
-              {usedFallback14d
-                ? "Mostrando últimos 14 días con datos."
-                : "Ventana base de 7 días (si hay datos)."}
-            </p>
+            {USE_MOCK_DASHBOARD && (
+              <p className="mt-1 text-xs font-medium uppercase tracking-wide text-amber-600">
+                MOCK • Esta vista no está conectada aún a Supabase.
+              </p>
+            )}
           </div>
           <div className="flex flex-wrap items-center gap-3">
             <button
@@ -268,7 +236,7 @@ export default function DashboardExecutive() {
                 <CalendarDays className="h-4 w-4" /> {rangeLabel}
               </span>
               <span className="inline-flex items-center gap-2 text-slate-500">
-                ({range.desde} → {range.hasta})
+                Ventana demo de 14 días ({range.desde} → {range.hasta})
               </span>
             </div>
             {isAdmin ? (
@@ -298,11 +266,11 @@ export default function DashboardExecutive() {
           </div>
         </section>
 
-        {/* KPIs */}
+        {/* KPIs financieros */}
         <section>
           {loading && !summary ? (
             <div className="grid grid-cols-1 gap-6 md:grid-cols-2 xl:grid-cols-3">
-              {Array.from({ length: 6 }).map((_, index) => (
+              {Array.from({ length: 9 }).map((_, index) => (
                 <div
                   key={index}
                   className="h-32 animate-pulse rounded-2xl bg-slate-100"
@@ -310,43 +278,95 @@ export default function DashboardExecutive() {
               ))}
             </div>
           ) : (
-            <div className="grid grid-cols-1 gap-6 md:grid-cols-2 xl:grid-cols-3">
-              <KpiCard
-                title="Ventas Netas"
-                value={summary?.ventas_netas ?? 0}
-                tooltip="Suma de total en api_resumen_ventas"
-              />
-              <KpiCard title="COGS" value={summary?.cogs ?? 0} />
-              <KpiCard title="Gastos" value={summary?.gastos ?? 0} />
-              <KpiCard title="Utilidad" value={summary?.utilidad ?? 0} />
-              <KpiCard
-                title="Ticket Promedio"
-                value={summary?.ticket_promedio ?? 0}
-                formatter={(v) => formatCurrencyUSD(v)}
-              />
-              <KpiCard
-                title="Margen Bruto"
-                value={summary?.margen_bruto_pct ?? 0}
-                formatter={(v) => formatPercent(v)}
-              />
-            </div>
+            summary && (
+              <div className="grid grid-cols-1 gap-6 md:grid-cols-2 xl:grid-cols-3">
+                {/* Ventas & costos base */}
+                <KpiCard
+                  title="Ventas Totales"
+                  value={summary.ventas_totales}
+                  tooltip="Ventas totales del período"
+                />
+                <KpiCard
+                  title="Costo de Ventas"
+                  value={summary.costo_ventas}
+                  tooltip="Costo de bienes vendidos"
+                />
+                <KpiCard
+                  title="Gastos Operativos"
+                  value={summary.gastos_operativos}
+                  tooltip="Renta, servicios, otros gastos fijos"
+                />
+
+                {/* Margen bruto / operativo */}
+                <KpiCard
+                  title="Margen Bruto %"
+                  value={summary.margen_bruto_pct}
+                  formatter={formatPercent}
+                  tooltip="(Ventas – Costo de ventas) / Ventas"
+                />
+                <KpiCard
+                  title="Margen Operativo %"
+                  value={summary.margen_operativo_pct}
+                  formatter={formatPercent}
+                  tooltip="Utilidad operativa / Ventas"
+                />
+                <KpiCard
+                  title="Utilidad Operativa"
+                  value={summary.utilidad_operativa}
+                  tooltip="Resultado después de costos y gastos"
+                />
+
+                {/* Food / Beverage / Labor */}
+                <KpiCard
+                  title="Food Cost %"
+                  value={summary.food_cost_pct}
+                  formatter={formatPercent}
+                  tooltip="Costo de alimentos / Ventas"
+                />
+                <KpiCard
+                  title="Beverage Cost %"
+                  value={summary.beverage_cost_pct}
+                  formatter={formatPercent}
+                  tooltip="Costo de bebidas / Ventas"
+                />
+                <KpiCard
+                  title="Labor Cost %"
+                  value={summary.labor_cost_pct}
+                  formatter={formatPercent}
+                  tooltip="Costo de mano de obra / Ventas"
+                />
+
+                {/* Ticket & transacciones */}
+                <KpiCard
+                  title="Ticket Promedio"
+                  value={summary.ticket_promedio}
+                  formatter={formatCurrencyUSD}
+                  tooltip="Ventas totales / Número de transacciones"
+                />
+                <KpiCard
+                  title="Transacciones"
+                  value={summary.transacciones}
+                  tooltip="Número de tickets en el período"
+                />
+              </div>
+            )
           )}
         </section>
 
         {/* Cashflow simple */}
         <section className="rounded-2xl bg-white p-6 shadow-sm ring-1 ring-slate-100">
           <h2 className="text-lg font-semibold text-slate-900">
-            Cashflow Simple
+            Cashflow Simple (Mock)
           </h2>
           <dl className="mt-4 space-y-3 text-sm text-slate-600">
             <div className="flex items-center justify-between">
-              <dt>Días de caja</dt>
+              <dt>Días de caja simulados</dt>
               <dd className="text-lg font-semibold text-[#4B2E05]">
                 {cashflow.diasCaja.toFixed(1)} días
               </dd>
             </div>
             <div className="flex items-center justify-between">
-              <dt>Punto de equilibrio</dt>
+              <dt>Punto de equilibrio estimado</dt>
               <dd className="text-lg font-semibold text-[#D4AF37]">
                 {formatCurrencyUSD(cashflow.puntoEquilibrio)}
               </dd>
