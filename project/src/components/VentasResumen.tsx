@@ -1,5 +1,5 @@
-import { createClient } from '@supabase/supabase-js'
-import { useEffect, useState } from 'react'
+import { useEffect, useState } from "react"
+import { createClient } from "@supabase/supabase-js"
 
 const supabase = createClient(
   import.meta.env.VITE_SUPABASE_URL!,
@@ -14,22 +14,44 @@ type Row = {
   num_transacciones: number
 }
 
-export default function VentasResumen({ desde, hasta }: { desde: string; hasta: string }) {
+type Props = {
+  desde: string
+  hasta: string
+}
+
+export default function VentasResumen({ desde, hasta }: Props) {
   const [rows, setRows] = useState<Row[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
-    (async () => {
-      setLoading(true); setError(null)
-      const { data, error } = await supabase.rpc('api_resumen_ventas', {
-        p_desde: desde,
-        p_hasta: hasta
-      })
-      if (error) setError(error.message)
-      else setRows(data ?? [])
+    if (!desde || !hasta) return
+
+    const fetchResumen = async () => {
+      setLoading(true)
+      setError(null)
+
+      const { data, error } = await supabase.rpc<Row>(
+        "api_resumen_ventas",
+        {
+          p_desde: desde,
+          p_hasta: hasta,
+        }
+      )
+
+      if (error) {
+        console.error("Error api_resumen_ventas (VentasResumen):", error)
+        setError(error.message)
+        setRows([])
+      } else {
+        console.log("api_resumen_ventas (VentasResumen) DATA:", data)
+        setRows(data ?? [])
+      }
+
       setLoading(false)
-    })()
+    }
+
+    fetchResumen()
   }, [desde, hasta])
 
   if (loading) return <div>Cargando…</div>
@@ -53,14 +75,23 @@ export default function VentasResumen({ desde, hasta }: { desde: string; hasta: 
             <tr key={i}>
               <td className="border px-2 py-1">{r.fecha}</td>
               <td className="border px-2 py-1">{r.nombre}</td>
-              <td className="border px-2 py-1 text-right">{Number(r.total).toFixed(2)}</td>
-              <td className="border px-2 py-1 text-right">{Number(r.itbms).toFixed(2)}</td>
-              <td className="border px-2 py-1 text-right">{r.num_transacciones}</td>
+              <td className="border px-2 py-1 text-right">
+                {Number(r.total).toFixed(2)}
+              </td>
+              <td className="border px-2 py-1 text-right">
+                {Number(r.itbms).toFixed(2)}
+              </td>
+              <td className="border px-2 py-1 text-right">
+                {r.num_transacciones}
+              </td>
             </tr>
           ))}
           {!rows.length && (
             <tr>
-              <td colSpan={5} className="border px-2 py-4 text-center text-slate-500">
+              <td
+                colSpan={5}
+                className="border px-2 py-4 text-center text-slate-500"
+              >
                 No hay datos en el rango seleccionado
               </td>
             </tr>
