@@ -36,6 +36,12 @@ const menuItems: MenuItem[] = [
       { to: '/contabilidad/pnl', icon: BarChart3, label: 'P&L mensual', depth: 1 },
       { to: '/contabilidad/balance', icon: PieChart, label: 'Balance general', depth: 1 },
       { to: '/contabilidad/conciliacion', icon: Landmark, label: 'Conciliación', depth: 1 },
+      {
+        to: '/contabilidad/conciliacion-bancaria',
+        icon: Banknote,
+        label: 'Conciliación bancaria',
+        depth: 1,
+      },
       { to: '/contabilidad/ajustes', icon: ClipboardCheck, label: 'Ajustes contables', depth: 1 },
       { to: '/contabilidad/gerencia', icon: LineChart, label: 'Gerencia (sucursal)', depth: 1 },
     ],

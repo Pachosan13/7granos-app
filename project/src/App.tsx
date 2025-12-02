@@ -38,6 +38,7 @@ import * as BalancePageMod from './pages/contabilidad/BalancePage';
 import * as ConciliacionPageMod from './pages/contabilidad/ConciliacionPage';
 import * as AjustesContablesPageMod from './pages/contabilidad/AjustesContablesPage';
 import * as GerenciaPageMod from './pages/contabilidad/GerenciaPage';
+import * as ConciliacionBancariaPageMod from './pages/contabilidad/ConciliacionBancariaPage';
 import * as IniciarSesionMod from './pages/Auth/IniciarSesion';
 import * as GastosFijosListaMod from './pages/gastos-fijos/Lista';
 import * as GastosFijosImportarMod from './pages/gastos-fijos/Importar';
@@ -73,6 +74,11 @@ const ContabilidadConciliacion = pick(
   ConciliacionPageMod,
   ['default', 'ConciliacionPage'],
   'ContabilidadConciliacion'
+);
+const ContabilidadConciliacionBancaria = pick(
+  ConciliacionBancariaPageMod,
+  ['default', 'ConciliacionBancariaPage'],
+  'ContabilidadConciliacionBancaria'
 );
 const ContabilidadAjustes = pick(
   AjustesContablesPageMod,
@@ -123,6 +129,10 @@ export const App = () => (
                 <Route path="/contabilidad/pnl" element={<ContabilidadPnL />} />
                 <Route path="/contabilidad/balance" element={<ContabilidadBalance />} />
                 <Route path="/contabilidad/conciliacion" element={<ContabilidadConciliacion />} />
+                <Route
+                  path="/contabilidad/conciliacion-bancaria"
+                  element={<ContabilidadConciliacionBancaria />}
+                />
                 <Route path="/contabilidad/ajustes" element={<ContabilidadAjustes />} />
                 <Route path="/contabilidad/gerencia" element={<ContabilidadGerencia />} />
                 <Route path="/gastos-fijos" element={<GastosFijosLista />} />
