@@ -12,6 +12,7 @@ import {
   gerenciaAlertasMock,
   gerenciaMetricsMock,
   gerenciaSerie14DiasMock,
+  gerenciaSucursalDefault,
   gerenciaSucursalesMock,
   gerenciaTopProductosMock,
   GerenciaAlerta,
@@ -43,7 +44,7 @@ const criticidadDot: Record<GerenciaAlerta['criticidad'], string> = {
 
 export const GerenciaPage = () => {
   const [fechaSeleccionada, setFechaSeleccionada] = useState<string>('');
-  const [sucursal, setSucursal] = useState<string>('San Pedro');
+  const [sucursal, setSucursal] = useState<string>(gerenciaSucursalDefault);
 
   const series = useMemo(
     () => gerenciaSerie14DiasMock.filter((item) => item.sucursal === sucursal),
@@ -63,7 +64,10 @@ export const GerenciaPage = () => {
     [fechaSeleccionada, series]
   );
 
-  const metrics = useMemo(() => gerenciaMetricsMock[sucursal] ?? gerenciaMetricsMock['San Pedro'], [sucursal]);
+  const metrics = useMemo(
+    () => gerenciaMetricsMock[sucursal] ?? gerenciaMetricsMock[gerenciaSucursalDefault],
+    [sucursal]
+  );
 
   const margenOperativo = selectedPoint?.margenPct ?? 1 - (metrics.foodCostPct + metrics.beverageCostPct + metrics.laborCostPct);
 
@@ -91,7 +95,9 @@ export const GerenciaPage = () => {
       <div className="flex items-center justify-between">
         <div>
           <p className="text-sm uppercase text-slate-500 font-semibold mb-1">Contabilidad</p>
-          <h1 className="text-4xl font-bold text-bean tracking-tight">Gerencia — Sucursal San Pedro (DEMO)</h1>
+          <h1 className="text-4xl font-bold text-bean tracking-tight">
+            Gerencia — Sucursal {sucursal} (DEMO)
+          </h1>
           <p className="text-slate-600 mt-2">
             KPI operativos diarios y alertas para la gestión de la sucursal.
           </p>
@@ -167,12 +173,12 @@ export const GerenciaPage = () => {
           <KpiCard
             title="Ventas hoy"
             value={formatCurrencyUSD(selectedPoint?.ventas ?? metrics.ventasHoy)}
-            subtitle={`Ayer: ${formatCurrencyUSD(metrics.ventasAyer)}`}
+            subtitle={`vs ayer: ${formatCurrencyUSD(metrics.ventasAyer)}`}
           />
           <KpiCard
             title="Ticket promedio"
             value={formatCurrencyUSD(metrics.ticketPromedio)}
-            subtitle={`${metrics.numTransacciones.toLocaleString()} transacciones`}
+            subtitle={`Transacciones: ${metrics.numTransacciones.toLocaleString()}`}
           />
           <KpiCard
             title="Transacciones"
@@ -187,22 +193,22 @@ export const GerenciaPage = () => {
           <KpiCard
             title="Food cost"
             value={formatPercentage(metrics.foodCostPct)}
-            subtitle="Control cocina"
+            subtitle="Participación cocina"
           />
           <KpiCard
             title="Beverage cost"
             value={formatPercentage(metrics.beverageCostPct)}
-            subtitle="Bebidas"
+            subtitle="Participación bebidas"
           />
           <KpiCard
             title="Labor cost"
             value={formatPercentage(metrics.laborCostPct)}
-            subtitle="Personal"
+            subtitle="Participación personal"
           />
           <KpiCard
             title="Alertas activas"
             value={alertasActivas.toString()}
-            subtitle="Marcaciones / depósitos"
+            subtitle="Marcaciones y depósitos"
             badge={alertasActivas > 0 ? '!' : undefined}
             badgeTone={alertasActivas > 0 ? 'danger' : 'neutral'}
           />

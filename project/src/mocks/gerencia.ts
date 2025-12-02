@@ -31,9 +31,22 @@ export type GerenciaAlerta = {
   criticidad: 'alta' | 'media' | 'baja';
 };
 
-export const gerenciaSucursalesMock = ['San Pedro', 'Costa Verde', 'El Dorado'];
+export const gerenciaSucursalDefault = 'El Cangrejo';
+
+export const gerenciaSucursalesMock = ['El Cangrejo', 'Costa Verde', 'San Pedro', 'El Dorado'];
 
 export const gerenciaMetricsMock: Record<string, GerenciaSucursalMetrics> = {
+  'El Cangrejo': {
+    ventasHoy: 23640,
+    ventasAyer: 22810,
+    ticketPromedio: 15.4,
+    numTransacciones: 1540,
+    foodCostPct: 0.31,
+    beverageCostPct: 0.2,
+    laborCostPct: 0.18,
+    alertaMarcaciones: 1,
+    alertaDepositosPendientes: 1,
+  },
   'San Pedro': {
     ventasHoy: 24850,
     ventasAyer: 23120,
@@ -85,12 +98,18 @@ const buildSeries = (sucursal: string, baseVentas: number): GerenciaSerieDia[] =
 };
 
 export const gerenciaSerie14DiasMock: GerenciaSerieDia[] = [
+  ...buildSeries('El Cangrejo', 23500),
   ...buildSeries('San Pedro', 24000),
   ...buildSeries('Costa Verde', 18500),
   ...buildSeries('El Dorado', 20500),
 ];
 
 export const gerenciaTopProductosMock: GerenciaTopProducto[] = [
+  { sucursal: 'El Cangrejo', nombre: 'Combo Burguer Doble', totalVentas: 4620, porcentaje: 0.21 },
+  { sucursal: 'El Cangrejo', nombre: 'Wrap Pollo Grill', totalVentas: 3150, porcentaje: 0.14 },
+  { sucursal: 'El Cangrejo', nombre: 'Café latte grande', totalVentas: 2740, porcentaje: 0.12 },
+  { sucursal: 'El Cangrejo', nombre: 'Smoothie tropical', totalVentas: 2310, porcentaje: 0.11 },
+  { sucursal: 'El Cangrejo', nombre: 'Ensalada quinoa', totalVentas: 1900, porcentaje: 0.09 },
   { sucursal: 'San Pedro', nombre: 'Combo Burguer Doble', totalVentas: 4850, porcentaje: 0.22 },
   { sucursal: 'San Pedro', nombre: 'Wrap Pollo Grill', totalVentas: 3320, porcentaje: 0.15 },
   { sucursal: 'San Pedro', nombre: 'Café latte grande', totalVentas: 2875, porcentaje: 0.13 },
@@ -109,6 +128,30 @@ export const gerenciaTopProductosMock: GerenciaTopProducto[] = [
 ];
 
 export const gerenciaAlertasMock: GerenciaAlerta[] = [
+  {
+    sucursal: 'El Cangrejo',
+    tipo: 'Marcación',
+    mensaje: '1 marcación pendiente de aprobación en apertura.',
+    criticidad: 'media',
+  },
+  {
+    sucursal: 'El Cangrejo',
+    tipo: 'Depósito',
+    mensaje: 'Depósito nocturno sin comprobante adjunto.',
+    criticidad: 'alta',
+  },
+  {
+    sucursal: 'El Cangrejo',
+    tipo: 'Inventario',
+    mensaje: 'Variación inusual en bebidas (+6%).',
+    criticidad: 'baja',
+  },
+  {
+    sucursal: 'El Cangrejo',
+    tipo: 'Marcación',
+    mensaje: 'Empleado llegó pero no marcó entrada (turno tarde).',
+    criticidad: 'media',
+  },
   {
     sucursal: 'San Pedro',
     tipo: 'Marcación',
