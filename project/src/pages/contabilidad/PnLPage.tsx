@@ -183,13 +183,10 @@ async function fetchHistoryRPC(
   sucursalId: string | null,
   n: number = 6
 ): Promise<PnLRow[]> {
-  // currentMesISO es 'YYYY-MM-01'
   const base = new Date(currentMesISO);
   if (Number.isNaN(base.getTime())) return [];
 
   const months: string[] = [];
-  const d = new Date(base);
-  // queremos n meses hacia atrás incluyendo el actual
   for (let i = n - 1; i >= 0; i--) {
     const t = new Date(base);
     t.setMonth(base.getMonth() - i);
@@ -202,7 +199,6 @@ async function fetchHistoryRPC(
   for (const m of months) {
     const rows = await rpcGetPyg(m, sucursalId);
     if (!rows.length) {
-      // Sin datos: devolvemos cero
       out.push({
         mes: m,
         sucursalId,
@@ -213,7 +209,6 @@ async function fetchHistoryRPC(
       });
       continue;
     }
-    // si piden “todas”: agregamos; si piden sucursal: suele venir una fila
     out.push(sucursalId ? rows[0] : aggregate(rows));
   }
   return out;
@@ -236,16 +231,20 @@ export const PnLPage = () => {
 
   useEffect(() => {
     const today = new Date();
-    const ym = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}`;
+    const ym = `${today.getFullYear()}-${String(
+      today.getMonth() + 1
+    ).padStart(2, '0')}`;
     setMes(ym);
   }, []);
 
   useEffect(() => {
-    if (sucursalSeleccionada?.id) setSelectedSucursal(String(sucursalSeleccionada.id));
+    if (sucursalSeleccionada?.id) {
+      setSelectedSucursal(String(sucursalSeleccionada.id));
+    }
   }, [sucursalSeleccionada?.id]);
 
   /* ────────────────────────────────────────────────────────────────────────────
-     Carga de datos (todo por RPC para evitar RLS)
+     Carga de datos
   --------------------------------------------------------------------------- */
   const fetchData = useCallback(async () => {
     if (!mes) return;
@@ -256,7 +255,6 @@ export const PnLPage = () => {
 
     try {
       if (sucursalId) {
-        // Sucursal específica
         const data = await rpcGetPyg(filterMes, sucursalId);
         setRows(data);
 
@@ -268,7 +266,6 @@ export const PnLPage = () => {
           setPreviousRow(null);
         }
       } else {
-        // Todas las sucursales → total agregado por RPC
         const totalAll = await fetchTotalsAll(filterMes);
         setRows(totalAll ? [totalAll] : []);
 
@@ -281,7 +278,6 @@ export const PnLPage = () => {
         }
       }
 
-      // Historial (últimos 6) por RPC
       const hist = await fetchHistoryRPC(filterMes, sucursalId, 6);
       setHistoryRows(hist);
     } catch (err: unknown) {
@@ -289,7 +285,9 @@ export const PnLPage = () => {
       setRows([]);
       setPreviousRow(null);
       setHistoryRows([]);
-      setError(getErrorMessage(err) ?? 'No fue posible obtener el estado de resultados.');
+      setError(
+        getErrorMessage(err) ?? 'No fue posible obtener el estado de resultados.'
+      );
     } finally {
       setLoading(false);
     }
@@ -330,8 +328,14 @@ export const PnLPage = () => {
     return {
       ingresos: build(currentRow?.ingresos ?? 0, previous?.ingresos ?? 0),
       cogs: build(currentRow?.cogs ?? 0, previous?.cogs ?? 0),
-      gastos: build(currentRow?.gastosTotales ?? 0, previous?.gastosTotales ?? 0),
-      utilidad: build(currentRow?.utilidadOperativa ?? 0, previous?.utilidadOperativa ?? 0),
+      gastos: build(
+        currentRow?.gastosTotales ?? 0,
+        previous?.gastosTotales ?? 0
+      ),
+      utilidad: build(
+        currentRow?.utilidadOperativa ?? 0,
+        previous?.utilidadOperativa ?? 0
+      ),
       margen: build(netMargin, previous ? getNetMargin(previous) : 0),
     };
   }, [currentRow, netMargin, previousRow]);
@@ -373,13 +377,16 @@ export const PnLPage = () => {
         'api_post_journal_auto',
         buildPostVariants(filterMes, sucursalId)
       );
+
       const success =
         result?.ok ?? Boolean(result?.journal_id ?? result?.journalId);
+
       if (success) {
         pushToast({
           tone: 'success',
           title: 'Mes posteado con éxito',
-          description: result?.msg ?? 'Se generó el journal automático para el mes seleccionado.',
+          description:
+            result?.msg ?? 'Se generó el journal automático para el mes seleccionado.',
         });
         fetchData();
       } else {
@@ -444,7 +451,9 @@ export const PnLPage = () => {
       {/* Header */}
       <header className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
         <div>
-          <h1 className="text-3xl font-bold text-bean">Estado de Resultados (P&amp;L)</h1>
+          <h1 className="text-3xl font-bold text-bean">
+            Estado de Resultados (P&amp;L)
+          </h1>
         </div>
         <div className="flex flex-wrap items-center gap-3">
           <button
@@ -469,7 +478,11 @@ export const PnLPage = () => {
             disabled={posting || rows.length === 0}
             className="inline-flex items-center gap-2 rounded-xl bg-accent px-4 py-2 text-white shadow disabled:opacity-60"
           >
-            {posting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Wallet2 size={16} />}
+            {posting ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <Wallet2 size={16} />
+            )}
             {posting ? 'Posteando…' : 'Postear mes'}
           </button>
         </div>
@@ -538,15 +551,26 @@ export const PnLPage = () => {
         />
         <article className="rounded-2xl border border-sand bg-white p-4 shadow-sm">
           <div className="flex items-center justify-between text-slate-500">
-            <span className="text-xs font-semibold uppercase tracking-wide">Utilidad</span>
+            <span className="text-xs font-semibold uppercase tracking-wide">
+              Utilidad
+            </span>
             <Wallet2 className="h-4 w-4" />
           </div>
           <p className="mt-3 text-2xl font-semibold text-slate-800">
             {formatCurrencyUSD(totals.utilidadOperativa)}
           </p>
-          <p className="text-xs text-slate-500">Margen neto: {netMargin.toFixed(1)}%</p>
-          <ComparisonPill comparison={comparisons.utilidad} label="Utilidad vs mes anterior" />
-          <ComparisonPill comparison={comparisons.margen} label="Margen vs mes anterior" isMargin />
+          <p className="text-xs text-slate-500">
+            Margen neto: {netMargin.toFixed(1)}%
+          </p>
+          <ComparisonPill
+            comparison={comparisons.utilidad}
+            label="Utilidad vs mes anterior"
+          />
+          <ComparisonPill
+            comparison={comparisons.margen}
+            label="Margen vs mes anterior"
+            isMargin
+          />
         </article>
       </section>
 
@@ -555,8 +579,12 @@ export const PnLPage = () => {
         <article className="rounded-2xl border border-sand bg-white shadow-sm">
           <header className="flex items-center justify-between border-b border-sand px-6 py-4">
             <div>
-              <h2 className="text-lg font-semibold text-slate-800">Tendencia de ingresos vs utilidad</h2>
-              <p className="text-sm text-slate-500">Últimos periodos reportados</p>
+              <h2 className="text-lg font-semibold text-slate-800">
+                Tendencia de ingresos vs utilidad
+              </h2>
+              <p className="text-sm text-slate-500">
+                Últimos periodos reportados
+              </p>
             </div>
             <BarChart3 className="h-5 w-5 text-slate-400" />
           </header>
@@ -581,8 +609,12 @@ export const PnLPage = () => {
         <article className="rounded-2xl border border-sand bg-white shadow-sm">
           <header className="flex items-center justify-between border-b border-sand px-6 py-4">
             <div>
-              <h2 className="text-lg font-semibold text-slate-800">Margen neto histórico</h2>
-              <p className="text-sm text-slate-500">Tendencia porcentual por mes</p>
+              <h2 className="text-lg font-semibold text-slate-800">
+                Margen neto histórico
+              </h2>
+              <p className="text-sm text-slate-500">
+                Tendencia porcentual por mes
+              </p>
             </div>
             <ArrowUpRight className="h-5 w-5 text-slate-400" />
           </header>
@@ -592,7 +624,8 @@ export const PnLPage = () => {
                 <LineChart
                   data={historyData.map((r) => ({
                     mes: r.mes,
-                    margen: r.ingresos === 0 ? 0 : (r.utilidad / r.ingresos) * 100,
+                    margen:
+                      r.ingresos === 0 ? 0 : (r.utilidad / r.ingresos) * 100,
                   }))}
                 >
                   <CartesianGrid strokeDasharray="3 3" />
@@ -613,9 +646,13 @@ export const PnLPage = () => {
       <section className="rounded-2xl border border-sand bg-white shadow-sm">
         <header className="flex items-center justify-between border-b border-sand px-6 py-4">
           <div>
-            <h2 className="text-lg font-semibold text-slate-800">Detalle del periodo</h2>
+            <h2 className="text-lg font-semibold text-slate-800">
+              Detalle del periodo
+            </h2>
             <p className="text-sm text-slate-500">
-              {mes ? `Mes ${formatDateIso(`${mes}-01`)}` : 'Selecciona un mes'}
+              {mes
+                ? `Mes ${formatDateIso(`${mes}-01`)}`
+                : 'Selecciona un mes'}
             </p>
           </div>
         </header>
@@ -623,25 +660,33 @@ export const PnLPage = () => {
           <table className="min-w-full divide-y divide-sand text-sm">
             <tbody className="divide-y divide-sand/70">
               <tr>
-                <td className="px-6 py-3 font-medium text-slate-600">Ingresos</td>
+                <td className="px-6 py-3 font-medium text-slate-600">
+                  Ingresos
+                </td>
                 <td className="px-6 py-3 text-right font-mono text-base">
                   {formatCurrencyUSD(totals.ingresos)}
                 </td>
               </tr>
               <tr>
-                <td className="px-6 py-3 font-medium text-slate-600">Costo de ventas (COGS)</td>
+                <td className="px-6 py-3 font-medium text-slate-600">
+                  Costo de ventas (COGS)
+                </td>
                 <td className="px-6 py-3 text-right font-mono text-base">
                   {formatCurrencyUSD(totals.cogs)}
                 </td>
               </tr>
               <tr>
-                <td className="px-6 py-3 font-medium text-slate-600">Gastos operativos</td>
+                <td className="px-6 py-3 font-medium text-slate-600">
+                  Gastos operativos
+                </td>
                 <td className="px-6 py-3 text-right font-mono text-base">
                   {formatCurrencyUSD(totals.gastosTotales)}
                 </td>
               </tr>
               <tr>
-                <td className="px-6 py-3 font-semibold text-slate-700">Utilidad operativa</td>
+                <td className="px-6 py-3 font-semibold text-slate-700">
+                  Utilidad operativa
+                </td>
                 <td className="px-6 py-3 text-right font-mono text-lg text-emerald-700">
                   {formatCurrencyUSD(totals.utilidadOperativa)}
                 </td>
@@ -666,10 +711,9 @@ export const PnLPage = () => {
 export default PnLPage;
 
 /* ────────────────────────────────────────────────────────────────────────────
-   Historial (RPC)
+   Historial (RPC) – wrapper, por si otros módulos lo usan
 --------------------------------------------------------------------------- */
 const loadHistory = async (sucursalId: string | null, currentMesISO: string) => {
-  // Mantengo una firma compatible, pero internamente usamos la versión RPC
   return fetchHistoryRPC(currentMesISO, sucursalId, 6);
 };
 
@@ -699,6 +743,7 @@ const CardMetric = ({
   const Icon = icon === 'up' ? TrendingUp : icon === 'down' ? TrendingDown : Wallet;
   const isPositive = comp.delta >= 0;
   const isGood = negativeIsBad ? !isPositive : isPositive;
+
   const tone =
     comp.pct === null
       ? 'text-slate-500 bg-slate-50'
@@ -709,13 +754,19 @@ const CardMetric = ({
   return (
     <article className="rounded-2xl border border-sand bg-white p-4 shadow-sm">
       <div className="flex items-center justify-between text-slate-500">
-        <span className="text-xs font-semibold uppercase tracking-wide">{title}</span>
+        <span className="text-xs font-semibold uppercase tracking-wide">
+          {title}
+        </span>
         <Icon className="h-4 w-4" />
       </div>
       <p className="mt-3 text-2xl font-semibold text-slate-800">
         {formatCurrencyUSD(value)}
       </p>
-      <ComparisonPill comparison={comp} label="vs mes anterior" negativeIsBad={negativeIsBad} />
+      <ComparisonPill
+        comparison={comp}
+        label="vs mes anterior"
+        negativeIsBad={negativeIsBad}
+      />
     </article>
   );
 };
@@ -733,18 +784,23 @@ const ComparisonPill = ({
 }) => {
   const isPositive = comparison.delta >= 0;
   const isGood = negativeIsBad ? !isPositive : isPositive;
+
   const tone =
     comparison.pct === null
       ? 'text-slate-600 bg-slate-100'
       : isGood
       ? 'text-emerald-700 bg-emerald-50'
       : 'text-rose-700 bg-rose-50';
+
   const Icon = isPositive ? ArrowUpRight : ArrowDownRight;
+
   const formatValue = (value: number) =>
     isMargin ? `${value.toFixed(1)}%` : formatCurrencyUSD(value);
 
   return (
-    <div className={`mt-3 inline-flex items-center gap-2 rounded-full px-3 py-1 text-xs font-medium ${tone}`}>
+    <div
+      className={`mt-3 inline-flex items-center gap-2 rounded-full px-3 py-1 text-xs font-medium ${tone}`}
+    >
       <Icon className="h-4 w-4" />
       <span>
         {label}: {formatValue(comparison.delta)}
