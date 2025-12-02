@@ -35,6 +35,10 @@ import * as ContabilidadMod from './pages/Contabilidad';
 import * as MayorPageMod from './pages/contabilidad/MayorPage';
 import * as PnLPageMod from './pages/contabilidad/PnLPage';
 import * as BalancePageMod from './pages/contabilidad/BalancePage';
+import * as ConciliacionPageMod from './pages/contabilidad/ConciliacionPage';
+import * as AjustesContablesPageMod from './pages/contabilidad/AjustesContablesPage';
+import * as GerenciaPageMod from './pages/contabilidad/GerenciaPage';
+import * as ConciliacionBancariaPageMod from './pages/contabilidad/ConciliacionBancariaPage';
 import * as IniciarSesionMod from './pages/Auth/IniciarSesion';
 import * as GastosFijosListaMod from './pages/gastos-fijos/Lista';
 import * as GastosFijosImportarMod from './pages/gastos-fijos/Importar';
@@ -66,6 +70,26 @@ const Contabilidad = pick(ContabilidadMod, ['default', 'Contabilidad'], 'Contabi
 const ContabilidadMayor = pick(MayorPageMod, ['default', 'MayorPage'], 'ContabilidadMayor');
 const ContabilidadPnL = pick(PnLPageMod, ['default', 'PnLPage'], 'ContabilidadPnL');
 const ContabilidadBalance = pick(BalancePageMod, ['default', 'BalancePage'], 'ContabilidadBalance');
+const ContabilidadConciliacion = pick(
+  ConciliacionPageMod,
+  ['default', 'ConciliacionPage'],
+  'ContabilidadConciliacion'
+);
+const ContabilidadConciliacionBancaria = pick(
+  ConciliacionBancariaPageMod,
+  ['default', 'ConciliacionBancariaPage'],
+  'ContabilidadConciliacionBancaria'
+);
+const ContabilidadAjustes = pick(
+  AjustesContablesPageMod,
+  ['default', 'AjustesContablesPage'],
+  'ContabilidadAjustes'
+);
+const ContabilidadGerencia = pick(
+  GerenciaPageMod,
+  ['default', 'GerenciaPage'],
+  'ContabilidadGerencia'
+);
 const IniciarSesion = pick(IniciarSesionMod, ['default', 'IniciarSesion'], 'IniciarSesion');
 const GastosFijosLista = pick(GastosFijosListaMod, ['default'], 'GastosFijosLista');
 const GastosFijosImportar = pick(GastosFijosImportarMod, ['default'], 'GastosFijosImportar');
@@ -104,6 +128,13 @@ export const App = () => (
                 <Route path="/contabilidad/mayor" element={<ContabilidadMayor />} />
                 <Route path="/contabilidad/pnl" element={<ContabilidadPnL />} />
                 <Route path="/contabilidad/balance" element={<ContabilidadBalance />} />
+                <Route path="/contabilidad/conciliacion" element={<ContabilidadConciliacion />} />
+                <Route
+                  path="/contabilidad/conciliacion-bancaria"
+                  element={<ContabilidadConciliacionBancaria />}
+                />
+                <Route path="/contabilidad/ajustes" element={<ContabilidadAjustes />} />
+                <Route path="/contabilidad/gerencia" element={<ContabilidadGerencia />} />
                 <Route path="/gastos-fijos" element={<GastosFijosLista />} />
                 <Route path="/gastos-fijos/importar" element={<GastosFijosImportar />} />
 
