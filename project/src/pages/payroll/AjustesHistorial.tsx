@@ -232,20 +232,25 @@ import React, {
   
     return (
       <div className="space-y-6 p-6">
-        {/* HEADER */}
-        <div className="flex flex-col gap-4 rounded-2xl border bg-white p-6 shadow-sm md:flex-row md:items-center md:justify-between">
-          <div>
-            <h1 className="text-2xl font-semibold text-slate-900">
+        <div className="flex flex-col gap-4 rounded-2xl border border-slate-200 bg-white/80 p-6 shadow-sm backdrop-blur-sm md:flex-row md:items-start md:justify-between">
+          <div className="space-y-2">
+            <span className="inline-flex w-fit items-center gap-2 rounded-full bg-blue-50 px-3 py-1 text-xs font-semibold text-blue-700">
+              <span className="h-2 w-2 rounded-full bg-blue-500" />
               Historial de ajustes
-            </h1>
-            <p className="text-sm text-slate-600">
-              Adelantos, descuentos y bonos aplicados a la planilla.
-            </p>
+            </span>
+            <div>
+              <h1 className="text-2xl font-semibold text-slate-900">
+                Ajustes aplicados a la planilla
+              </h1>
+              <p className="text-sm text-slate-600">
+                Adelantos, descuentos y bonos aplicados a la planilla.
+              </p>
+            </div>
           </div>
-  
+
           <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
             {sucursales.length > 0 ? (
-              <label className="flex items-center gap-2 rounded-xl border bg-gray-50 px-3 py-2 text-sm text-slate-700 shadow-inner">
+              <label className="flex items-center gap-2 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-700 shadow-inner">
                 <Building2 className="h-4 w-4 text-slate-500" />
                 <select
                   value={currentSucursalId ?? ""}
@@ -267,11 +272,11 @@ import React, {
                 Sin sucursales disponibles
               </span>
             )}
-  
+
             <button
               type="button"
               onClick={() => void fetchRows()}
-              className="inline-flex items-center gap-2 rounded-xl border px-4 py-2 text-sm font-medium text-slate-700 shadow-sm transition hover:bg-slate-50"
+              className="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 disabled:cursor-not-allowed"
               disabled={loading}
             >
               <RefreshCw
@@ -387,14 +392,14 @@ import React, {
               </div>
               <div className="max-h-[520px] overflow-auto">
                 <table className="min-w-full border-separate border-spacing-0 text-sm">
-                  <thead className="sticky top-0 z-10 bg-slate-50 text-left text-xs uppercase tracking-wide text-slate-500">
+                  <thead className="sticky top-0 z-10 bg-slate-50/90 text-left text-xs uppercase tracking-wide text-slate-500 backdrop-blur">
                     <tr>
-                      <th className="px-4 py-3 font-medium">Periodo</th>
-                      <th className="px-4 py-3 font-medium">Empleado</th>
-                      <th className="px-4 py-3 font-medium">Sucursal</th>
-                      <th className="px-4 py-3 font-medium text-center">Tipo</th>
-                      <th className="px-4 py-3 font-medium text-right">Monto</th>
-                      <th className="px-4 py-3 font-medium text-right">
+                      <th className="px-5 py-3 font-semibold">Periodo</th>
+                      <th className="px-4 py-3 font-semibold">Empleado</th>
+                      <th className="px-4 py-3 font-semibold">Sucursal</th>
+                      <th className="px-4 py-3 font-semibold text-center">Tipo</th>
+                      <th className="px-4 py-3 font-semibold text-right">Monto</th>
+                      <th className="px-5 py-3 font-semibold text-right">
                         Registrado
                       </th>
                     </tr>
@@ -407,7 +412,7 @@ import React, {
   
                       return (
                         <tr key={row.id} className="hover:bg-slate-50/60">
-                          <td className="px-4 py-3 align-middle text-xs text-slate-500">
+                          <td className="px-5 py-3 align-middle text-xs text-slate-500">
                             {row.periodo}
                           </td>
                           <td className="px-4 py-3 align-middle font-medium text-slate-900">
@@ -436,10 +441,10 @@ import React, {
                               {row.tipo}
                             </span>
                           </td>
-                          <td className="px-4 py-3 align-middle text-right">
+                          <td className="px-4 py-3 align-middle text-right font-semibold text-slate-900">
                             {formatCurrency(row.monto_signed ?? row.monto)}
                           </td>
-                          <td className="px-4 py-3 align-middle text-right text-xs text-slate-500">
+                          <td className="px-5 py-3 align-middle text-right text-xs text-slate-500">
                             {new Date(row.created_at).toLocaleString("es-PA", {
                               day: "2-digit",
                               month: "short",

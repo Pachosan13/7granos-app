@@ -675,9 +675,14 @@ export default function Calcular() {
   ])
 
   return (
-    <div className="space-y-6 p-6">
-      {/* HEADER */}
-      <div className="flex flex-col gap-4 rounded-2xl border bg-white p-6 shadow-sm md:flex-row md:items-center md:justify-between">
+  <div className="space-y-6 p-6">
+    {/* HEADER */}
+    <div className="flex flex-col gap-4 rounded-2xl border border-slate-200 bg-white/80 p-6 shadow-sm backdrop-blur-sm md:flex-row md:items-start md:justify-between">
+      <div className="space-y-2">
+        <span className="inline-flex w-fit items-center gap-2 rounded-full bg-blue-50 px-3 py-1 text-xs font-semibold text-blue-700">
+          <span className="h-2 w-2 rounded-full bg-blue-500" />
+          Cálculo actual de planilla
+        </span>
         <div>
           <h1 className="text-2xl font-semibold text-slate-900">
             Planilla quincenal
@@ -697,94 +702,95 @@ export default function Calcular() {
             </p>
           )}
         </div>
+      </div>
 
-        <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
-          {sucursales.length > 0 ? (
-            <label className="flex items-center gap-2 rounded-xl border bg-gray-50 px-3 py-2 text-sm text-slate-700 shadow-inner">
-              <Building2 className="h-4 w-4 text-slate-500" />
-              <select
-                value={currentSucursalId ?? ""}
-                onChange={handleSucursalChange}
-                className="bg-transparent text-sm focus:outline-none"
-              >
-                <option value="" disabled>
-                  Selecciona sucursal
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+        {sucursales.length > 0 ? (
+          <label className="flex items-center gap-2 rounded-xl border bg-gray-50 px-3 py-2 text-sm text-slate-700 shadow-inner">
+            <Building2 className="h-4 w-4 text-slate-500" />
+            <select
+              value={currentSucursalId ?? ""}
+              onChange={handleSucursalChange}
+              className="bg-transparent text-sm focus:outline-none"
+            >
+              <option value="" disabled>
+                Selecciona sucursal
+              </option>
+              {sucursales.map((sucursal) => (
+                <option key={String(sucursal.id)} value={String(sucursal.id)}>
+                  {sucursal.nombre}
                 </option>
-                {sucursales.map((sucursal) => (
-                  <option key={String(sucursal.id)} value={String(sucursal.id)}>
-                    {sucursal.nombre}
-                  </option>
-                ))}
-              </select>
-            </label>
-          ) : (
-            <span className="text-sm text-slate-500">
-              Sin sucursales disponibles
-            </span>
-          )}
+              ))}
+            </select>
+          </label>
+        ) : (
+          <span className="text-sm text-slate-500">
+            Sin sucursales disponibles
+          </span>
+        )}
 
-          <div className="flex flex-wrap items-center gap-2">
-            {/* Badge de estado: Planilla abierta / cerrada */}
+        <div className="flex flex-wrap items-center gap-2">
+          {/* Badge de estado: Planilla abierta / cerrada */}
+          <span
+            className={`inline-flex items-center gap-2 rounded-full px-3 py-1 text-xs font-semibold ${
+              isClosed
+                ? "bg-emerald-100 text-emerald-800"
+                : "bg-amber-100 text-amber-800"
+            }`}
+          >
             <span
-              className={`inline-flex items-center gap-2 rounded-full px-3 py-1 text-xs font-semibold ${
-                isClosed
-                  ? "bg-emerald-100 text-emerald-800"
-                  : "bg-amber-100 text-amber-800"
+              className={`h-2 w-2 rounded-full ${
+                isClosed ? "bg-emerald-500" : "bg-amber-500"
               }`}
-            >
-              <span
-                className={`h-2 w-2 rounded-full ${
-                  isClosed ? "bg-emerald-500" : "bg-amber-500"
-                }`}
-              />
-              {isClosed ? "Planilla cerrada" : "Planilla abierta"}
-            </span>
+            />
+            {isClosed ? "Planilla cerrada" : "Planilla abierta"}
+          </span>
 
-            {/* Refrescar */}
-            <button
-              type="button"
-              onClick={handleRefresh}
-              className="inline-flex items-center gap-2 rounded-xl border px-4 py-2 text-sm font-medium text-slate-700 shadow-sm transition hover:bg-slate-50"
-              disabled={loading}
-            >
-              <RefreshCw
-                className={`h-4 w-4 ${loading ? "animate-spin" : ""}`}
-              />
-              Refrescar
-            </button>
+          {/* Refrescar */}
+          <button
+            type="button"
+            onClick={handleRefresh}
+            className="inline-flex items-center gap-2 rounded-xl border px-4 py-2 text-sm font-medium text-slate-700 shadow-sm transition hover:bg-slate-50"
+            disabled={loading}
+          >
+            <RefreshCw
+              className={`h-4 w-4 ${loading ? "animate-spin" : ""}`}
+            />
+            Refrescar
+          </button>
 
-            {/* Descargar CSV */}
-            <button
-              type="button"
-              onClick={handleDownloadCsv}
-              className="inline-flex items-center gap-2 rounded-xl border px-4 py-2 text-sm font-medium text-slate-700 shadow-sm transition hover:bg-slate-50"
-              disabled={!filteredRows.length}
-            >
-              <Download className="h-4 w-4" />
-              Descargar CSV
-            </button>
+          {/* Descargar CSV */}
+          <button
+            type="button"
+            onClick={handleDownloadCsv}
+            className="inline-flex items-center gap-2 rounded-xl border px-4 py-2 text-sm font-medium text-slate-700 shadow-sm transition hover:bg-slate-50"
+            disabled={!filteredRows.length}
+          >
+            <Download className="h-4 w-4" />
+            Descargar CSV
+          </button>
 
-            {/* Auto Refresh */}
-            <button
-              type="button"
-              onClick={handleToggleAutoRefresh}
-              className={`inline-flex items-center gap-2 rounded-xl px-4 py-2 text-sm font-medium shadow-sm transition ${
-                autoRefresh
-                  ? "bg-emerald-500 text-white hover:bg-emerald-600"
-                  : "border text-slate-700 hover:bg-slate-50"
-              }`}
-              aria-pressed={autoRefresh}
-            >
-              {autoRefresh ? (
-                <ToggleRight className="h-4 w-4" />
-              ) : (
-                <ToggleLeft className="h-4 w-4" />
-              )}
-              Auto-refresh
-            </button>
-          </div>
+          {/* Auto Refresh */}
+          <button
+            type="button"
+            onClick={handleToggleAutoRefresh}
+            className={`inline-flex items-center gap-2 rounded-xl px-4 py-2 text-sm font-medium shadow-sm transition ${
+              autoRefresh
+                ? "bg-emerald-500 text-white hover:bg-emerald-600"
+                : "border text-slate-700 hover:bg-slate-50"
+            }`}
+            aria-pressed={autoRefresh}
+          >
+            {autoRefresh ? (
+              <ToggleRight className="h-4 w-4" />
+            ) : (
+              <ToggleLeft className="h-4 w-4" />
+            )}
+            Auto-refresh
+          </button>
         </div>
       </div>
+    </div>
 
       {/* ESTADOS */}
       {!currentSucursalId ? (
@@ -843,29 +849,29 @@ export default function Calcular() {
               <div className="relative">
                 <div className="max-h-[520px] overflow-auto">
                   <table className="min-w-full border-separate border-spacing-0 text-sm">
-                    <thead className="sticky top-0 z-10 bg-slate-50 text-left text-xs uppercase tracking-wide text-slate-500">
+                    <thead className="sticky top-0 z-10 bg-slate-50/90 text-left text-xs uppercase tracking-wide text-slate-500 backdrop-blur">
                       <tr>
-                        <th className="px-6 py-3 font-medium">Empleado</th>
-                        <th className="px-3 py-3 font-medium">Sucursal</th>
-                        <th className="px-3 py-3 font-medium text-center">
+                        <th className="px-5 py-3 font-semibold">Empleado</th>
+                        <th className="px-4 py-3 font-semibold">Sucursal</th>
+                        <th className="px-4 py-3 font-semibold text-center">
                           Ajustes
                         </th>
-                        <th className="px-3 py-3 font-medium text-right">
+                        <th className="px-4 py-3 font-semibold text-right">
                           Salario base
                         </th>
-                        <th className="px-3 py-3 font-medium text-right">
+                        <th className="px-4 py-3 font-semibold text-right">
                           Bruto quincenal
                         </th>
-                        <th className="px-3 py-3 font-medium text-right">
+                        <th className="px-4 py-3 font-semibold text-right">
                           Seguro social
                         </th>
-                        <th className="px-3 py-3 font-medium text-right">
+                        <th className="px-4 py-3 font-semibold text-right">
                           Seguro educativo
                         </th>
-                        <th className="px-3 py-3 font-medium text-right">
+                        <th className="px-4 py-3 font-semibold text-right">
                           Total deducciones
                         </th>
-                        <th className="px-6 py-3 font-medium text-right">
+                        <th className="px-5 py-3 font-semibold text-right">
                           Neto quincenal
                         </th>
                       </tr>
@@ -876,17 +882,17 @@ export default function Calcular() {
                           key={row.empleado_id}
                           className="hover:bg-slate-50/60"
                         >
-                          <td className="px-6 py-4 align-middle font-medium text-slate-900">
+                          <td className="px-5 py-3 align-middle font-medium text-slate-900">
                             {row.empleado}
                           </td>
-                          <td className="px-3 py-4 align-middle">
+                          <td className="px-4 py-3 align-middle text-slate-600">
                             {row.sucursal}
                           </td>
-                          <td className="px-3 py-4 align-middle text-center">
+                          <td className="px-4 py-3 align-middle text-center">
                             <button
                               type="button"
                               onClick={() => handleOpenAdjustment(row)}
-                              className="rounded-full border border-slate-200 px-3 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-50"
+                              className="rounded-full border border-slate-200 px-3 py-1 text-[11px] font-semibold text-slate-700 hover:bg-slate-50"
                             >
                               Ajustes
                             </button>
@@ -905,48 +911,48 @@ export default function Calcular() {
                               </div>
                             )}
                           </td>
-                          <td className="px-3 py-4 align-middle text-right font-medium text-slate-900">
+                          <td className="px-4 py-3 align-middle text-right font-semibold text-slate-900">
                             {formatCurrency(row.salario_base)}
                           </td>
-                          <td className="px-3 py-4 align-middle text-right">
+                          <td className="px-4 py-3 align-middle text-right text-slate-700">
                             {formatCurrency(row.salario_quincenal)}
                           </td>
-                          <td className="px-3 py-4 align-middle text-right">
+                          <td className="px-4 py-3 align-middle text-right text-slate-700">
                             {formatCurrency(row.seguro_social)}
                           </td>
-                          <td className="px-3 py-4 align-middle text-right">
+                          <td className="px-4 py-3 align-middle text-right text-slate-700">
                             {formatCurrency(row.seguro_educativo)}
                           </td>
-                          <td className="px-3 py-4 align-middle text-right font-medium text-slate-900">
+                          <td className="px-4 py-3 align-middle text-right font-semibold text-slate-900">
                             {formatCurrency(row.total_deducciones)}
                           </td>
-                          <td className="px-6 py-4 align-middle text-right font-semibold text-emerald-600">
+                          <td className="px-5 py-3 align-middle text-right font-semibold text-emerald-600">
                             {formatCurrency(row.salario_neto_quincenal)}
                           </td>
                         </tr>
                       ))}
                     </tbody>
                     <tfoot>
-                      <tr className="sticky bottom-0 bg-slate-100 text-sm font-semibold text-slate-900 shadow-[0_-4px_6px_-4px_rgba(15,23,42,0.25)]">
-                        <td className="px-6 py-4" colSpan={3}>
+                      <tr className="sticky bottom-0 bg-slate-100 text-sm font-semibold text-slate-900 shadow-[0_-4px_6px_-4px_rgba(15,23,42,0.2)]">
+                        <td className="px-5 py-3" colSpan={3}>
                           Totales visibles ({totals.empleados})
                         </td>
-                        <td className="px-3 py-4 text-right">
+                        <td className="px-4 py-3 text-right">
                           {formatCurrency(totals.base)}
                         </td>
-                        <td className="px-3 py-4 text-right">
+                        <td className="px-4 py-3 text-right">
                           {formatCurrency(totals.bruto)}
                         </td>
-                        <td className="px-3 py-4 text-right">
+                        <td className="px-4 py-3 text-right">
                           {formatCurrency(totals.seguroSocial)}
                         </td>
-                        <td className="px-3 py-4 text-right">
+                        <td className="px-4 py-3 text-right">
                           {formatCurrency(totals.seguroEducativo)}
                         </td>
-                        <td className="px-3 py-4 text-right">
+                        <td className="px-4 py-3 text-right">
                           {formatCurrency(totals.deducciones)}
                         </td>
-                        <td className="px-6 py-4 text-right text-emerald-700">
+                        <td className="px-5 py-3 text-right text-emerald-700">
                           {formatCurrency(totals.neto)}
                         </td>
                       </tr>
