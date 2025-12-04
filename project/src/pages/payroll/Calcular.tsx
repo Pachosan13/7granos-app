@@ -29,11 +29,10 @@ type Row = {
   seguro_educativo: number
   total_deducciones: number
   salario_neto_quincenal: number
-
-   // nuevos campos que vienen de v_ui_planilla_final
-   ajustes_descuentos?: number | null
-   ajustes_bonos?: number | null
-   cerrada?: boolean | null
+  // nuevos campos que vienen de v_ui_planilla_final
+  ajustes_descuentos?: number | null
+  ajustes_bonos?: number | null
+  cerrada?: boolean | null
 }
 
 type Sucursal = { id: string; nombre: string }
@@ -213,7 +212,10 @@ function AdjustmentModal({
         })
 
       if (insertError) {
-        console.error("[AdjustmentModal] Error insert payroll_ajustes", insertError)
+        console.error(
+          "[AdjustmentModal] Error insert payroll_ajustes",
+          insertError
+        )
         throw insertError
       }
 
@@ -624,11 +626,11 @@ export default function Calcular() {
   const showEmptyState =
     !loading && !error && !!currentSucursalId && filteredRows.length === 0
 
-    const isClosed = useMemo(() => {
-      if (!rows.length) return false
-      // asumimos mismo estado para toda la quincena
-      return Boolean(rows[0].cerrada)
-    }, [rows])    
+  const isClosed = useMemo(() => {
+    if (!rows.length) return false
+    // asumimos mismo estado para toda la quincena
+    return Boolean(rows[0].cerrada)
+  }, [rows])
 
   const handleOpenAdjustment = (row: Row) => {
     if (!currentSucursalId) return
@@ -673,111 +675,122 @@ export default function Calcular() {
   ])
 
   return (
-    <div className="space-y-6 p-6">
-      <div className="flex flex-col gap-4 rounded-2xl border border-slate-200 bg-white/80 p-6 shadow-sm backdrop-blur-sm md:flex-row md:items-start md:justify-between">
-        <div className="space-y-2">
-          <span className="inline-flex w-fit items-center gap-2 rounded-full bg-blue-50 px-3 py-1 text-xs font-semibold text-blue-700">
-            <span className="h-2 w-2 rounded-full bg-blue-500" />
-            Cálculo actual de planilla
-          </span>
-          <div>
-            <h1 className="text-2xl font-semibold text-slate-900">Planilla quincenal</h1>
-            <p className="text-sm text-slate-600">
-              Consulta directa de Supabase · payroll_detalle_quincena.
-            </p>
-          </div>
+  <div className="space-y-6 p-6">
+    {/* HEADER */}
+    <div className="flex flex-col gap-4 rounded-2xl border border-slate-200 bg-white/80 p-6 shadow-sm backdrop-blur-sm md:flex-row md:items-start md:justify-between">
+      <div className="space-y-2">
+        <span className="inline-flex w-fit items-center gap-2 rounded-full bg-blue-50 px-3 py-1 text-xs font-semibold text-blue-700">
+          <span className="h-2 w-2 rounded-full bg-blue-500" />
+          Cálculo actual de planilla
+        </span>
+        <div>
+          <h1 className="text-2xl font-semibold text-slate-900">
+            Planilla quincenal
+          </h1>
+          <p className="text-sm text-slate-600">
+            Consulta directa de Supabase · v_ui_planilla_final.
+          </p>
           {lastUpdatedLabel && (
-            <p className="text-xs text-slate-500">Última actualización: {lastUpdatedLabel}</p>
+            <p className="mt-2 text-xs text-slate-500">
+              Última actualización: {lastUpdatedLabel}
+            </p>
           )}
           {isDemo && (
-            <p className="inline-flex items-center gap-2 rounded-full bg-amber-50 px-3 py-1 text-xs text-amber-700">
+            <p className="mt-2 inline-flex items-center gap-2 rounded-full bg-amber-100 px-3 py-1 text-xs text-amber-700">
               <AlertCircle className="h-3 w-3" />
               Modo demo activo{demoReason ? ` · ${demoReason}` : ""}
             </p>
           )}
         </div>
+      </div>
 
-        <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
-          {sucursales.length > 0 ? (
-            <label className="flex items-center gap-2 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-700 shadow-inner">
-              <Building2 className="h-4 w-4 text-slate-500" />
-              <select
-                value={currentSucursalId ?? ""}
-                onChange={handleSucursalChange}
-                className="bg-transparent text-sm focus:outline-none"
-              >
-                <option value="" disabled>
-                  Selecciona sucursal
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+        {sucursales.length > 0 ? (
+          <label className="flex items-center gap-2 rounded-xl border bg-gray-50 px-3 py-2 text-sm text-slate-700 shadow-inner">
+            <Building2 className="h-4 w-4 text-slate-500" />
+            <select
+              value={currentSucursalId ?? ""}
+              onChange={handleSucursalChange}
+              className="bg-transparent text-sm focus:outline-none"
+            >
+              <option value="" disabled>
+                Selecciona sucursal
+              </option>
+              {sucursales.map((sucursal) => (
+                <option key={String(sucursal.id)} value={String(sucursal.id)}>
+                  {sucursal.nombre}
                 </option>
-                {sucursales.map((sucursal) => (
-                  <option key={String(sucursal.id)} value={String(sucursal.id)}>
-                    {sucursal.nombre}
-                  </option>
-                ))}
-              </select>
-            </label>
-          ) : (
-            <span className="text-sm text-slate-500">
-              Sin sucursales disponibles
-            </span>
-          )}
+              ))}
+            </select>
+          </label>
+        ) : (
+          <span className="text-sm text-slate-500">
+            Sin sucursales disponibles
+          </span>
+        )}
 
-          <div className="flex flex-wrap items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          {/* Badge de estado: Planilla abierta / cerrada */}
+          <span
+            className={`inline-flex items-center gap-2 rounded-full px-3 py-1 text-xs font-semibold ${
+              isClosed
+                ? "bg-emerald-100 text-emerald-800"
+                : "bg-amber-100 text-amber-800"
+            }`}
+          >
             <span
-              className={`inline-flex items-center gap-2 rounded-full px-3 py-1 text-xs font-semibold ${
-                isClosed
-                  ? "bg-emerald-50 text-emerald-700"
-                  : "bg-amber-50 text-amber-700"
+              className={`h-2 w-2 rounded-full ${
+                isClosed ? "bg-emerald-500" : "bg-amber-500"
               }`}
-            >
-              <span
-                className={`h-2 w-2 rounded-full ${
-                  isClosed ? "bg-emerald-500" : "bg-amber-500"
-                }`}
-              />
-              {isClosed ? "Planilla cerrada" : "Planilla abierta"}
-            </span>
+            />
+            {isClosed ? "Planilla cerrada" : "Planilla abierta"}
+          </span>
 
-            <button
-              type="button"
-              onClick={handleRefresh}
-              className="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 disabled:cursor-not-allowed"
-              disabled={loading}
-            >
-              <RefreshCw className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} />
-              Refrescar
-            </button>
+          {/* Refrescar */}
+          <button
+            type="button"
+            onClick={handleRefresh}
+            className="inline-flex items-center gap-2 rounded-xl border px-4 py-2 text-sm font-medium text-slate-700 shadow-sm transition hover:bg-slate-50"
+            disabled={loading}
+          >
+            <RefreshCw
+              className={`h-4 w-4 ${loading ? "animate-spin" : ""}`}
+            />
+            Refrescar
+          </button>
 
-            <button
-              type="button"
-              onClick={handleDownloadCsv}
-              className="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
-              disabled={!filteredRows.length}
-            >
-              <Download className="h-4 w-4" />
-              Descargar CSV
-            </button>
+          {/* Descargar CSV */}
+          <button
+            type="button"
+            onClick={handleDownloadCsv}
+            className="inline-flex items-center gap-2 rounded-xl border px-4 py-2 text-sm font-medium text-slate-700 shadow-sm transition hover:bg-slate-50"
+            disabled={!filteredRows.length}
+          >
+            <Download className="h-4 w-4" />
+            Descargar CSV
+          </button>
 
-            <button
-              type="button"
-              onClick={handleToggleAutoRefresh}
-              className={`inline-flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-semibold shadow-sm transition ${
-                autoRefresh
-                  ? "bg-emerald-600 text-white hover:bg-emerald-700"
-                  : "border border-slate-200 text-slate-700 hover:bg-slate-50"
-              }`}
-              aria-pressed={autoRefresh}
-            >
-              {autoRefresh ? (
-                <ToggleRight className="h-4 w-4" />
-              ) : (
-                <ToggleLeft className="h-4 w-4" />
-              )}
-              Auto-refresh
-            </button>
-          </div>
+          {/* Auto Refresh */}
+          <button
+            type="button"
+            onClick={handleToggleAutoRefresh}
+            className={`inline-flex items-center gap-2 rounded-xl px-4 py-2 text-sm font-medium shadow-sm transition ${
+              autoRefresh
+                ? "bg-emerald-500 text-white hover:bg-emerald-600"
+                : "border text-slate-700 hover:bg-slate-50"
+            }`}
+            aria-pressed={autoRefresh}
+          >
+            {autoRefresh ? (
+              <ToggleRight className="h-4 w-4" />
+            ) : (
+              <ToggleLeft className="h-4 w-4" />
+            )}
+            Auto-refresh
+          </button>
         </div>
       </div>
+    </div>
 
       {/* ESTADOS */}
       {!currentSucursalId ? (
@@ -883,6 +896,20 @@ export default function Calcular() {
                             >
                               Ajustes
                             </button>
+                            {(row.ajustes_descuentos || row.ajustes_bonos) && (
+                              <div className="mt-1 text-[11px] text-slate-500">
+                                {row.ajustes_descuentos
+                                  ? `-${formatCurrency(
+                                      row.ajustes_descuentos
+                                    )}`
+                                  : null}
+                                {row.ajustes_bonos
+                                  ? ` · +${formatCurrency(
+                                      row.ajustes_bonos
+                                    )}`
+                                  : null}
+                              </div>
+                            )}
                           </td>
                           <td className="px-4 py-3 align-middle text-right font-semibold text-slate-900">
                             {formatCurrency(row.salario_base)}
@@ -954,13 +981,13 @@ export default function Calcular() {
                   <button
                     type="button"
                     onClick={handleClosePayroll}
-                    disabled={closingPayroll}
+                    disabled={closingPayroll || isClosed}
                     className="inline-flex items-center gap-2 rounded-xl bg-emerald-600 px-3 py-2 text-xs font-semibold text-white shadow-sm hover:bg-emerald-700 disabled:opacity-70"
                   >
                     {closingPayroll && (
                       <Loader2 className="h-3 w-3 animate-spin" />
                     )}
-                    Cerrar quincena
+                    {isClosed ? "Quincena cerrada" : "Cerrar quincena"}
                   </button>
                 </div>
               </div>
