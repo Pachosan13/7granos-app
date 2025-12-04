@@ -29,11 +29,10 @@ type Row = {
   seguro_educativo: number
   total_deducciones: number
   salario_neto_quincenal: number
-
-   // nuevos campos que vienen de v_ui_planilla_final
-   ajustes_descuentos?: number | null
-   ajustes_bonos?: number | null
-   cerrada?: boolean | null
+  // nuevos campos que vienen de v_ui_planilla_final
+  ajustes_descuentos?: number | null
+  ajustes_bonos?: number | null
+  cerrada?: boolean | null
 }
 
 type Sucursal = { id: string; nombre: string }
@@ -213,7 +212,10 @@ function AdjustmentModal({
         })
 
       if (insertError) {
-        console.error("[AdjustmentModal] Error insert payroll_ajustes", insertError)
+        console.error(
+          "[AdjustmentModal] Error insert payroll_ajustes",
+          insertError
+        )
         throw insertError
       }
 
@@ -624,11 +626,11 @@ export default function Calcular() {
   const showEmptyState =
     !loading && !error && !!currentSucursalId && filteredRows.length === 0
 
-    const isClosed = useMemo(() => {
-      if (!rows.length) return false
-      // asumimos mismo estado para toda la quincena
-      return Boolean(rows[0].cerrada)
-    }, [rows])    
+  const isClosed = useMemo(() => {
+    if (!rows.length) return false
+    // asumimos mismo estado para toda la quincena
+    return Boolean(rows[0].cerrada)
+  }, [rows])
 
   const handleOpenAdjustment = (row: Row) => {
     if (!currentSucursalId) return
@@ -675,14 +677,13 @@ export default function Calcular() {
   return (
     <div className="space-y-6 p-6">
       {/* HEADER */}
-            {/* HEADER */}
-            <div className="flex flex-col gap-4 rounded-2xl border bg-white p-6 shadow-sm md:flex-row md:items-center md:justify-between">
+      <div className="flex flex-col gap-4 rounded-2xl border bg-white p-6 shadow-sm md:flex-row md:items-center md:justify-between">
         <div>
           <h1 className="text-2xl font-semibold text-slate-900">
             Planilla quincenal
           </h1>
           <p className="text-sm text-slate-600">
-            Consulta directa de Supabase · payroll_detalle_quincena.
+            Consulta directa de Supabase · v_ui_planilla_final.
           </p>
           {lastUpdatedLabel && (
             <p className="mt-2 text-xs text-slate-500">
@@ -889,6 +890,20 @@ export default function Calcular() {
                             >
                               Ajustes
                             </button>
+                            {(row.ajustes_descuentos || row.ajustes_bonos) && (
+                              <div className="mt-1 text-[11px] text-slate-500">
+                                {row.ajustes_descuentos
+                                  ? `-${formatCurrency(
+                                      row.ajustes_descuentos
+                                    )}`
+                                  : null}
+                                {row.ajustes_bonos
+                                  ? ` · +${formatCurrency(
+                                      row.ajustes_bonos
+                                    )}`
+                                  : null}
+                              </div>
+                            )}
                           </td>
                           <td className="px-3 py-4 align-middle text-right font-medium text-slate-900">
                             {formatCurrency(row.salario_base)}
@@ -960,13 +975,13 @@ export default function Calcular() {
                   <button
                     type="button"
                     onClick={handleClosePayroll}
-                    disabled={closingPayroll}
+                    disabled={closingPayroll || isClosed}
                     className="inline-flex items-center gap-2 rounded-xl bg-emerald-600 px-3 py-2 text-xs font-semibold text-white shadow-sm hover:bg-emerald-700 disabled:opacity-70"
                   >
                     {closingPayroll && (
                       <Loader2 className="h-3 w-3 animate-spin" />
                     )}
-                    Cerrar quincena
+                    {isClosed ? "Quincena cerrada" : "Cerrar quincena"}
                   </button>
                 </div>
               </div>
